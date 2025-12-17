@@ -3,9 +3,19 @@
 
 This repository contains the source code of the **LEGO** framework and the scripts used to execute and evaluate all benchmarks in the paper. LEGO provides an algebraic, compiler-agnostic framework for specifying and transforming memory layouts. Through integrations with Triton, CUDA, and MLIR, we compare LEGO-generated kernels with existing implementations and demonstrate that careful data layout reorganization can achieve state-of-the-art performance or significantly improve performance.
 
+## Publication
+LEGO is based on the following research work:
+
+> **LEGO: A Layout Expression Language for Code Generation of Hierarchical Mapping**  
+> Amir Mohammad Tavakkoli, Cosmin Oancea, and Mary Hall.  
+> https://arxiv.org/pdf/2505.08091
+> 
 ## Repository
 
 - **URL:** https://github.com/tavakkoliamirmohammad/lego
+- **Paper** https://arxiv.org/pdf/2505.08091
+
+
 
 ## Main Contributions
 
