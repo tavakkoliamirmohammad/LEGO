@@ -1,0 +1,96 @@
+=====================================
+Running tests with SIZE = 32768
+=====================================
+original
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
+./needle 32768 10
+WG size of kernel = 64 
+Execution time: 64.231712
+
+antidiag
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
+./needle 32768 10
+WG size of kernel = 64 
+Execution time: 31.274342
+
+
+=====================================
+Running tests with SIZE = 16384
+=====================================
+original
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
+./needle 16384 10
+WG size of kernel = 64 
+Execution time: 19.695091
+
+antidiag
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
+./needle 16384 10
+WG size of kernel = 64 
+Execution time: 12.367600
+
+
+=====================================
+Running tests with SIZE = 8192
+=====================================
+original
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
+./needle 8192 10
+WG size of kernel = 64 
+Execution time: 8.209180
+
+antidiag
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
+./needle 8192 10
+WG size of kernel = 64 
+Execution time: 5.990470
+
+
+=====================================
+Running tests with SIZE = 4096
+=====================================
+original
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
+./needle 4096 10
+WG size of kernel = 64 
+Execution time: 4.020090
+
+antidiag
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
+./needle 4096 10
+WG size of kernel = 64 
+Execution time: 3.029040
+
+
+=====================================
+Running tests with SIZE = 2048
+=====================================
+original
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
+./needle 2048 10
+WG size of kernel = 64 
+Execution time: 2.124750
+
+antidiag
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
+./needle 2048 10
+WG size of kernel = 64 
+Execution time: 1.601070
+
+
+=====================================
+Running tests with SIZE = 1024
+=====================================
+original
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
+./needle 1024 10
+WG size of kernel = 64 
+Execution time: 1.035800
+
+antidiag
+nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
+./needle 1024 10
+WG size of kernel = 64 
+Execution time: 0.754870
+
+

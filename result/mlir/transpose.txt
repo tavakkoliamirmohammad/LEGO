@@ -1,0 +1,54 @@
+Transpose Naive: 256: 
+Median: 0.007520 ms
+CUDA Transpose Naive: 256: 
+Median: 0.006925 ms
+Transpose Shared: 256: 
+Median: 0.005280 ms
+CUDA Coalesced Naive: 256: 
+Median: 0.004800 ms
+------------------------------------------
+Transpose Naive: 512: 
+Median: 0.013890 ms
+CUDA Transpose Naive: 512: 
+Median: 0.013340 ms
+Transpose Shared: 512: 
+Median: 0.008000 ms
+CUDA Coalesced Naive: 512: 
+Median: 0.007440 ms
+------------------------------------------
+Transpose Naive: 1024: 
+Median: 0.039620 ms
+CUDA Transpose Naive: 1024: 
+Median: 0.039085 ms
+Transpose Shared: 1024: 
+Median: 0.016220 ms
+CUDA Coalesced Naive: 1024: 
+Median: 0.016060 ms
+------------------------------------------
+Transpose Naive: 2048: 
+Median: 0.162225 ms
+CUDA Transpose Naive: 2048: 
+Median: 0.158050 ms
+Transpose Shared: 2048: 
+Median: 0.049220 ms
+CUDA Coalesced Naive: 2048: 
+Median: 0.050080 ms
+------------------------------------------
+Transpose Naive: 4096: 
+Median: 0.753965 ms
+CUDA Transpose Naive: 4096: 
+Median: 0.763425 ms
+Transpose Shared: 4096: 
+Median: 0.181075 ms
+CUDA Coalesced Naive: 4096: 
+Median: 0.186880 ms
+------------------------------------------
+Transpose Naive: 8192: 
+Median: 2.815000 ms
+CUDA Transpose Naive: 8192: 
+Median: 3.060000 ms
+Transpose Shared: 8192: 
+Median: 0.706940 ms
+CUDA Coalesced Naive: 8192: 
+Median: 0.729775 ms
+------------------------------------------

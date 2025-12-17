@@ -1,0 +1,14 @@
+----
+nvcc -O3 -use_fast_math -lm -DRD_RADIUS=1 -o bricks-f3d main.cu
+./bricks-f3d
+Dims: NX=384 NY=384 NZ=384 (total elements=56623104) | radius=1 | c is 8x8x8
+Timing over 100 repetitions:
+  f3d_naive : 1132.725 ms total (11.327 ms / launch)
+  f3d_bricks: 321.173 ms total (3.212 ms / launch)
+----
+nvcc -O3 -use_fast_math -lm -DRD_RADIUS=2 -o bricks-f3d main.cu
+./bricks-f3d
+Dims: NX=384 NY=384 NZ=384 (total elements=56623104) | radius=2 | c is 8x8x8
+Timing over 100 repetitions:
+  f3d_naive : 4847.717 ms total (48.477 ms / launch)
+  f3d_bricks: 1350.101 ms total (13.501 ms / launch)

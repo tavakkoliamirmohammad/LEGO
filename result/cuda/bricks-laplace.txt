@@ -1,0 +1,28 @@
+----
+nvcc -O3 -use_fast_math -lm -DRD_RADIUS=1 -o bricks-f3d main.cu
+./bricks-f3d
+Dims: NX=384 NY=384 NZ=384 (total elements=56623104) | radius=1 | c is 8x8x8
+Timing over 100 repetitions:
+  laplacian_naive : 341.532 ms total (3.415 ms / launch)
+  laplacian_bricks: 99.327 ms total (0.993 ms / launch)
+----
+nvcc -O3 -use_fast_math -lm -DRD_RADIUS=2 -o bricks-f3d main.cu
+./bricks-f3d
+Dims: NX=384 NY=384 NZ=384 (total elements=56623104) | radius=2 | c is 8x8x8
+Timing over 100 repetitions:
+  laplacian_naive : 557.567 ms total (5.576 ms / launch)
+  laplacian_bricks: 148.497 ms total (1.485 ms / launch)
+----
+nvcc -O3 -use_fast_math -lm -DRD_RADIUS=3 -o bricks-f3d main.cu
+./bricks-f3d
+Dims: NX=384 NY=384 NZ=384 (total elements=56623104) | radius=3 | c is 8x8x8
+Timing over 100 repetitions:
+  laplacian_naive : 766.346 ms total (7.663 ms / launch)
+  laplacian_bricks: 207.104 ms total (2.071 ms / launch)
+----
+nvcc -O3 -use_fast_math -lm -DRD_RADIUS=4 -o bricks-f3d main.cu
+./bricks-f3d
+Dims: NX=384 NY=384 NZ=384 (total elements=56623104) | radius=4 | c is 8x8x8
+Timing over 100 repetitions:
+  laplacian_naive : 965.335 ms total (9.653 ms / launch)
+  laplacian_bricks: 249.609 ms total (2.496 ms / launch)

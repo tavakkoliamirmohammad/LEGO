@@ -1,0 +1,5 @@
+
+Throughput (GB/s)
+
+  Size       Transpose Naive      CUDA Transpose Naive      Transpose Shared        CUDA Coalesced Naive
+----------------------------------------------------------------------------------------------------

@@ -1,0 +1,108 @@
+----
+nvcc -O3 -use_fast_math -lm -DLEGO_R16=1 -DRD_WG_SIZE_0=64 -o lud-lego lud.cu
+./lud-lego -s 4096 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =4096
+Kernel Exec Time (ms) over 100 runs -> min=57.115  max=57.408  avg=57.168  median=57.160
+./lud-lego -s 8192 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =8192
+Kernel Exec Time (ms) over 100 runs -> min=258.524  max=258.800  avg=258.628  median=258.623
+./lud-lego -s 16384 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =16384
+Kernel Exec Time (ms) over 100 runs -> min=1688.556  max=1690.999  avg=1689.526  median=1689.382
+./lud-lego -s 32768 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =32768
+Kernel Exec Time (ms) over 100 runs -> min=12832.106  max=12857.728  avg=12836.572  median=12835.950
+----
+nvcc -O3 -use_fast_math -lm -DLEGO_R8=1 -DRD_WG_SIZE_0=64 -o lud-lego lud.cu
+./lud-lego -s 4096 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =4096
+Kernel Exec Time (ms) over 100 runs -> min=36.110  max=36.179  avg=36.123  median=36.122
+./lud-lego -s 8192 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =8192
+Kernel Exec Time (ms) over 100 runs -> min=106.595  max=106.965  avg=106.706  median=106.734
+./lud-lego -s 16384 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =16384
+Kernel Exec Time (ms) over 100 runs -> min=482.807  max=484.353  avg=483.352  median=483.563
+./lud-lego -s 32768 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =32768
+Kernel Exec Time (ms) over 100 runs -> min=3069.657  max=3079.687  avg=3075.011  median=3074.830
+----
+nvcc -O3 -use_fast_math -lm -DLEGO_R4=1 -DRD_WG_SIZE_0=64 -o lud-lego lud.cu
+./lud-lego -s 4096 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =4096
+Kernel Exec Time (ms) over 100 runs -> min=33.719  max=33.801  avg=33.733  median=33.723
+./lud-lego -s 8192 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =8192
+Kernel Exec Time (ms) over 100 runs -> min=89.047  max=89.259  avg=89.112  median=89.089
+./lud-lego -s 16384 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =16384
+Kernel Exec Time (ms) over 100 runs -> min=352.779  max=356.025  avg=354.483  median=354.578
+./lud-lego -s 32768 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =32768
+Kernel Exec Time (ms) over 100 runs -> min=2111.077  max=2121.155  avg=2115.553  median=2115.298
+----
+nvcc -O3 -use_fast_math -lm -DLEGO_R2=1 -DRD_WG_SIZE_0=64 -o lud-lego lud.cu
+./lud-lego -s 4096 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =4096
+Kernel Exec Time (ms) over 100 runs -> min=35.233  max=35.580  avg=35.258  median=35.239
+./lud-lego -s 8192 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =8192
+Kernel Exec Time (ms) over 100 runs -> min=102.038  max=102.226  avg=102.066  median=102.052
+./lud-lego -s 16384 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =16384
+Kernel Exec Time (ms) over 100 runs -> min=455.856  max=457.926  avg=456.664  median=456.617
+./lud-lego -s 32768 -r 100 -w 25
+WG size of kernel = 64 X 64
+Generate input matrix internally, size =32768
+Kernel Exec Time (ms) over 100 runs -> min=2949.961  max=2961.920  avg=2956.125  median=2956.109
+----
+nvcc -O3 -use_fast_math -lm -DRD_WG_SIZE_0=32 -o lud-orig lud.cu
+./lud-orig -s 4096 -r 100 -w 25
+WG size of kernel = 32 X 32
+Generate input matrix internally, size =4096
+Kernel Exec Time (ms) over 100 runs -> min=25.603  max=25.794  avg=25.633  median=25.611
+./lud-orig -s 8192 -r 100 -w 25
+WG size of kernel = 32 X 32
+Generate input matrix internally, size =8192
+Kernel Exec Time (ms) over 100 runs -> min=111.826  max=112.706  avg=112.013  median=111.939
+./lud-orig -s 16384 -r 100 -w 25
+WG size of kernel = 32 X 32
+Generate input matrix internally, size =16384
+Kernel Exec Time (ms) over 100 runs -> min=722.056  max=726.883  avg=724.565  median=724.504
+./lud-orig -s 32768 -r 100 -w 25
+WG size of kernel = 32 X 32
+Generate input matrix internally, size =32768
+Kernel Exec Time (ms) over 100 runs -> min=5462.915  max=5484.955  avg=5472.702  median=5471.689
+----
+nvcc -O3 -use_fast_math -lm -DRD_WG_SIZE_0=16 -o lud-orig lud.cu
+./lud-orig -s 4096 -r 100 -w 25
+WG size of kernel = 16 X 16
+Generate input matrix internally, size =4096
+Kernel Exec Time (ms) over 100 runs -> min=26.514  max=26.768  avg=26.604  median=26.590
+./lud-orig -s 8192 -r 100 -w 25
+WG size of kernel = 16 X 16
+Generate input matrix internally, size =8192
+Kernel Exec Time (ms) over 100 runs -> min=172.168  max=172.660  avg=172.427  median=172.428
+./lud-orig -s 16384 -r 100 -w 25
+WG size of kernel = 16 X 16
+Generate input matrix internally, size =16384
+Kernel Exec Time (ms) over 100 runs -> min=1285.050  max=1285.778  avg=1285.373  median=1285.365
+./lud-orig -s 32768 -r 100 -w 25
+WG size of kernel = 16 X 16
+Generate input matrix internally, size =32768
+Kernel Exec Time (ms) over 100 runs -> min=10163.171  max=10165.986  avg=10164.457  median=10164.462
