@@ -120,7 +120,7 @@ class SympyMLIRPrinter:
             @functools.wraps(body)
             def wrapper():
                 token_ty = SympyMLIRPrinter.get_token_type()
-                token = gpu.wait(token_ty, [])
+                token = gpu.wait([])
                 # allocate input
                 for i in set(ins + outs):
                     token = i.gpu_allocate(token)
@@ -130,19 +130,25 @@ class SympyMLIRPrinter:
                     i.fill_host()
                     token = i.copy_to_device(token)
 
-                gpu.WaitOp(token_ty, [token])
+                gpu.wait([token])
 
                 launch_op = gpu.LaunchOp(
-                    None,
-                    [],
-                    *map(arith.ConstantOp.create_index, gridSize),
-                    *map(arith.ConstantOp.create_index, blockSize)
+                    list(map(arith.ConstantOp.create_index, gridSize)),
+                    list(map(arith.ConstantOp.create_index, blockSize)),
+                    async_dependencies=[]
                 )
                 launch_op.attributes["workgroup_attributions"] = IntegerAttr.get(
                     T.i64(), len(workgroup_memory))
-                launch_op.body.blocks.append(
-                    *([T.index()] * 12 + [w.get_memref_type_address_space(3) for w in workgroup_memory] + [p.get_memref_type_address_space(5) for p in private_memory]))
-                with InsertionPoint(launch_op.body.blocks[0]):
+                
+                # Use the existing block created by LaunchOp
+                block = launch_op.body.blocks[0]
+                # The block already has 12 arguments (indices). We append workgroup and private memory arguments.
+                for w in workgroup_memory:
+                    block.add_argument(w.get_memref_type_address_space(3), Location.unknown())
+                for p in private_memory:
+                    block.add_argument(p.get_memref_type_address_space(5), Location.unknown())
+
+                with InsertionPoint(block):
                     for i in set(ins + outs):
                         i.set_memory_space(MemorySpace.GLOBAL_MEMORY)
                         memref.assume_alignment(i.gpu_alloc_ref, 128)
@@ -434,21 +440,20 @@ class MLIRTensor:
                 jj = printer.from_ssa_to_sym(printer.get_int_from_index(j))
 
                 value_read = self[ii, jj]
-                gpu.printf("%.0f\t", [value_read])
+                gpu.printf("%.0f\t", value_read)
                 affine.yield_([])
-            gpu.printf("\n", [])
+            gpu.printf("\n")
             affine.yield_([])
-        gpu.printf("\n", [])
+        gpu.printf("\n")
 
     def print_matrix_kernel(self, mem, M, N):
         launch_op = gpu.LaunchOp(
-            None,
-            [],
-            *map(arith.ConstantOp.create_index, [1, 1, 1]),
-            *map(arith.ConstantOp.create_index, [1, 1, 1])
+            list(map(arith.ConstantOp.create_index, [1, 1, 1])),
+            list(map(arith.ConstantOp.create_index, [1, 1, 1])),
+            async_dependencies=[]
         )
-        launch_op.body.blocks.append(*([T.index()] * 12))
-        with ir.InsertionPoint(launch_op.body.blocks[0]):
+        block = launch_op.body.blocks[0]
+        with ir.InsertionPoint(block):
             self.print_matrix(mem, M, N)
             gpu.terminator()
 
