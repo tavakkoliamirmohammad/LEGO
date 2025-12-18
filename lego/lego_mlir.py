@@ -1,7 +1,7 @@
 from .lego import *
 import functools
 
-from mlir.dialects import arith, scf, func, affine, gpu, memref, vector
+from mlir.dialects import arith, scf, func, affine, gpu, memref
 from mlir.ir import (
     Context,
     Location,
@@ -81,9 +81,6 @@ class SympyMLIRPrinter:
     def insert_barrier(self):
         gpu.barrier()
 
-    @staticmethod
-    def get_constant_int(val):
-        return arith.ConstantOp(T.i32(), val).result
 
     def generate_loop(self, l: 'GroupBy', step=1, iter_args=[]):
         def decorator_body(body):
@@ -274,93 +271,6 @@ class SympyMLIRPrinter:
 
         return recurse(0)
 
-    # @staticmethod
-    # def contract(smem_a: MatrixLayout, smem_b: MatrixLayout, smem_c: MatrixLayout, size=[16, 8, 16], input=[[0, 2], [2, 1]], output=[0, 1], type=None):
-    #     def get_elements_by_indices(lst, indices):
-    #         return [lst[i] for i in indices]
-    #     vector_output = VectorType.get(
-    #         get_elements_by_indices(size, output), type)
-    #     vector_input0 = VectorType.get(
-    #         get_elements_by_indices(size, input[0]),  type)
-    #     vector_input1 = VectorType.get(
-    #         get_elements_by_indices(size, input[1]),  type)
-    #     index = IndexType.get()
-
-    #     # Create constants
-    #     cst_0 = arith.ConstantOp(vector_output, DenseElementsAttr.get_splat(
-    #         vector_output, FloatAttr.get(type, 0.0)))
-
-    #     # Identity permutation map for default
-    #     identity_map = AffineMap.get_identity(2)
-    #     for i in [x * 16 for x in range(2)]:
-    #         # Create vector.transfer_read for %A
-    #         c0 = arith.ConstantOp(index, IntegerAttr.get(index, i))
-    #         c3 = arith.ConstantOp(index, IntegerAttr.get(index, 0))
-    #         cst = arith.ConstantOp(type, FloatAttr.get(type, 0.0))
-    #         A = vector.TransferReadOp(
-    #             vector_input0,
-    #             smem_a.get_memory_ref_address_space(),
-    #             [c0.result, c3.result],
-    #             permutation_map=identity_map,
-    #             padding=cst.result,
-    #             in_bounds=[True, True],
-    #         )
-    #         for j in [x * 8 for x in range(4)]:
-    #             c1 = arith.ConstantOp(index, IntegerAttr.get(index, j))
-
-    #             # Create permutation map for %B (as per 'permutation_map = #map0' in original MLIR code)
-    #             # Define map0; in this case, we'll use the identity map
-    #             map0 = AffineMap.get_identity(2)
-
-    #             # Create vector.transfer_read for %B
-    #             B = vector.TransferReadOp(
-    #                 vector_input1,
-    #                 smem_b.get_memory_ref_address_space(),
-    #                 [c3.result, c1.result],
-    #                 permutation_map=map0,
-    #                 padding=cst.result,
-    #                 in_bounds=[True, True],
-    #             )
-
-    #             # Define affine dimension expressions for indexing maps
-    #             ds = [AffineDimExpr.get(i) for i in range(len(size))]
-
-    #             # Define indexing maps for vector.contract
-    #             # TODO check here for the right thing ik * kj -> ij
-    #             map1 = AffineMap.get(
-    #                 # For A
-    #                 len(size), 0, get_elements_by_indices(ds, input[0]))
-    #             map2 = AffineMap.get(
-    #                 # For B
-    #                 len(size), 0, get_elements_by_indices(ds, input[1]))
-    #             # For D
-    #             map3 = AffineMap.get(
-    #                 len(size), 0, get_elements_by_indices(ds, output))
-
-    #             # Create vector.contract operation
-    #             D = vector.contract(
-    #                 vector_output,
-    #                 lhs=A.result,
-    #                 rhs=B.result,
-    #                 acc=cst_0.result,
-    #                 indexing_maps=ArrayAttr.get(
-    #                     [AffineMapAttr.get(am) for am in [map1, map2, map3]]
-    #                 ),
-    #                 iterator_types=ArrayAttr.get([Attribute.parse(str(am)) for am in [
-    #                     "#vector.iterator_type<parallel>", "#vector.iterator_type<parallel>", "#vector.iterator_type<reduction>"]]),
-    #                 kind="add"
-    #             )
-
-    #             vector.transfer_write(
-    #                 None,
-    #                 D,
-    #                 smem_c.get_memory_ref_address_space(),
-    #                 [c0.result, c1.result],
-    #                 map0,
-    #                 in_bounds=[True, True],
-    #             )
-
-
 class MLIRTensor:
     def __init__(self, layout: 'GroupBy', dtype="", is_dim_shape=False) -> None:
         self.layout = layout
@@ -392,10 +302,6 @@ class MLIRTensor:
     def host_allocate(self):
         self.alloc_ref = memref.alloc(
             self.get_memref_type_address_space(0), [], [])
-        return self
-
-    def dealloc_host(self):
-        memref.dealloc(self.alloc_ref)
         return self
 
     def dealloc_gpu(self, *tokens):
@@ -431,31 +337,6 @@ class MLIRTensor:
 
     def store_physical_1d(self, coords, value):
         return memref.store(value, self.get_memory_ref_address_space(), coords)
-
-    def print_matrix(self, orderBy, M, N):
-        self.layout = orderBy.TileBy([M, N])
-        for i in affine.for_(0, M, step=1):
-            for j in affine.for_(0, N, step=1):
-                ii = printer.from_ssa_to_sym(printer.get_int_from_index(i))
-                jj = printer.from_ssa_to_sym(printer.get_int_from_index(j))
-
-                value_read = self[ii, jj]
-                gpu.printf("%.0f\t", value_read)
-                affine.yield_([])
-            gpu.printf("\n")
-            affine.yield_([])
-        gpu.printf("\n")
-
-    def print_matrix_kernel(self, mem, M, N):
-        launch_op = gpu.LaunchOp(
-            list(map(arith.ConstantOp.create_index, [1, 1, 1])),
-            list(map(arith.ConstantOp.create_index, [1, 1, 1])),
-            async_dependencies=[]
-        )
-        block = launch_op.body.blocks[0]
-        with ir.InsertionPoint(block):
-            self.print_matrix(mem, M, N)
-            gpu.terminator()
 
     def copy_to_device(self, token):
         token_ty = Type.parse("!gpu.async.token")
