@@ -35,7 +35,7 @@ LEGO is based on the following research work:
 
 | Package       | Version             | URL                                                        |
 |--------------|---------------------|------------------------------------------------------------|
-| LLVM/MLIR    | commit `556ec4a`    | https://github.com/llvm/llvm-project/commit/556ec4a       |
+| LLVM/MLIR    | commit `48c8c45`    | https://github.com/llvm/llvm-project/commit/48c8c45       |
 | Python       | 3.12.4              | https://www.python.org/                                   |
 | Triton       | 3.2.0               | https://github.com/triton-lang/triton                     |
 | PyTorch      | 2.5.1               | https://pytorch.org/                                      |
@@ -56,7 +56,7 @@ cd lego
 ```bash
 git clone https://github.com/llvm/llvm-project.git
 cd llvm-project
-git checkout 556ec4a
+git checkout 48c8c45
 ```
 
 ### 3. Build and install LLVM/MLIR
