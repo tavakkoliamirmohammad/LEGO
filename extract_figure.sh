@@ -9,7 +9,7 @@ cp ../plots/bricks.pdf fig_12/stencil.pdf
 
 cp ../plots/charts/* fig_11/
 
-cp ../lud/lud_roofline.png fig_13/lud_roofline.png
-cp ../bricks_reports/stencil_roofline.png fig_13/stencil_roofline.png
+cp ../benchmarks/cuda/lud/lud_roofline.png fig_13/lud_roofline.png
+cp ../benchmarks/cuda/bricks_reports/stencil_roofline.png fig_13/stencil_roofline.png
 
 cp ../plots/mlir_transpose.txt tab_v/mlir_transpose.txt

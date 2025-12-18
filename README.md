@@ -105,7 +105,7 @@ From the root of the artifact repository, the experiments can be reproduced with
 1. **Generate all kernel source code**
 
    ```bash
-   ./gen_all_kernel.sh
+   ./benchmarks/gen_all_kernel.sh
    ```
 
    This script generates all required kernel source files (Triton, CUDA, and MLIR) used in the evaluation.
@@ -113,14 +113,14 @@ From the root of the artifact repository, the experiments can be reproduced with
 2. **Run all benchmarks and produce figures and tables**
 
    ```bash
-   ./run_all_kernels.sh
+   ./benchmarks/run_all_kernels.sh
    ```
 
    This script runs all benchmarks and generates the figures and tables reported in the paper.
 
 ## Evaluation and Expected Results
 
-* Running `./run_all_kernels.sh` will execute all benchmarks and produce the evaluation outputs.
+* Running `run_all_kernels.sh` will execute all benchmarks and produce the evaluation outputs.
 * The generated figures corresponding to the evaluation section will be located in the `./figures` folder in the root of the artifact directory.
 * Approximate time requirements:
   * **Workflow preparation (installation, builds, environment):** ~2 hours
