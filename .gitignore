@@ -6,3 +6,7 @@ test.*
 *.gif
 *.ncu-rep
 *.csv
+mlir/
+*.egg-info/
+dist/
+build/
