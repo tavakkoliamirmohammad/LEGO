@@ -17,7 +17,7 @@ process_file() {
         -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_80 opt-level=3" \
         "transpose_naive_${N}.mlir" | \
     ncu --metrics gpu__time_duration \
-       $MLIR_BUILD_FOLDER/bin/mlir-cpu-runner \
+       $MLIR_BUILD_FOLDER/bin/mlir-runner \
         --shared-libs=$MLIR_BUILD_FOLDER/lib/libmlir_cuda_runtime.so \
         --shared-libs=$MLIR_BUILD_FOLDER/lib/libmlir_c_runner_utils.so \
         --entry-point-result=void \
@@ -64,7 +64,7 @@ process_file() {
         -gpu-lower-to-nvvm-pipeline="cubin-chip=sm_80 opt-level=3" \
         "transpose_smem_${N}.mlir" | \
     ncu --metrics gpu__time_duration \
-       $MLIR_BUILD_FOLDER/bin/mlir-cpu-runner \
+       $MLIR_BUILD_FOLDER/bin/mlir-runner \
         --shared-libs=$MLIR_BUILD_FOLDER/lib/libmlir_cuda_runtime.so \
         --shared-libs=$MLIR_BUILD_FOLDER/lib/libmlir_c_runner_utils.so \
         --entry-point-result=void \
