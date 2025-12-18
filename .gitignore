@@ -4,3 +4,4 @@ __pycache__
 test.*
 **/.DS_Store
 *.gif
+*.ncu-rep
