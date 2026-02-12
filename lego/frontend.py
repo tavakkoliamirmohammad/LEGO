@@ -70,199 +70,160 @@ def jit(fn=None, **kwargs):
             pointers = set()
             for n in ast.walk(node):
                 if isinstance(n, ast.Call):
-                    # Check for triton.language load/store/atomic
                     func_name = ""
                     if isinstance(n.func, ast.Attribute):
                         if isinstance(n.func.value, ast.Name) and n.func.value.id == 'tl':
                             func_name = n.func.attr
                     elif isinstance(n.func, ast.Name):
-                         # If imported as `from triton.language import load` (less common but possible)
                          func_name = n.func.id
                     
-                    if func_name in ('load', 'store', 'atomic_add', 'atomic_max', 'atomic_min', 'atomic_and', 'atomic_or', 'atomic_xor', 'atomic_xchg', 'atomic_cas'):
-                        if n.args:
-                            # First arg is pointer
-                            arg0 = n.args[0]
-                            if isinstance(arg0, ast.Name):
-                                pointers.add(arg0.id)
+                    if func_name in ('load', 'store', 'atomic_add', 'atomic_max', 'atomic_min', 
+                                     'atomic_and', 'atomic_or', 'atomic_xor', 'atomic_xchg', 'atomic_cas'):
+                        if n.args and isinstance(n.args[0], ast.Name):
+                            pointers.add(n.args[0].id)
             return pointers
 
-        # Identify runtime pointers to skip evaluation
         runtime_pointers = _find_pointer_vars(func_def)
         
+        class LEGOASTTransformer(ast.NodeTransformer):
+            def __init__(self, lego_code, eval_env, printer):
+                self.lego_code = lego_code
+                self.eval_env = eval_env
+                self.printer = printer
 
+            def visit_Name(self, node):
+                if node.id in self.lego_code:
+                    # Replace LEGO variable with its generated code
+                    code = self.lego_code[node.id]
+                    return ast.parse(f"({code})").body[0].value
+                return node
+
+            def visit_Subscript(self, node):
+                # Try to evaluate subscript (e.g. L_A[...]) to see if it reduces to a LEGO expression
+                try:
+                    s = ast.unparse(node)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        val = eval(s, self.eval_env)
+                    
+                    if isinstance(val, (sp.Expr, sp.Symbol)):
+                        simplified = sp.simplify(val)
+                        code = self.printer.doprint(simplified)
+                        return ast.parse(f"({code})").body[0].value
+                except Exception:
+                    pass
+                return self.generic_visit(node)
 
         def _process_stmts(stmts):
-            """Process a list of statements, evaluating LEGO expressions and keeping runtime code."""
             new_body = []
+            transformer = LEGOASTTransformer(lego_code, eval_env, printer)
             
             for stmt in stmts:
-                # Skip docstrings
+                # 1. Skip docstrings/constants
                 if isinstance(stmt, ast.Expr) and isinstance(stmt.value, (ast.Constant, ast.Str)):
                     new_body.append(stmt)
                     continue
                 
-                # Handle for loops - create symbol for loop var and process body
+                # 2. Handle For Loops
                 if isinstance(stmt, ast.For):
                     if isinstance(stmt.target, ast.Name):
                         loop_var = stmt.target.id
                         eval_env[loop_var] = _symbol_with_assumptions(loop_var)
-                    
-                    # Process the loop body recursively
                     stmt.body = _process_stmts(stmt.body)
                     new_body.append(stmt)
                     continue
                 
-                # Try to evaluate assignments
+                # 3. Handle Assignments
                 if isinstance(stmt, ast.Assign):
-                    try:
-                        # If Symbol() with no args, infer name from variable (strip s_ prefix)
-                        value_node = stmt.value
-                        if (isinstance(value_node, ast.Call) and isinstance(value_node.func, ast.Name)
-                                and value_node.func.id == 'Symbol' and not value_node.args):
-                            target = stmt.targets[0]
-                            if isinstance(target, ast.Name):
-                                var_name = target.id
-                                sym_name = var_name[2:] if var_name.startswith('s_') else var_name
-                                value_node.args = [ast.Constant(value=sym_name)]
-                        
+                    # Check for explicit Symbol declaration
+                    value_node = stmt.value
+                    if (isinstance(value_node, ast.Call) and isinstance(value_node.func, ast.Name)
+                            and value_node.func.id == 'Symbol' and not value_node.args):
                         if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
-                            target_name = stmt.targets[0].id
-                            # Don't evaluate pointer arithmetic if the target is used as a pointer
-                            # to preserve user's term order and avoid SymPy reordering.
-                            # BUT we must still substitute any LEGO expressions in the RHS!
-                            if target_name in runtime_pointers:
-                                # Manually process the RHS to inline LEGO vars/exprs
-                                code_str = ast.unparse(stmt.value)
-                                import re
-                                for name, code in lego_code.items():
-                                    pattern = r'\b' + re.escape(name) + r'\b'
-                                    if re.search(pattern, code_str):
-                                        code_str = re.sub(pattern, f'({code})', code_str)
-                                
-                                # Use our LEGOSubstitutor to handle inline LEGO expressions (like L_C[...])
-                                class LEGOSubstitutor(ast.NodeTransformer):
-                                    def visit_Subscript(self, node):
-                                        try:
-                                            s = ast.unparse(node)
-                                            # We need to evaluate the subscript in current env to check if it's LEGO
-                                            # Suppress stdout
-                                            with contextlib.redirect_stdout(io.StringIO()):
-                                                val = eval(s, eval_env)
-                                            if isinstance(val, (sp.Expr, sp.Symbol)):
-                                                simplified = sp.simplify(val)
-                                                code = printer.doprint(simplified)
-                                                return ast.parse(f"({code})").body[0].value
-                                        except:
-                                            pass
-                                        return self.generic_visit(node)
+                            var_name = stmt.targets[0].id
+                            sym_name = var_name[2:] if var_name.startswith('s_') else var_name
+                            value_node.args = [ast.Constant(value=sym_name)]
 
-                                    def visit_Name(self, node):
-                                        # Replace LEGO variable references with their code
-                                        if node.id in lego_code:
-                                            return ast.parse(f"({lego_code[node.id]})").body[0].value
-                                        return node
-                                
-                                stmt.value = LEGOSubstitutor().visit(stmt.value)
-                                
-                                # Skip main eval block
-                                raise ValueError("Skip runtime pointer assignment")
-                        
+                    # Skip evaluation for runtime pointers
+                    if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                        target_name = stmt.targets[0].id
+                        if target_name in runtime_pointers:
+                            # Transform RHS to resolve any LEGO vars, but don't eval the whole assignment
+                            stmt.value = transformer.visit(stmt.value)
+                            new_body.append(stmt)
+                            # Ensure we have a symbol for this pointer
+                            eval_env[target_name] = _symbol_with_assumptions(target_name)
+                            continue
+
+                    try:
+                        # Try to evaluate
                         code_str = ast.unparse(stmt.value)
-                        # Suppress stdout during eval because triton.language functions 
-                        # (like program_id) might print to stdout when called in eager mode
                         with contextlib.redirect_stdout(io.StringIO()):
                             val = eval(code_str, eval_env)
                         
-                        # Single target assignment
-                        if len(stmt.targets) == 1:
-                            target = stmt.targets[0]
+                        # Handle Single Target
+                        if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                            name = stmt.targets[0].id
                             
-                            if isinstance(target, ast.Name):
-                                name = target.id
-                                
-                                if isinstance(val, sp.Symbol) and not isinstance(val, sp.Expr.__class__):
-                                    # Bare Symbol definition - compile-time only, remove
-                                    eval_env[name] = val
-                                    compile_time_names.add(name)
-                                    continue
-                                
-                                elif isinstance(val, LayoutBlock):
-                                    # Layout object - compile-time only, remove
-                                    eval_env[name] = val
-                                    compile_time_names.add(name)
-                                    continue
-                                
-                                elif isinstance(val, sp.Expr):
-                                    # SymPy expression - store for inlining at usage sites
-                                    simplified = sp.simplify(val)
-                                    code = printer.doprint(simplified)
-                                    lego_code[name] = code
-                                    eval_env[name] = val
-                                    continue
-                                
-                                else:
-                                    # Non-LEGO result (e.g., tl.program_id returns dict)
-                                    # Keep as runtime, ensure symbol exists for this name
-                                    eval_env[name] = _symbol_with_assumptions(name)
-                                    # Fall through to keep statement
-                                
-                            elif isinstance(target, ast.Tuple):
-                                # Tuple unpacking (e.g., pid_m, pid_n = L_pid.inv(pid))
-                                var_names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
-                                
-                                if isinstance(val, (tuple, list)) and all(isinstance(v, (sp.Expr, sp.Symbol)) for v in val):
+                            if isinstance(val, (sp.Symbol, LayoutBlock)):
+                                # Pure compile-time object -> remove stmt, track in env
+                                eval_env[name] = val
+                                compile_time_names.add(name)
+                                continue
+                            elif isinstance(val, sp.Expr):
+                                # Compile-time expression -> store code for inlining
+                                simplified = sp.simplify(val)
+                                code = printer.doprint(simplified)
+                                lego_code[name] = code
+                                eval_env[name] = val
+                                continue
+                            else:
+                                # Runtime result (e.g. tl.program_id) -> Keep stmt
+                                eval_env[name] = _symbol_with_assumptions(name)
+                                new_body.append(stmt)
+                                continue
+
+                        # Handle Tuple Unpacking
+                        elif isinstance(stmt.targets[0], ast.Tuple):
+                            target = stmt.targets[0]
+                            var_names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+                            
+                            if isinstance(val, (tuple, list)) and len(val) == len(var_names):
+                                ALL_LEGO = all(isinstance(v, (sp.Expr, sp.Symbol)) for v in val)
+                                if ALL_LEGO:
                                     for var_name, v in zip(var_names, val):
                                         if isinstance(v, sp.Expr):
                                             simplified = sp.simplify(v)
                                             code = printer.doprint(simplified)
-                                            
-                                            # Emit as assignment (do not add to lego_code, prevent inlining)
+                                            # Emit assignment, do NOT inline
                                             new_stmt = ast.parse(f"{var_name} = {code}").body[0]
                                             ast.copy_location(new_stmt, stmt)
                                             new_body.append(new_stmt)
-                                        
-                                        # Replace with fresh Symbol for subsequent expressions
                                         eval_env[var_name] = _symbol_with_assumptions(var_name)
-                                    
                                     continue
-                        
-                    except Exception as e:
-                        # Evaluation failed - this is a runtime statement
-                        # Ensure symbols exist for target variables  
-                        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                            target = stmt.targets[0]
-                            if isinstance(target, ast.Name):
-                                eval_env[target.id] = _symbol_with_assumptions(target.id)
-                        
-                    except Exception as e:
-                        # Evaluation failed - this is a runtime statement
-                        # Ensure symbols exist for target variables  
-                        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                            target = stmt.targets[0]
-                            if isinstance(target, ast.Name):
-                                eval_env[target.id] = _symbol_with_assumptions(target.id)
-                
-                # For non-LEGO statements, replace any references to LEGO variables
-                stmt_code = ast.unparse(stmt)
-                modified = False
-                import re
-                for name, code in lego_code.items():
-                    pattern = r'\b' + re.escape(name) + r'\b'
-                    if re.search(pattern, stmt_code):
-                        stmt_code = re.sub(pattern, f'({code})', stmt_code)
-                        modified = True
-                
-                if modified:
-                    try:
-                        new_stmts = ast.parse(stmt_code).body
-                        for s in new_stmts:
-                            ast.copy_location(s, stmt)
-                        new_body.extend(new_stmts)
-                    except:
-                        new_body.append(stmt)
-                else:
+                    except Exception:
+                        # Evaluation failed -> Runtime Statement
+                        pass
+
+                    # If we reached here (Exception or Fallthrough), it's a runtime assignment
+                    # Transform RHS and keep it
+                    stmt.value = transformer.visit(stmt.value)
+                    
+                    # Ensure symbols exist for targets
+                    for target in stmt.targets:
+                        if isinstance(target, ast.Name):
+                            eval_env[target.id] = _symbol_with_assumptions(target.id)
+                        elif isinstance(target, ast.Tuple):
+                            for elt in target.elts:
+                                if isinstance(elt, ast.Name):
+                                    eval_env[elt.id] = _symbol_with_assumptions(elt.id)
+                    
                     new_body.append(stmt)
+                    continue
+
+                # 4. Other Statements
+                # Transform to replace LEGO vars
+                transformer.visit(stmt)
+                new_body.append(stmt)
             
             return new_body
         
