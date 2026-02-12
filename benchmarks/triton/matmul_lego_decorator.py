@@ -2,7 +2,6 @@ import torch
 import triton
 import triton.language as tl
 import sympy as sp
-from sympy import Symbol
 import lego
 from lego.lego import *
 from lego import jit as lego_jit
@@ -50,50 +49,38 @@ def matmul_kernel(
     
     # -----------------------------------------------------------
     # LEGO Layout Definitions - These are evaluated at decoration time!
+    # Symbols for kernel params (M, N, K, BM, etc.) and runtime vars
+    # (pid, num_pid_m, k, etc.) are auto-created by @lego.jit
     # -----------------------------------------------------------
-    
-    # Create symbolic variables
-    s_pid = Symbol()
-    s_num_pid_m = Symbol()
-    s_num_pid_n = Symbol()
-    s_GM = Symbol()
-    s_M = Symbol()
-    s_N = Symbol()
-    s_K = Symbol()
-    s_BM = Symbol()
-    s_BN = Symbol()
-    s_BK = Symbol()
-    s_k = Symbol()
     
     # PID Layout - maps thread blocks to output tiles
     L_pid = OrderBy(
-        Col(sp.Max(s_num_pid_m//s_GM, 1), 1),
-        Col(sp.Min(s_num_pid_m, s_GM), s_num_pid_n)
-    ).TileBy([s_num_pid_m, s_num_pid_n])
+        Col(sp.Max(num_pid_m//GM, 1), 1),
+        Col(sp.Min(num_pid_m, GM), num_pid_n)
+    ).TileBy([num_pid_m, num_pid_n])
     
-    pid_m, pid_n = L_pid.inv(s_pid)
+    pid_m, pid_n = L_pid.inv(pid)
     
     # Matrix A Layout - Row-major [M, K] tiled by [BM, BK]
-    L_A = OrderBy(Row(s_M, s_K)).TileBy([s_M/s_BM, s_K/s_BK], [s_BM, s_BK])
-    offset_a = L_A[pid_m, s_k, :, :]
+    L_A = OrderBy(Row(M, K)).TileBy([M/BM, K/BK], [BM, BK])
     
     # Matrix B Layout - Row-major [K, N] tiled by [BK, BN]
-    L_B = OrderBy(Row(s_K, s_N)).TileBy([s_K/s_BK, s_N/s_BN], [s_BK, s_BN])
-    offset_b = L_B[s_k, pid_n, :, :]
+    L_B = OrderBy(Row(K, N)).TileBy([K/BK, N/BN], [BK, BN])
     
     # Matrix C Layout - Row-major [M, N] tiled by [BM, BN]
-    L_C = OrderBy(Row(s_M, s_N)).TileBy([s_M/s_BM, s_N/s_BN], [s_BM, s_BN])
-    offset_c = L_C[pid_m, pid_n, :, :]
+    L_C = OrderBy(Row(M, N)).TileBy([M/BM, N/BN], [BM, BN])
     
     # -----------------------------------------------------------
-    # Runtime Kernel Body - After LEGO transformation, the above symbols
-    # will be replaced with the generated runtime expressions
+    # Runtime Kernel Body - After LEGO transformation, the above
+    # will be replaced with generated runtime expressions
     # -----------------------------------------------------------
     
     accumulator = tl.zeros((BM, BN), dtype=tl.float32)
     
     for k in range(0, tl.cdiv(K, BK)):
         # Load A and B using LEGO-generated offsets
+        offset_a = L_A[pid_m, k, :, :]
+        offset_b = L_B[k, pid_n, :, :]
         a_ptrs = a_ptr + offset_a
         b_ptrs = b_ptr + offset_b
         
@@ -108,7 +95,7 @@ def matmul_kernel(
     c = accumulator.to(tl.float16)
     
     # Store C using LEGO-generated offset
-    c_ptrs = c_ptr + offset_c
+    c_ptrs = c_ptr + L_C[pid_m, pid_n, :, :]
     tl.store(c_ptrs, c)
 
 
