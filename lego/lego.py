@@ -4,7 +4,7 @@ from sympy import Symbol, symbols, Piecewise, Function
 from typing import List, Tuple, Callable
 import sympy as sp
 from functools import reduce
-from .z3_simplifier import simplify_ops
+from .simplifier import simplify_ops
 
 
 class TritonRange(Function):
