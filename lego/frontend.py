@@ -26,10 +26,12 @@ def jit(fn=None, **kwargs):
             ...
     """
     def decorator(fn):
-        # If fn is wrapped by Triton, extract the original function
+        # Unwrap through Triton decorator layers (Autotuner -> JITFunction -> function)
         original_fn = fn
-        if hasattr(fn, 'fn'):  # JITFunction or Autotuner
-            original_fn = fn.fn
+        wrappers = []  # Track wrappers to re-apply later
+        while hasattr(original_fn, 'fn'):
+            wrappers.append(original_fn)
+            original_fn = original_fn.fn
             
         # Get source code from the original unwrapped function
         source = textwrap.dedent(inspect.getsource(original_fn))
@@ -66,6 +68,16 @@ def jit(fn=None, **kwargs):
             # Try to evaluate assignments
             if isinstance(stmt, ast.Assign):
                 try:
+                    # If Symbol() with no args, infer name from variable (strip s_ prefix)
+                    value_node = stmt.value
+                    if (isinstance(value_node, ast.Call) and isinstance(value_node.func, ast.Name)
+                            and value_node.func.id == 'Symbol' and not value_node.args):
+                        target = stmt.targets[0]
+                        if isinstance(target, ast.Name):
+                            var_name = target.id
+                            sym_name = var_name[2:] if var_name.startswith('s_') else var_name
+                            value_node.args = [ast.Constant(value=sym_name)]
+                    
                     code_str = ast.unparse(stmt.value)
                     val = eval(code_str, eval_env)
                     
@@ -154,6 +166,8 @@ def jit(fn=None, **kwargs):
         new_source = ast.unparse(tree)
         
         # Write to file so Triton can inspect it
+        _debug = os.environ.get('LEGO_DEBUG')
+        _save = os.environ.get('LEGO_SAVE_KERNEL')
         temp_dir = "/tmp/lego_kernels"
         os.makedirs(temp_dir, exist_ok=True)
         temp_file = os.path.join(temp_dir, f"{original_fn.__name__}_{id(original_fn)}.py")
@@ -161,10 +175,29 @@ def jit(fn=None, **kwargs):
         with open(temp_file, 'w') as f:
             f.write(new_source)
         
+        # Print generated source if LEGO_DEBUG is set
+        if _debug:
+            print(f"=== LEGO Generated Kernel ({temp_file}) ===")
+            print(new_source)
+            print("=== End Generated Kernel ===")
+            if wrappers:
+                for w in wrappers:
+                    wtype = type(w).__name__
+                    if hasattr(w, 'configs'):
+                        print(f"  Re-applying @triton.autotune with {len(w.configs)} configs")
+                    else:
+                        print(f"  Re-applying @triton.{wtype.lower()}")
+        
         # Compile and execute
         code_obj = compile(tree, filename=temp_file, mode='exec')
         namespace = original_fn.__globals__.copy()
         exec(code_obj, namespace)
+        
+        # Triton reads source lazily via inspect.getsource(), so file must persist.
+        # Register cleanup at exit unless LEGO_SAVE_KERNEL is set.
+        if not _save:
+            import atexit
+            atexit.register(lambda f=temp_file: os.remove(f) if os.path.exists(f) else None)
         
         # Get the transformed function
         transformed_fn = namespace[original_fn.__name__]
@@ -172,10 +205,19 @@ def jit(fn=None, **kwargs):
         # Update filename for Triton's inspection
         transformed_fn.__code__ = transformed_fn.__code__.replace(co_filename=temp_file)
         
-        # If input was wrapped by @triton.jit, re-wrap the transformed function
-        if fn is not original_fn:
+        # Re-apply Triton wrappers in reverse order (innermost first)
+        if wrappers:
             import triton
-            transformed_fn = triton.jit(transformed_fn)
+            from triton.runtime.jit import JITFunction
+            from triton.runtime.autotuner import Autotuner
+            for wrapper in reversed(wrappers):
+                if isinstance(wrapper, Autotuner):
+                    transformed_fn = triton.autotune(
+                        configs=wrapper.configs,
+                        key=wrapper.keys,
+                    )(transformed_fn)
+                elif isinstance(wrapper, JITFunction):
+                    transformed_fn = triton.jit(transformed_fn)
         
         return transformed_fn
     

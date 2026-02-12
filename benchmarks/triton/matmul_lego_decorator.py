@@ -29,6 +29,10 @@ def get_autotune_config():
 # 1. @lego.jit applies FIRST to raw function (transforms LEGO -> Triton code)
 # 2. @triton.jit applies SECOND to the transformed function  
 @lego_jit
+@triton.autotune(
+    configs=get_autotune_config(),
+    key=['M', 'N', 'K'],
+)
 @triton.jit
 def matmul_kernel(
         a_ptr, b_ptr, c_ptr,
@@ -49,17 +53,17 @@ def matmul_kernel(
     # -----------------------------------------------------------
     
     # Create symbolic variables
-    s_pid = Symbol('pid')
-    s_num_pid_m = Symbol('num_pid_m')
-    s_num_pid_n = Symbol('num_pid_n')
-    s_GM = Symbol('GM')
-    s_M = Symbol('M')
-    s_N = Symbol('N')
-    s_K = Symbol('K')
-    s_BM = Symbol('BM')
-    s_BN = Symbol('BN')
-    s_BK = Symbol('BK')
-    s_k = Symbol('k')
+    s_pid = Symbol()
+    s_num_pid_m = Symbol()
+    s_num_pid_n = Symbol()
+    s_GM = Symbol()
+    s_M = Symbol()
+    s_N = Symbol()
+    s_K = Symbol()
+    s_BM = Symbol()
+    s_BN = Symbol()
+    s_BK = Symbol()
+    s_k = Symbol()
     
     # PID Layout - maps thread blocks to output tiles
     L_pid = OrderBy(
@@ -113,12 +117,9 @@ def matmul(a, b, activation=""):
     K, N = b.shape
     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
     
-    # Use simple fixed configuration since we don't have autotune  
-    BM, BN, BK, GM = 64, 64, 32, 4
+    grid = lambda META: (triton.cdiv(M, META['BM']) * triton.cdiv(N, META['BN']), )
     
-    grid = (triton.cdiv(M, BM) * triton.cdiv(N, BN), )
-    
-    matmul_kernel[grid](a, b, c, M, N, K, BM, BN, BK, GM, ACTIVATION=activation)
+    matmul_kernel[grid](a, b, c, M, N, K, ACTIVATION=activation)
     return c
 
 
