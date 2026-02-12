@@ -13,17 +13,32 @@ from .lego import *
 def jit(fn=None, **kwargs):
     """
     Decorator that transforms LEGO layout expressions in Triton kernels.
-    
-    Evaluates LEGO/SymPy expressions at decoration time and replaces them
-    with generated Triton code. Uses AST for proper multi-line handling.
-    
+
+    This decorator uses AST transformation to evaluate LEGO/SymPy expressions
+    at decoration time and replaces them with generated Triton code.
+
+    Features:
+    - Auto-symbolization: Kernel arguments and loop variables are treated
+      as SymPy symbols for layout calculations.
+    - Layout Algebra: Supports defining and operating on Layout objects.
+    - Code Generation: Simplifies and generates efficient pointer arithmetic.
+
     Usage:
         @lego.jit
         @triton.jit
-        def kernel(...):
-            s_pid = Symbol('pid')
+        def kernel(M, N, K, ...):
+            # M, N, K are implicitly symbols
+
+            # Runtime variables (pid) are tracked as symbols for layout math
+            pid = tl.program_id(0)
+
+            # Define Layouts
             L_pid = OrderBy(...).TileBy(...)
-            pid_m, pid_n = L_pid.inv(s_pid)
+
+            # Layout operations (Compile-time evaluation)
+            pid_m, pid_n = L_pid.inv(pid)
+
+            # Generated offsets
             offset = L_A[pid_m, s_k, :, :]
             ...
     """
@@ -234,9 +249,9 @@ def jit(fn=None, **kwargs):
         new_source = ast.unparse(tree)
         
         # Write to file so Triton can inspect it
-        _debug = os.environ.get('LEGO_DEBUG')
-        _save = os.environ.get('LEGO_SAVE_KERNEL')
-        temp_dir = "/tmp/lego_kernels"
+        _debug = os.environ.get('LEGO_DEBUG', False)
+        _save = os.environ.get('LEGO_SAVE_KERNEL', False)
+        temp_dir = os.environ.get("LEGO_TEMP_DIR", "/tmp/lego_kernels")
         os.makedirs(temp_dir, exist_ok=True)
         temp_file = os.path.join(temp_dir, f"{original_fn.__name__}_{id(original_fn)}.py")
         
@@ -248,13 +263,6 @@ def jit(fn=None, **kwargs):
             print(f"=== LEGO Generated Kernel ({temp_file}) ===")
             print(new_source)
             print("=== End Generated Kernel ===")
-            if wrappers:
-                for w in wrappers:
-                    wtype = type(w).__name__
-                    if hasattr(w, 'configs'):
-                        print(f"  Re-applying @triton.autotune with {len(w.configs)} configs")
-                    else:
-                        print(f"  Re-applying @triton.{wtype.lower()}")
         
         # Compile and execute
         code_obj = compile(tree, filename=temp_file, mode='exec')

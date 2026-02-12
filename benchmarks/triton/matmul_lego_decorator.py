@@ -47,12 +47,6 @@ def matmul_kernel(
     num_pid_m = tl.cdiv(M, BM)
     num_pid_n = tl.cdiv(N, BN)
     
-    # -----------------------------------------------------------
-    # LEGO Layout Definitions - These are evaluated at decoration time!
-    # Symbols for kernel params (M, N, K, BM, etc.) and runtime vars
-    # (pid, num_pid_m, k, etc.) are auto-created by @lego.jit
-    # -----------------------------------------------------------
-    
     # PID Layout - maps thread blocks to output tiles
     L_pid = OrderBy(
         Col(sp.Max(num_pid_m//GM, 1), 1),
@@ -69,11 +63,6 @@ def matmul_kernel(
     
     # Matrix C Layout - Row-major [M, N] tiled by [BM, BN]
     L_C = OrderBy(Row(M, N)).TileBy([M/BM, N/BN], [BM, BN])
-    
-    # -----------------------------------------------------------
-    # Runtime Kernel Body - After LEGO transformation, the above
-    # will be replaced with generated runtime expressions
-    # -----------------------------------------------------------
     
     accumulator = tl.zeros((BM, BN), dtype=tl.float32)
     
@@ -108,11 +97,53 @@ def matmul(a, b, activation=""):
     
     matmul_kernel[grid](a, b, c, M, N, K, ACTIVATION=activation)
     return c
+ref_lib = 'cuBLAS' if is_cuda() else 'rocBLAS'
+
+configs = []
+configs = [
+    triton.testing.Benchmark(
+        x_names=["M", "N", "K"],
+        x_vals=[2 ** i for i in range(7, 12)],
+        line_arg="provider",
+        line_vals=[ref_lib.lower(), "lego"],
+        line_names=[ref_lib, "LEGO"],
+        styles=[("green", "-"), ("red", "-")],
+        ylabel="TFLOPS",
+        plot_name="matmul-performance-fp16",
+        args={},
+    )
+]
+
+
+@triton.testing.perf_report(configs)
+def benchmark(M, N, K, provider):
+    a = torch.randn((M, K), device='cuda', dtype=torch.float16)
+    b = torch.randn((K, N), device='cuda', dtype=torch.float16)
+
+    if provider == 'lego':
+        torch_out = torch.matmul(a, b)
+        triton_out = matmul(a, b)
+        if not torch.allclose(torch_out, triton_out, atol=1e-1, rtol=1e-1):
+            print(torch_out)
+            print(triton_out)
+            raise ValueError(f"Triton matmul outputs do not match Torch matmul! (M = {M}, N = {N}, K = {K})")
+
+    quantiles = [0.5, 0.2, 0.8]
+    if provider == ref_lib.lower():
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: torch.matmul(a, b), quantiles=quantiles)
+    elif provider == 'lego':
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: matmul(a, b), quantiles=quantiles)
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
+    return perf(ms), perf(max_ms), perf(min_ms)
+
+
 
 
 if __name__ == "__main__":
-    print("Running LEGO Triton Matmul with Decorator Syntax...")
-    
     torch.manual_seed(0)
     a = torch.randn((512, 512), device='cuda', dtype=torch.float16)
     b = torch.randn((512, 512), device='cuda', dtype=torch.float16)
@@ -125,3 +156,5 @@ if __name__ == "__main__":
     else:
         print("❌ Triton and Torch differ")
         print(f"Max diff: {torch.max(torch.abs(triton_output - torch_output))}")
+
+    benchmark.run(show_plots=False, print_data=True)
