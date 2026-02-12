@@ -50,6 +50,26 @@ class FastProverContext:
         if rhs.is_Symbol:
              # y <= x
              self._update_bound_entry(rhs, 'max', lhs)
+        
+        # Handle x + c >= rhs -> x >= rhs - c
+        if lhs.is_Add:
+            c = 0
+            syms = []
+            for arg in lhs.args:
+                if arg.is_number: c += arg
+                else: syms.append(arg)
+            if len(syms) == 1 and syms[0].is_Symbol:
+                 self._update_bound_entry(syms[0], 'min', rhs - c)
+
+        # Handle lhs >= y + c -> y <= lhs - c
+        if rhs.is_Add:
+            c = 0
+            syms = []
+            for arg in rhs.args:
+                if arg.is_number: c += arg
+                else: syms.append(arg)
+            if len(syms) == 1 and syms[0].is_Symbol:
+                 self._update_bound_entry(syms[0], 'max', lhs - c)
 
     def _update_le(self, lhs, rhs):
         # lhs <= rhs
@@ -58,6 +78,26 @@ class FastProverContext:
         if rhs.is_Symbol:
              # y >= x
              self._update_bound_entry(rhs, 'min', lhs)
+
+        # Handle x + c <= rhs -> x <= rhs - c
+        if lhs.is_Add:
+            c = 0
+            syms = []
+            for arg in lhs.args:
+                if arg.is_number: c += arg
+                else: syms.append(arg)
+            if len(syms) == 1 and syms[0].is_Symbol:
+                 self._update_bound_entry(syms[0], 'max', rhs - c)
+
+        # Handle lhs <= y + c -> y >= lhs - c
+        if rhs.is_Add:
+            c = 0
+            syms = []
+            for arg in rhs.args:
+                if arg.is_number: c += arg
+                else: syms.append(arg)
+            if len(syms) == 1 and syms[0].is_Symbol:
+                 self._update_bound_entry(syms[0], 'min', lhs - c)
 
     def _update_bound_entry(self, sym, kind, val):
         if sym not in self.bounds:
@@ -232,8 +272,9 @@ class ProverContext:
     # --- NEW: create Z3 vars on demand for any new symbols we see
     def _mk_z3_var(self, s):
         name = str(s)
+        is_int = getattr(s, 'is_integer', False)
         t = self._var_types.get(name) if name in self._var_types else (
-            'Int' if getattr(s, 'is_integer', False) else
+            'Int' if is_int else
             'Bool' if getattr(s, 'is_boolean', False) else
             'Int'   # fallback favors Int (safer for Mod/floor arithmetic)
         )
@@ -243,18 +284,21 @@ class ProverContext:
             return Bool(name)
         return Real(name)
 
+    def _ensure_var(self, s):
+        name = str(s)
+        if name not in self.z3_vars:
+            self.z3_vars[name] = self._mk_z3_var(s)
+
     def _ensure_vars(self, expr):
+        # Kept for compatibility but optimized
         for s in getattr(expr, "free_symbols", set()):
-            name = str(s)
-            if name not in self.z3_vars:
-                self.z3_vars[name] = self._mk_z3_var(s)
+            self._ensure_var(s)
 
     def _to_z3(self, expr):
-        # <-- ensure presence before translate
-        self._ensure_vars(expr)
+        # No longer eager _ensure_vars(expr) linear scan
         z = self._sym2z3_cache.get(expr)
         if z is None:
-            z = sympy_to_z3(expr, self.z3_vars)
+            z = sympy_to_z3(expr, self.z3_vars, prover=self)
             self._sym2z3_cache[expr] = z
         return z
 
@@ -313,7 +357,7 @@ def build_z3_vars(sympy_syms, var_types=None):
             z3_vars[name] = Int(name)
     return z3_vars
 
-def sympy_to_z3(expr, z3_vars):
+def sympy_to_z3(expr, z3_vars, prover=None):
     from sympy import Add, Mul, Pow, Mod as SymMod, floor as SymFloor
     from sympy.logic.boolalg import BooleanTrue, BooleanFalse
     from sympy import true, false, And as SAnd, Or as SOr, Not as SNot
@@ -326,75 +370,113 @@ def sympy_to_z3(expr, z3_vars):
     if expr is False or expr == false or isinstance(expr, BooleanFalse):
         return BoolVal(False)
 
-    # --- Function handlers ---
-    if expr.func == SymMod:
-        a, b = expr.args
-        return sympy_to_z3(a, z3_vars) % sympy_to_z3(b, z3_vars)
-    if expr.func == sp.Min:
-        a, b = expr.args
-        za = sympy_to_z3(a, z3_vars)
-        zb = sympy_to_z3(b, z3_vars)
-        return Z3If(za <= zb, za, zb)
-    if expr.func == sp.Max:
-        a, b = expr.args
-        za = sympy_to_z3(a, z3_vars)
-        zb = sympy_to_z3(b, z3_vars)
-        return Z3If(za >= zb, za, zb)
-    if expr.func is SymFloor:
-        numer, denom = expr.args[0].as_numer_denom()
-        return sympy_to_z3(numer, z3_vars) / sympy_to_z3(denom, z3_vars)
-
     # --- Symbol and constants ---
     if expr.is_Symbol:
+        if prover: prover._ensure_var(expr)
         return z3_vars[str(expr)]
     if expr.is_Integer:
         return IntVal(int(expr))
     if expr.is_Rational or expr.is_Float:
         return RealVal(str(expr))
 
+    # --- Function handlers ---
+    if expr.func == SymMod:
+        a, b = expr.args
+        return sympy_to_z3(a, z3_vars, prover) % sympy_to_z3(b, z3_vars, prover)
+    if expr.func == sp.Min:
+        a, b = expr.args
+        za = sympy_to_z3(a, z3_vars, prover)
+        zb = sympy_to_z3(b, z3_vars, prover)
+        return Z3If(za <= zb, za, zb)
+    if expr.func == sp.Max:
+        a, b = expr.args
+        za = sympy_to_z3(a, z3_vars, prover)
+        zb = sympy_to_z3(b, z3_vars, prover)
+        return Z3If(za >= zb, za, zb)
+    if expr.func is SymFloor:
+        numer, denom = expr.args[0].as_numer_denom()
+        return sympy_to_z3(numer, z3_vars, prover) / sympy_to_z3(denom, z3_vars, prover)
+
     # --- Arithmetic ---
     if isinstance(expr, Add):
-        return sum(sympy_to_z3(a, z3_vars) for a in expr.args)
+        return sum(sympy_to_z3(a, z3_vars, prover) for a in expr.args)
     if isinstance(expr, Mul):
-        invs = [arg for arg in expr.args if isinstance(
-            arg, Pow) and arg.args[1].is_Integer and int(arg.args[1]) < 0]
-        normals = [arg for arg in expr.args if arg not in invs]
-        if invs:
-            numer = normals[0] if len(normals) == 1 else sp.Mul(*normals)
-            z_numer = sympy_to_z3(numer, z3_vars)
-            z_denom = sympy_to_z3(invs[0].args[0], z3_vars)
-            for d in invs[1:]:
-                z_denom = z_denom * sympy_to_z3(d.args[0], z3_vars)
-            return z_numer / z_denom
-        z_args = [sympy_to_z3(a, z3_vars) for a in expr.args]
-        out = z_args[0]
-        for a in z_args[1:]:
-            out = out * a
-        return out
+        c, z_factors = 1, []
+        denominators = []
+        
+        for arg in expr.args:
+            if arg.is_Rational:
+                # Handle rational coefficient locally
+                numer, denom = arg.as_numer_denom()
+                c *= int(numer)
+                if denom != 1:
+                    denominators.append(int(denom))
+            elif isinstance(arg, Pow) and arg.args[1].is_Integer and int(arg.args[1]) < 0:
+                # Handle classic Pow(x, -k)
+                base, exp = arg.args
+                # We need to invert the base raised to -exp
+                # Logic: x**-k -> 1 / x**k.
+                # Use recursion for base, then Z3 power.
+                z_den = sympy_to_z3(base, z3_vars, prover)
+                k = -int(exp)
+                # Use repeated multiplication for integer power to maintain Int sort
+                if k > 0:
+                    base_den = z_den
+                    z_den = 1
+                    for _ in range(k): z_den = z_den * base_den # naive loop is fine for small k
+                denominators.append(z_den)
+            else:
+                 z_factors.append(sympy_to_z3(arg, z3_vars, prover))
+
+        # Build numerator
+        z_numer = z_factors[0] if z_factors else IntVal(1)
+        for f in z_factors[1:]:
+            z_numer = z_numer * f
+        
+        # Apply integer coefficient
+        if c != 1:
+            z_numer = z_numer * int(c)
+
+        # Build denominator
+        if not denominators:
+            return z_numer
+            
+        z_denom = denominators[0]
+        if isinstance(z_denom, int): z_denom = IntVal(z_denom)
+        
+        for d in denominators[1:]:
+            dz = d if not isinstance(d, int) else IntVal(d)
+            z_denom = z_denom * dz
+            
+        return z_numer / z_denom
+
     if isinstance(expr, Pow):
         b, e = expr.args
         if e.is_integer:
             exp_n = int(e)
-            zbase = sympy_to_z3(b, z3_vars)
+            zbase = sympy_to_z3(b, z3_vars, prover)
             if exp_n == 0:
                 return IntVal(1)
             if exp_n > 0:
+                # Z3's ** operator produces Real for Int**Int. use multiplication loop.
                 res = zbase
-                for _ in range(exp_n-1):
+                for _ in range(exp_n - 1):
                     res = res * zbase
                 return res
             else:  # exp_n < 0
-                res = zbase
-                for _ in range(-exp_n-1):
-                    res = res * zbase
-                return IntVal(1) / res
+                # Denom handling
+                top = IntVal(1)
+                zb_den = zbase
+                for _ in range((-exp_n) - 1):
+                    zb_den = zb_den * zbase
+                return top / zb_den
         else:
             raise NotImplementedError(f"unexpected pow {expr}")
 
     # --- Relations ---
     if isinstance(expr, Relational):
-        lhs = sympy_to_z3(expr.lhs, z3_vars)
-        rhs = sympy_to_z3(expr.rhs, z3_vars)
+        lhs = sympy_to_z3(expr.lhs, z3_vars, prover)
+        rhs = sympy_to_z3(expr.rhs, z3_vars, prover)
         name = type(expr).__name__
         if name == 'Equality':
             return lhs == rhs
@@ -409,11 +491,11 @@ def sympy_to_z3(expr, z3_vars):
 
     # --- Boolean ops ---
     if expr.func == SNot:
-        return Z3Not(sympy_to_z3(expr.args[0], z3_vars))
+        return Z3Not(sympy_to_z3(expr.args[0], z3_vars, prover))
     if expr.func == SAnd:
-        return ZAnd(*(sympy_to_z3(a, z3_vars) for a in expr.args))
+        return Z3And(*(sympy_to_z3(a, z3_vars, prover) for a in expr.args))
     if expr.func == SOr:
-        return ZOr(*(sympy_to_z3(a, z3_vars) for a in expr.args))
+        return Z3Or(*(sympy_to_z3(a, z3_vars, prover) for a in expr.args))
 
     raise NotImplementedError(f"Cannot convert {expr!r} to Z3.")
 
@@ -506,46 +588,53 @@ def simplify_int_div_mod(expr: sp.Expr, constraints, bounds=None, prover: Prover
     m = normalized_expr.match(Mod(_wd_int*_wq + _wr_int, _wd_int))
     if m:
         res = Mod(m[_wr_int], m[_wd_int])
+    
     # A1b: Commutative twin Mod(r + d*q, d) -> Mod(r, d)
-    elif normalized_expr.match(Mod(_wr_int + _wd_int*_wq, _wd_int)): # Use elif for mutual exclusion
+    if res == normalized_expr:
         m = normalized_expr.match(Mod(_wr_int + _wd_int*_wq, _wd_int))
-        res = Mod(m[_wr_int], m[_wd_int])
+        if m:
+            res = Mod(m[_wr_int], m[_wd_int])
 
     # A2: floor((d*q + r)/d) -> q (if 0<=r<d), else q + floor(r/d)
-    elif normalized_expr.match(sp.floor((_wd_int*_wq2 + _wr)/_wd_int)):
-         m = normalized_expr.match(sp.floor((_wd_int*_wq2 + _wr)/_wd_int))
-         d_expr, q_expr, r_expr = m[_wd_int], m[_wq2], m[_wr]
-         if prover.can_prove(r_expr >= 0) and prover.can_prove(r_expr < d_expr):
-             res = q_expr
-         else:
-             res = q_expr + sp.floor(r_expr/d_expr)
+    if res == normalized_expr:
+        m = normalized_expr.match(sp.floor((_wd_int*_wq2 + _wr)/_wd_int))
+        if m:
+            d_expr, q_expr, r_expr = m[_wd_int], m[_wq2], m[_wr]
+            if prover.can_prove(r_expr >= 0) and prover.can_prove(r_expr < d_expr):
+                res = q_expr
+            else:
+                res = q_expr + sp.floor(r_expr/d_expr)
 
     # A3: floor(Mod(x, d)/d) -> 0 when d > 0
-    elif normalized_expr.match(sp.floor(Mod(_wx, _wd_int)/_wd_int)):
+    if res == normalized_expr:
         m = normalized_expr.match(sp.floor(Mod(_wx, _wd_int)/_wd_int))
-        if prover.can_prove(m[_wd_int] > 0):
-            res = sp.Integer(0)
+        if m:
+            if prover.can_prove(m[_wd_int] > 0):
+                res = sp.Integer(0)
 
     # A4: floor(x/a) -> 0 if 0 <= x < a
-    elif normalized_expr.match(sp.floor(_wx/_wa_int)):
+    if res == normalized_expr:
         m = normalized_expr.match(sp.floor(_wx/_wa_int))
-        x_expr, a_expr = m[_wx], m[_wa_int]
-        if prover.can_prove(x_expr >= 0) and prover.can_prove(x_expr < a_expr):
-            res = sp.Integer(0)
+        if m:
+            x_expr, a_expr = m[_wx], m[_wa_int]
+            if prover.can_prove(x_expr >= 0) and prover.can_prove(x_expr < a_expr):
+                res = sp.Integer(0)
 
     # A5: Mod(x, a) -> x if 0 <= x < a
-    elif isinstance(normalized_expr, Mod):
+    if res == normalized_expr and isinstance(normalized_expr, Mod):
         x_expr, a_expr = normalized_expr.args
         if prover.can_prove(a_expr > 0) and prover.can_prove(x_expr >= 0) and prover.can_prove(x_expr < a_expr):
             res = x_expr
 
     # A6 (optional): floor(n + y) -> n + floor(y) for integer n
-    elif normalized_expr.match(sp.floor(_wx_int + _wx)):
+    if res == normalized_expr:
         m = normalized_expr.match(sp.floor(_wx_int + _wx))
-        res = m[_wx_int] + sp.floor(m[_wx])
-    elif normalized_expr.match(sp.floor(_wx + _wx_int)):
-        m = normalized_expr.match(sp.floor(_wx + _wx_int))
-        res = m[_wx_int] + sp.floor(m[_wx])
+        if m:
+            res = m[_wx_int] + sp.floor(m[_wx])
+        else:
+            m = normalized_expr.match(sp.floor(_wx + _wx_int))
+            if m:
+                res = m[_wx_int] + sp.floor(m[_wx])
 
     # ----------------------------------------
     # (B) Pairwise combine inside Add nodes
