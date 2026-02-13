@@ -62,14 +62,18 @@ def OrderByOp : Lego_Op<"order_by", [Pure]> {
 }
 
 def GroupByOp : Lego_Op<"group_by", [Pure]> {
-  let summary = "Groups dimensions and applies a layout";
+  let summary = "Groups dimensions and applies a sequence of layout objects";
   let description = [{
-    Groups the input dimensions according to `group_dims` and then applies the `layout`
-    transformation to the grouped indices.
+    Groups the input dimensions according to `group_dims` and then applies the
+    sequence of layout objects. During apply, objects are iterated in reverse:
+    for each object, unflatten the current flat index into the object's dims,
+    then apply the object. During inv, objects are iterated forward.
+
+    Example: `lego.group_by [4, 5](%ob1, %ob2) : !lego.layout`
   }];
-  let arguments = (ins I64ArrayAttr:$group_dims, Lego_LayoutType:$layout);
+  let arguments = (ins I64ArrayAttr:$group_dims, Variadic<Lego_LayoutType>:$objects);
   let results = (outs Lego_LayoutType:$result);
-  let assemblyFormat = "$group_dims $layout attr-dict `:` type($result)";
+  let assemblyFormat = "$group_dims `(` $objects `)` attr-dict `:` type($result)";
 }
 
 def TileByOp : Lego_Op<"tile_by", [Pure]> {
@@ -80,10 +84,25 @@ def TileByOp : Lego_Op<"tile_by", [Pure]> {
 }
 
 def RowOp : Lego_Op<"row", [Pure]> {
-    let summary = "Creates a Row-Major layout";
-    let arguments = (ins I32Attr:$n, I32Attr:$m);
+    let summary = "Creates a Row-Major layout (identity permutation)";
+    let description = [{
+      Row(*dims) = RegP(dims, [0, 1, ..., d-1]).
+      Sugar for RegP with identity permutation.
+    }];
+    let arguments = (ins I64ArrayAttr:$dims);
     let results = (outs Lego_LayoutType:$result);
-    let assemblyFormat = "$n `,` $m attr-dict `:` type($result)";
+    let assemblyFormat = "$dims attr-dict `:` type($result)";
+}
+
+def ColOp : Lego_Op<"col", [Pure]> {
+    let summary = "Creates a Column-Major layout (reversed permutation)";
+    let description = [{
+      Col(*dims) = RegP(dims, [d-1, d-2, ..., 0]).
+      Sugar for RegP with reversed identity permutation.
+    }];
+    let arguments = (ins I64ArrayAttr:$dims);
+    let results = (outs Lego_LayoutType:$result);
+    let assemblyFormat = "$dims attr-dict `:` type($result)";
 }
 
 //===----------------------------------------------------------------------===//
