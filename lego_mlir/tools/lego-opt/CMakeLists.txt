@@ -17,6 +17,7 @@ set(LIBS
   MLIRMemRefDialect
   MLIRTensorDialect
   MLIRLinalgDialect
+  MLIRMathDialect
 )
 
 add_llvm_executable(lego-opt lego-opt.cpp)

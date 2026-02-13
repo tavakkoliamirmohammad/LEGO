@@ -18,13 +18,38 @@ class Lego_Op<string mnemonic, list<Trait> traits = []> :
 // Layout Primitives
 //===----------------------------------------------------------------------===//
 
-def GenPOp : Lego_Op<"gen_p", [Pure]> {
+def YieldOp : Lego_Op<"yield", [Pure, Terminator,
+    ParentOneOf<["GenPOp"]>]> {
+  let summary = "Yield a value from a lego region";
+  let description = [{
+    Terminates a region in `lego.gen_p`, yielding the computed flat index.
+  }];
+  let arguments = (ins Variadic<Index>:$values);
+  let assemblyFormat = "$values attr-dict `:` type($values)";
+  let builders = [
+    OpBuilder<(ins), [{ /* nothing to do */ }]>
+  ];
+}
+
+def GenPOp : Lego_Op<"gen_p", [Pure,
+    SingleBlockImplicitTerminator<"YieldOp">]> {
   let summary = "Generic Layout Block with User-Defined Logic";
   let description = [{
     Crucial for complex layouts like `antidiag` where the transformation cannot be expressed
     by a simple affine map. The region contains the Logic to compute the transformed indices.
     
-    The region takes the input indices as arguments and yields the transformed indices (or flat index).
+    The region takes the input indices as arguments and yields the transformed flat index
+    using `lego.yield`.
+
+    Example:
+    ```mlir
+    %layout = lego.gen_p [4, 4] ({
+    ^bb0(%i: index, %j: index):
+      %c1 = arith.constant 1 : index
+      %sum = arith.addi %i, %j : index
+      lego.yield %sum : index
+    }) : !lego.layout
+    ```
   }];
   let arguments = (ins I64ArrayAttr:$dims);
   let regions = (region SizedRegion<1>:$body);
