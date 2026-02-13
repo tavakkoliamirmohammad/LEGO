@@ -6,3 +6,5 @@ test.*
 *.gif
 *.ncu-rep
 *.csv
+build
+third_party/**
