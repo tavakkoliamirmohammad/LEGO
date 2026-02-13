@@ -9,6 +9,7 @@ endif()
 # Add the llvm-project submodule to the build
 # This will build LLVM and MLIR as part of the project
 set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
+set(LLVM_TARGETS_TO_BUILD "X86;NVPTX" CACHE STRING "" FORCE)
 add_subdirectory("${LLVM_SUBMODULE_DIR}/llvm" "llvm-build" EXCLUDE_FROM_ALL)
 
 # Set the MLIR source and build directories

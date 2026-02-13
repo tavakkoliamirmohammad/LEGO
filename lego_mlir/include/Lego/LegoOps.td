@@ -17,13 +17,14 @@ def RowOp : Lego_Op<"row", [Pure]> {
     let summary = "Creates a Row-Major layout";
     let arguments = (ins I32Attr:$n, I32Attr:$m);
     let results = (outs Lego_LayoutType:$result);
-    // TODO: Add assembly format
+    let assemblyFormat = "$n `,` $m attr-dict `:` type($result)";
 }
 
 def TileByOp : Lego_Op<"tile_by", [Pure]> {
     let summary = "Creates a Tiled layout";
     let arguments = (ins I32ArrayAttr:$tensor_dims, I32ArrayAttr:$tile_sizes);
     let results = (outs Lego_LayoutType:$result);
+    let assemblyFormat = "$tensor_dims `,` $tile_sizes attr-dict `:` type($result)";
 }
 
 //===----------------------------------------------------------------------===//

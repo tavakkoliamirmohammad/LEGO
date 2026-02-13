@@ -8,9 +8,15 @@ set(LIBS
   MLIRDialect
   MLIRTransformDialect
   MLIROptLib
-  MLIRRegisterAllDialects
-  MLIRRegisterAllExtensions
-  MLIRRegisterAllPasses
+  # MLIRRegisterAllDialects
+  # MLIRRegisterAllExtensions
+  # MLIRRegisterAllPasses
+  MLIRFuncDialect
+  MLIRArithDialect
+  MLIRSCFDialect
+  MLIRMemRefDialect
+  MLIRTensorDialect
+  MLIRLinalgDialect
 )
 
 add_llvm_executable(lego-opt lego-opt.cpp)
