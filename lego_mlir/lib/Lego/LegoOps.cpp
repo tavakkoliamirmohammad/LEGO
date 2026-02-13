@@ -9,7 +9,7 @@ using namespace mlir::transform;
 #define GET_OP_CLASSES
 #include "Lego/LegoOps.cpp.inc"
 
-DiagnosedSilenceableFailure ApplyLayoutOp::apply(
+DiagnosedSilenceableFailure ApplyLayoutTransformOp::apply(
     transform::TransformRewriter &rewriter,
     transform::TransformResults &results,
     transform::TransformState &state) {
@@ -26,7 +26,7 @@ DiagnosedSilenceableFailure ApplyLayoutOp::apply(
   return DiagnosedSilenceableFailure::success();
 }
 
-void ApplyLayoutOp::getEffects(
+void ApplyLayoutTransformOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
   transform::consumesHandle(getOperation()->getOpOperands().take_front(1), effects);
   transform::onlyReadsHandle(getOperation()->getOpOperands().drop_front(1), effects);

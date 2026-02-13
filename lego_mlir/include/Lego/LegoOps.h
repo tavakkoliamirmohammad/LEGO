@@ -8,6 +8,7 @@
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
 #include "Lego/LegoDialect.h"
+#include "Lego/Passes.h"
 
 #define GET_OP_CLASSES
 #include "Lego/LegoOps.h.inc"

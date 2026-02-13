@@ -1,10 +1,14 @@
+include_directories(${CMAKE_BINARY_DIR}/lego_mlir/include)
+
 add_mlir_dialect_library(MLIRLego
   LegoDialect.cpp
   LegoOps.cpp
+  LegoToArith.cpp
 
   DEPENDS
   MLIRLegoDialectIncGen
   MLIRLegoOpsIncGen
+  MLIRLegoPassesIncGen
 
   LINK_LIBS PUBLIC
   MLIRIR

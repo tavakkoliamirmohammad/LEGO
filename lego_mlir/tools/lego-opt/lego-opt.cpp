@@ -8,9 +8,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/SourceMgr.h"
-#include "llvm/Support/ToolOutputFile.h"
-
+#include "Lego/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -30,7 +28,8 @@ int main(int argc, char **argv) {
   mlir::registerCanonicalizerPass();
   mlir::registerCSEPass();
   mlir::registerSymbolDCEPass();
-  // TODO: Register lego passes here
+  // Register LEGO passes
+  mlir::lego::registerLegoToArithPass();
 
   mlir::DialectRegistry registry;
   // mlir::registerAllDialects(registry);
