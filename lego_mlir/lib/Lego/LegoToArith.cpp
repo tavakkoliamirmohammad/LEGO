@@ -3,6 +3,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "Lego/LegoOps.h"
 #include "Lego/Passes.h"
@@ -104,9 +105,9 @@ SmallVector<int64_t> inversePermutation(ArrayRef<int64_t> perm) {
   return inv;
 }
 
-// get_sigma_perm(d, q) => [k + d*h for h in range(q) for k in range(d)]
-// Wait, Python is: [[k + d*h for h in range(q)] for k in range(d)]
-// flattened via sum(..., [])
+// get_sigma_perm(d, q) matches Python:
+// [[k + d*h for h in range(q)] for k in range(d)] flattened
+// Result: 0, d, 2d, ..., 1, d+1, 2d+1, ...
 SmallVector<int64_t> getSigmaPerm(int d, int q) {
   SmallVector<int64_t> result;
   for (int k = 0; k < d; ++k)
@@ -118,6 +119,42 @@ SmallVector<int64_t> getSigmaPerm(int d, int q) {
 // ============================================================================
 // getLayoutInputDims — recursively determine input dimensions for a layout
 // ============================================================================
+
+struct TileDimsInfo {
+  SmallVector<int64_t> flatDims;
+  int64_t d = 0;
+  int64_t q = 0;
+  bool valid = false;
+};
+
+TileDimsInfo extractNestedTileDims(ArrayAttr tileDimsAttr) {
+  TileDimsInfo info;
+  if (!tileDimsAttr) return info;
+  info.q = tileDimsAttr.size();
+  if (info.q == 0) return info; // Empty outer list
+
+  for (Attribute innerAttr : tileDimsAttr) {
+    auto innerArray = dyn_cast<ArrayAttr>(innerAttr);
+    if (!innerArray) return {}; // Invalid structure: expected nested list
+
+    if (info.d == 0) {
+      info.d = innerArray.size();
+      if (info.d == 0) return {}; // Empty inner list not allowed
+    } else if ((int64_t)innerArray.size() != info.d) {
+      return {}; // Dimensional mismatch: all groups must have size d
+    }
+
+    for (Attribute valAttr : innerArray) {
+      if (auto intAttr = dyn_cast<IntegerAttr>(valAttr)) {
+        info.flatDims.push_back(intAttr.getInt());
+      } else {
+        return {}; // Invalid element: expected integer
+      }
+    }
+  }
+  info.valid = true;
+  return info;
+}
 
 SmallVector<int64_t> getLayoutInputDims(Value layout) {
   Operation *defOp = layout.getDefiningOp();
@@ -149,8 +186,9 @@ SmallVector<int64_t> getLayoutInputDims(Value layout) {
     return extractI64Array(groupByOp.getGroupDims());
 
   if (auto tileByOp = dyn_cast<TileByOp>(defOp)) {
-    // TileBy input dims = the tile_sizes count (one dim per tile)
-    return extractI64Array(tileByOp.getTileSizes());
+    // TileBy input dims = the flattened tile_dims
+    auto info = extractNestedTileDims(tileByOp.getTileDims());
+    return info.flatDims;
   }
 
   return {};
@@ -245,8 +283,8 @@ SmallVector<Value> applyInverseCol(OpBuilder &b, Location loc, ColOp op,
 // ============================================================================
 // GenP  (Python L150-178)
 //
-// apply: inlines the body region
-// inv:   NOT YET IMPLEMENTED (requires a second region)
+// apply: inlines the body (apply) region
+// inv:   inlines the inv_body (inverse) region
 // ============================================================================
 
 Value applyGenP(OpBuilder &b, Location loc, GenPOp op, ValueRange indices) {
@@ -266,6 +304,29 @@ Value applyGenP(OpBuilder &b, Location loc, GenPOp op, ValueRange indices) {
     return mapping.lookup(term->getOperand(0));
 
   return nullptr;
+}
+
+SmallVector<Value> applyInverseGenP(OpBuilder &b, Location loc, GenPOp op,
+                                    Value flatIndex) {
+  Region &invBody = op.getInvBody();
+  if (invBody.empty())
+    return {};
+
+  Block &block = invBody.front();
+  if (block.getNumArguments() != 1)
+    return {};
+
+  IRMapping mapping;
+  mapping.map(block.getArgument(0), flatIndex);
+
+  for (auto &opInst : block.without_terminator())
+    b.clone(opInst, mapping);
+
+  Operation *term = block.getTerminator();
+  SmallVector<Value> results;
+  for (Value operand : term->getOperands())
+    results.push_back(mapping.lookup(operand));
+  return results;
 }
 
 // ============================================================================
@@ -395,6 +456,8 @@ Value applyGroupBy(OpBuilder &b, Location loc, GroupByOp op,
   return current;
 }
 
+
+
 SmallVector<Value> applyInverseGroupBy(OpBuilder &b, Location loc,
                                        GroupByOp op, Value flatIndex) {
   auto groupDims = extractI64Array(op.getGroupDims());
@@ -421,43 +484,171 @@ SmallVector<Value> applyInverseGroupBy(OpBuilder &b, Location loc,
 // which requires the OrderBy chain context.
 // ============================================================================
 
+// ============================================================================
+// TileBy (Python OrderBy.TileBy)
+//
+// Expands to GroupBy([tile_dims], objects...) where objects are:
+//   for each perm in input_orderby:
+//     perm
+//     RegP(perm_dims, inverse(sigma(d_perm, q_perm)))
+//   RegP(tile_dims, sigma(d_tile, q_tile))
+//
+// apply: flatten indices -> apply GroupBy logic (reverse objects)
+// inv:   apply GroupBy inv logic (forward objects) -> unflatten
+// ============================================================================
+
+// Helper to get {d, q} for a layout op.
+// Most primitive ops (Row, Col, RegP, GenP) have q=1, d=rank.
+std::pair<int, int> getLayoutDQ(Value layout) {
+  // For now, assume all blocks in the OrderBy chain are simple blocks with q=1
+  SmallVector<int64_t> dims = getLayoutInputDims(layout);
+  return {static_cast<int>(dims.size()), 1};
+}
+
+
+
+// Helper for TileBy Apply
 Value applyTileBy(OpBuilder &b, Location loc, TileByOp op,
                   ValueRange indices) {
-  auto sizes = extractI64Array(op.getTileSizes());
+  auto info = extractNestedTileDims(op.getTileDims());
+  if (!info.valid) return {};
 
-  SmallVector<Value> tiledIndices;
-  for (size_t i = 0; i < indices.size(); ++i) {
-    Value idx = indices[i];
-    int64_t s = sizes[i];
-    Value sizeVal = getConstantIndex(b, loc, s);
-    Value q = b.create<arith::DivUIOp>(loc, idx, sizeVal);
-    Value r = b.create<arith::RemUIOp>(loc, idx, sizeVal);
-    tiledIndices.push_back(q);
-    tiledIndices.push_back(r);
+  auto tileDims = info.flatDims;
+  int64_t d_tile = info.d;
+  int64_t q_tile = info.q;
+
+  // 1. Flatten input indices
+  Value currentFlat = flattenIndex(b, loc, indices, tileDims);
+
+  // 2. Identify the chain of objects from input OrderBy
+  Operation *defOp = op.getInput().getDefiningOp();
+  SmallVector<Value> chain;
+  if (auto orderByOp = dyn_cast<OrderByOp>(defOp)) {
+    auto range = orderByOp.getPerms(); // Variadic<Lego_LayoutType>
+    chain.append(range.begin(), range.end());
+  } else {
+    chain.push_back(op.getInput());
   }
-  return applyLayout(b, loc, op.getInput(), tiledIndices);
+
+  // 3. Construct virtual GroupBy objects list:
+  //    [o1, reshuffle1, o2, reshuffle2, ..., final_reshuffle]
+  //    But apply() iterates in REVERSE.
+
+  // 3a. Apply final_reshuffle (RegP with sigma_dq)
+  {
+    auto sigma = getSigmaPerm(d_tile, q_tile); // [0, d, 2d...]
+    // unflatten currentFlat using tileDims
+    auto indices = unflattenIndex(b, loc, currentFlat, tileDims);
+    // permute indices
+    auto permutedIndices = sigmaValues(indices, sigma);
+    // permute dims
+    auto permutedDims = ::sigma<int64_t>(tileDims, sigma);
+    // flatten
+    currentFlat = flattenIndex(b, loc, permutedIndices, permutedDims);
+  }
+
+  // 3b. Iterate chain in reverse
+  for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+    Value obj = *it;
+    auto [d_obj, q_obj] = getLayoutDQ(obj);
+    auto objDims = getLayoutInputDims(obj); // dims of this block
+
+    // Apply reshuffle_obj (RegP with inverse(sigma(d_obj, q_obj)))
+    auto sigma_o = getSigmaPerm(d_obj, q_obj);
+    auto sigma_o_inv = inversePermutation(sigma_o);
+    auto reshuffleInputDims = ::sigma<int64_t>(objDims, sigma_o);
+
+    // Apply Reshuffle
+    {
+       auto indices = unflattenIndex(b, loc, currentFlat, reshuffleInputDims);
+       auto permIndices = sigmaValues(indices, sigma_o_inv); // matches RegP apply
+       currentFlat = flattenIndex(b, loc, permIndices, objDims);
+    }
+
+    // Apply object `o`
+    {
+      auto indices = unflattenIndex(b, loc, currentFlat, objDims);
+      currentFlat = applyLayout(b, loc, obj, indices);
+    }
+  }
+
+  return currentFlat;
 }
 
 SmallVector<Value> applyInverseTileBy(OpBuilder &b, Location loc, TileByOp op,
                                       Value flatIndex) {
-  SmallVector<Value> innerIndices =
-      applyInverseLayout(b, loc, op.getInput(), flatIndex);
-  if (innerIndices.empty())
-    return {};
+  auto info = extractNestedTileDims(op.getTileDims());
+  if (!info.valid) return {};
 
-  auto sizes = extractI64Array(op.getTileSizes());
+  auto tileDims = info.flatDims;
+  int64_t d_tile = info.d;
+  int64_t q_tile = info.q;
 
-  SmallVector<Value> originalIndices;
-  for (size_t i = 0; i < sizes.size(); ++i) {
-    Value q = innerIndices[2 * i];
-    Value r = innerIndices[2 * i + 1];
-    int64_t s = sizes[i];
-    Value sizeVal = getConstantIndex(b, loc, s);
-    Value qs = b.create<arith::MulIOp>(loc, q, sizeVal);
-    Value idx = b.create<arith::AddIOp>(loc, qs, r);
-    originalIndices.push_back(idx);
+  Value currentFlat = flatIndex;
+
+  // 1. Identify chain
+  Operation *defOp = op.getInput().getDefiningOp();
+  SmallVector<Value> chain;
+  if (auto orderByOp = dyn_cast<OrderByOp>(defOp)) {
+    auto range = orderByOp.getPerms();
+    chain.append(range.begin(), range.end());
+  } else {
+    chain.push_back(op.getInput());
   }
-  return originalIndices;
+
+  // 2. Iterate chain FORWARD (GroupBy.inv logic)
+  // List: [o1, reshuffle1, o2, reshuffle2, ..., final_reshuffle]
+  for (Value obj : chain) {
+    auto [d_obj, q_obj] = getLayoutDQ(obj);
+    auto objDims = getLayoutInputDims(obj);
+
+    // Apply inv(o)
+    {
+      // GroupBy.inv(flat): obj.inv(flat) -> flatten into obj.dims
+      auto indices = applyInverseLayout(b, loc, obj, currentFlat); 
+      // If o is GenP/etc, indices are output of inv().
+      // We must flatten them using objDims.
+      currentFlat = flattenIndex(b, loc, indices, objDims);
+    }
+
+    // Apply inv(reshuffle)
+    // Reshuffle: RegP(sigma(o_dims, sigma_o), sigma_o_inv)
+    // inverse is RegP(o_dims, sigma_o)
+    {
+      auto sigma_o = getSigmaPerm(d_obj, q_obj);
+      // RegP.inv(flat) unflat(flat, perm(dims)) -> perm_inv(idx)
+      // Here "perm" of the reshuffle op is sigma_o_inv.
+      // So "perm(dims)" is sigma(inputDims, sigma_o_inv) = o_dims (since input was permuted).
+      // Wait, let's just use the conceptual transform.
+      // Reshuffle was: input -> permute by sigma_o_inv. output -> permute dims back.
+      // Inverse is: input -> permute by sigma_o. output -> permute dims.
+      
+      // We start with currentFlat which corresponds to `o_dims` (from previous step).
+      auto indices = unflattenIndex(b, loc, currentFlat, objDims);
+      // Permute by sigma_o
+      auto permIndices = sigmaValues(indices, sigma_o);
+      // Output dims: sigma(o_dims, sigma_o)
+      auto outDims = ::sigma<int64_t>(objDims, sigma_o);
+      currentFlat = flattenIndex(b, loc, permIndices, outDims);
+    }
+  }
+
+  // 3. Apply inv(final_reshuffle)
+  // Final reshuffle: RegP(tileDims, sigma_dq)
+  // Inverse: RegP(permutedDims, inverse(sigma_dq))
+  // Logically: unflatten using permutedDims -> permute by inv(sigma_dq) -> flatten using tileDims
+  {
+    auto sigma = getSigmaPerm(d_tile, q_tile);
+    auto sigma_inv = inversePermutation(sigma);
+    auto permutedDims = ::sigma<int64_t>(tileDims, sigma);
+
+    auto indices = unflattenIndex(b, loc, currentFlat, permutedDims);
+    auto permIndices = sigmaValues(indices, sigma_inv);
+    currentFlat = flattenIndex(b, loc, permIndices, tileDims);
+  }
+
+  // 4. Finally unflatten to tileDims (GroupBy.inv returns N-D indices)
+  return unflattenIndex(b, loc, currentFlat, tileDims);
 }
 
 // ============================================================================
@@ -508,6 +699,9 @@ SmallVector<Value> applyInverseLayout(OpBuilder &b, Location loc, Value layout,
 
   if (auto regPOp = dyn_cast<RegPOp>(defOp))
     return applyInverseRegP(b, loc, regPOp, flatIndex);
+
+  if (auto genPOp = dyn_cast<GenPOp>(defOp))
+    return applyInverseGenP(b, loc, genPOp, flatIndex);
 
   if (auto tileByOp = dyn_cast<TileByOp>(defOp))
     return applyInverseTileBy(b, loc, tileByOp, flatIndex);

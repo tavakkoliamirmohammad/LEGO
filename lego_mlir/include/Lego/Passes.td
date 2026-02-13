@@ -13,7 +13,8 @@ def LegoToArithPass : Pass<"lego-to-arith", "mlir::ModuleOp"> {
     "mlir::arith::ArithDialect",
     "mlir::affine::AffineDialect",
     "mlir::scf::SCFDialect",
-    "mlir::memref::MemRefDialect"
+    "mlir::memref::MemRefDialect",
+    "mlir::math::MathDialect"
   ];
 }
 

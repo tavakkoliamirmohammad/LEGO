@@ -31,30 +31,38 @@ def YieldOp : Lego_Op<"yield", [Pure, Terminator,
   ];
 }
 
-def GenPOp : Lego_Op<"gen_p", [Pure,
-    SingleBlockImplicitTerminator<"YieldOp">]> {
-  let summary = "Generic Layout Block with User-Defined Logic";
+def GenPOp : Lego_Op<"gen_p", [Pure]> {
+  let summary = "Generic Layout Block with User-Defined forward and inverse Logic";
   let description = [{
-    Crucial for complex layouts like `antidiag` where the transformation cannot be expressed
-    by a simple affine map. The region contains the Logic to compute the transformed indices.
-    
-    The region takes the input indices as arguments and yields the transformed flat index
-    using `lego.yield`.
+    For complex layouts like `antidiag` where the transformation cannot be expressed
+    by a simple permutation. Contains two regions:
+
+    - `apply` region: takes N-D indices as block args, yields a single flat index
+    - `inv` region (optional): takes a flat index as block arg, yields N-D indices
+
+    Both regions are terminated with `lego.yield`.
 
     Example:
     ```mlir
-    %layout = lego.gen_p [4, 4] ({
-    ^bb0(%i: index, %j: index):
-      %c1 = arith.constant 1 : index
-      %sum = arith.addi %i, %j : index
-      lego.yield %sum : index
-    }) : !lego.layout
+    %layout = lego.gen_p [4, 4]
+      apply {
+      ^bb0(%i: index, %j: index):
+        %sum = arith.addi %i, %j : index
+        lego.yield %sum : index
+      }
+      inv {
+      ^bb0(%flat: index):
+        %c4 = arith.constant 4 : index
+        %i = arith.divui %flat, %c4 : index
+        %j = arith.remui %flat, %c4 : index
+        lego.yield %i, %j : index, index
+      } : !lego.layout
     ```
   }];
   let arguments = (ins I64ArrayAttr:$dims);
-  let regions = (region SizedRegion<1>:$body);
+  let regions = (region SizedRegion<1>:$body, AnyRegion:$inv_body);
   let results = (outs Lego_LayoutType:$result);
-  let assemblyFormat = "$dims $body attr-dict `:` type($result)";
+  let assemblyFormat = "$dims `apply` $body (`inv` $inv_body^)? attr-dict `:` type($result)";
 }
 
 def RegPOp : Lego_Op<"reg_p", [Pure]> {
@@ -102,10 +110,24 @@ def GroupByOp : Lego_Op<"group_by", [Pure]> {
 }
 
 def TileByOp : Lego_Op<"tile_by", [Pure]> {
-    let summary = "Creates a Tiled layout";
-    let arguments = (ins Lego_LayoutType:$input, I64ArrayAttr:$tile_sizes);
+    let summary = "Multi-level tiled layout (Python OrderBy.TileBy)";
+    let description = [{
+      Tiles the input OrderBy layout into groups of `d` dimensions each.
+      `tile_dims` is a nested list of group dimensions efficiently represented as ArrayAttr containing I64ArrayAttrs.
+      `d` is inferred from `len(tile_dims[0])`.
+      `q` is inferred from `len(tile_dims)`.
+
+      Example: OrderBy(Row(384,384,384)).TileBy([48,48,48], [8,8,8])
+      ```mlir
+      %r = lego.row [384, 384, 384] : !lego.layout
+      %ob = lego.order_by(%r) : !lego.layout
+      // d=3, q=2 inferred from nested list
+      %tb = lego.tile_by %ob tile_dims [[48, 48, 48], [8, 8, 8]] : !lego.layout
+      ```
+    }];
+    let arguments = (ins Lego_LayoutType:$input, ArrayAttr:$tile_dims);
     let results = (outs Lego_LayoutType:$result);
-    let assemblyFormat = "$input `sizes` $tile_sizes attr-dict `:` type($result)";
+    let assemblyFormat = "$input `tile_dims` $tile_dims attr-dict `:` type($result)";
 }
 
 def RowOp : Lego_Op<"row", [Pure]> {

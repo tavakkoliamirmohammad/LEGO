@@ -180,22 +180,25 @@ func.func @parse_groupby_empty(%i: index) -> index {
 // TileByOp
 // ============================================================================
 
-// CHECK-LABEL: func.func @parse_tileby
-// CHECK:       lego.tile_by %{{.*}} sizes [4, 8] : !lego.layout
-func.func @parse_tileby(%i: index, %j: index) -> index {
-  %inner = lego.row [2, 4] : !lego.layout
-  %tb = lego.tile_by %inner sizes [4, 8] : !lego.layout
-  %f = lego.apply %tb(%i, %j) : !lego.layout
-  return %f : index
+// CHECK-LABEL: func.func @lego_tile_by
+// CHECK:       lego.tile_by %{{.*}} tile_dims {{\[}}[4], [8]{{\]}} : !lego.layout
+func.func @lego_tile_by(%inner: !lego.layout) -> !lego.layout {
+  %tb = lego.tile_by %inner tile_dims [[4], [8]] : !lego.layout
+  return %tb : !lego.layout
 }
 
-// CHECK-LABEL: func.func @parse_tileby_3d
-// CHECK:       lego.tile_by %{{.*}} sizes [2, 4, 8] : !lego.layout
-func.func @parse_tileby_3d(%i: index, %j: index, %k: index) -> index {
-  %inner = lego.row [2, 3, 2, 3, 2, 3] : !lego.layout
-  %tb = lego.tile_by %inner sizes [2, 4, 8] : !lego.layout
-  %f = lego.apply %tb(%i, %j, %k) : !lego.layout
-  return %f : index
+// CHECK-LABEL: func.func @lego_tile_by_complex
+// CHECK:       lego.tile_by %{{.*}} tile_dims {{\[}}[2, 4, 8]{{\]}} : !lego.layout
+func.func @lego_tile_by_complex(%inner: !lego.layout) -> !lego.layout {
+  %tb = lego.tile_by %inner tile_dims [[2, 4, 8]] : !lego.layout
+  return %tb : !lego.layout
+}
+
+// CHECK-LABEL: func.func @lego_tile_by_nested
+// CHECK:       lego.tile_by %{{.*}} tile_dims {{\[}}[4], [4]{{\]}} : !lego.layout
+func.func @lego_tile_by_nested(%inner: !lego.layout) -> !lego.layout {
+  %tb = lego.tile_by %inner tile_dims [[4], [4]] : !lego.layout
+  return %tb : !lego.layout
 }
 
 // ============================================================================
@@ -257,10 +260,13 @@ func.func @parse_groupby_with_orderby_chain(%i: index, %j: index) -> index {
 
 // CHECK-LABEL: func.func @parse_tileby_with_regp_inner
 // CHECK:       lego.reg_p perm [1, 0] dims [4, 8] : !lego.layout
-// CHECK:       lego.tile_by %{{.*}} sizes [4, 4] : !lego.layout
+// CHECK:       lego.tile_by %{{.*}} tile_dims {{\[}}[4], [4]{{\]}} : !lego.layout
 func.func @parse_tileby_with_regp_inner(%i: index, %j: index) -> index {
   %inner = lego.reg_p perm [1, 0] dims [4, 8] : !lego.layout
-  %tb = lego.tile_by %inner sizes [4, 4] : !lego.layout
+  // TileBy inner OrderBy?
+  // Our implementation assumes input is OrderBy or single block.
+  // RegP is acceptable.
+  %tb = lego.tile_by %inner tile_dims [[4], [4]] : !lego.layout
   %f = lego.apply %tb(%i, %j) : !lego.layout
   return %f : index
 }

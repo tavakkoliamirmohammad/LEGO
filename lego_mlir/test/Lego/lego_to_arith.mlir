@@ -441,41 +441,45 @@ func.func @groupby_identity_inv(%f: index) -> (index, index) {
 }
 
 // ============================================================================
-// TileBy — Tile dimensions: splits each dim into (idx/size, idx%size)
-// then delegates to inner layout
+// TileBy — Tile dimensions: Python-style multi-level tiling
+// Creates GroupBy([tile_dims], ...) which flattens the input split indices.
 // ============================================================================
 
-// --- TileBy with Row inner: TileBy(Row([2,4,2,4]), sizes=[4,16])
-// apply(i, j):
-//   tiled = (i/4, i%4, j/16, j%16)
-//   Row([2,4,2,4]).apply(i/4, i%4, j/16, j%16) = (i/4)*32 + (i%4)*8 + (j/16)*4 + (j%16) ---
-// CHECK-LABEL: func.func @tileby_row_apply
-// CHECK-SAME:  (%[[I:.*]]: index, %[[J:.*]]: index)
-// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
+// --- TileBy 1D: TileBy([4], [16]). d=1. q=2. ---
+// Input indices: (i_t, i_b).
+// Flatten with [4, 16] -> i_t * 16 + i_b.
+// Interleave (d=1, q=2) -> [0, 1] (identity).
+// Inner layout Row(64) -> identity.
+// Result: i_t * 16 + i_b.
+
+// CHECK-LABEL: func.func @tileby_1d_apply
+// CHECK-SAME:  (%[[IT:.*]]: index, %[[IB:.*]]: index)
 // CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
-// CHECK:       %[[Q0:.*]] = arith.divui %[[I]], %[[C4]] : index
-// CHECK:       %[[R0:.*]] = arith.remui %[[I]], %[[C4]] : index
-// CHECK:       %[[Q1:.*]] = arith.divui %[[J]], %[[C16]] : index
-// CHECK:       %[[R1:.*]] = arith.remui %[[J]], %[[C16]] : index
-// CHECK:       return
-func.func @tileby_row_apply(%i: index, %j: index) -> index {
-  %inner = lego.row [2, 4, 2, 4] : !lego.layout
-  %tb = lego.tile_by %inner sizes [4, 16] : !lego.layout
-  %f = lego.apply %tb(%i, %j) : !lego.layout
+// CHECK:       %[[T:.*]] = arith.muli %[[IT]], %[[C16]] : index
+// CHECK:       %[[FLAT:.*]] = arith.addi %[[T]], %[[IB]] : index
+// CHECK:       return %[[FLAT]] : index
+func.func @tileby_1d_apply(%it: index, %ib: index) -> index {
+  %inner = lego.row [64] : !lego.layout
+  // TileBy expects OrderBy input
+  %ob = lego.order_by(%inner) : !lego.layout
+  %tb = lego.tile_by %ob tile_dims [[4], [16]] : !lego.layout
+  %f = lego.apply %tb(%it, %ib) : !lego.layout
   return %f : index
 }
 
 // --- TileBy inverse ---
-// CHECK-LABEL: func.func @tileby_row_inv
+// CHECK-LABEL: func.func @tileby_1d_inv
 // CHECK-SAME:  (%[[F:.*]]: index)
-// CHECK:       arith.muli
-// CHECK:       arith.addi
-// CHECK:       return
-func.func @tileby_row_inv(%f: index) -> (index, index) {
-  %inner = lego.row [2, 4, 2, 4] : !lego.layout
-  %tb = lego.tile_by %inner sizes [4, 16] : !lego.layout
-  %i, %j = lego.apply_inverse %tb(%f) : !lego.layout -> index, index
-  return %i, %j : index, index
+// CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
+// CHECK:       %[[IT:.*]] = arith.divui %[[F]], %[[C16]] : index
+// CHECK:       %[[IB:.*]] = arith.remui %[[F]], %[[C16]] : index
+// CHECK:       return %[[IT]], %[[IB]] : index, index
+func.func @tileby_1d_inv(%f: index) -> (index, index) {
+  %inner = lego.row [64] : !lego.layout
+  %ob = lego.order_by(%inner) : !lego.layout
+  %tb = lego.tile_by %ob tile_dims [[4], [16]] : !lego.layout
+  %it, %ib = lego.apply_inverse %tb(%f) : !lego.layout -> index, index
+  return %it, %ib : index, index
 }
 
 // ============================================================================
