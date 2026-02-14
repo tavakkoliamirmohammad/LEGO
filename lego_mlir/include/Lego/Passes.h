@@ -8,6 +8,7 @@ namespace mlir {
 namespace lego {
 
 std::unique_ptr<Pass> createLegoToArithPass();
+std::unique_ptr<Pass> createLegoDesugarPass();
 
 #define GEN_PASS_DECL_LEGOTOARITHPASS
 #define GEN_PASS_REGISTRATION

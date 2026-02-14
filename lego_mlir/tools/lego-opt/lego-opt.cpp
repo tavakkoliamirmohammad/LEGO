@@ -31,6 +31,7 @@ int main(int argc, char **argv) {
   mlir::registerSymbolDCEPass();
   // Register LEGO passes
   mlir::lego::registerLegoToArithPass();
+  mlir::lego::registerLegoDesugarPass();
 
   mlir::DialectRegistry registry;
   // mlir::registerAllDialects(registry);

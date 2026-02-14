@@ -1,5 +1,5 @@
 // RUN: lego-opt %s | FileCheck %s --check-prefix=PARSE
-// RUN: lego-opt --lego-to-arith %s | FileCheck %s --check-prefix=LOWER
+// RUN: lego-opt --lego-desugar --lego-to-arith %s | FileCheck %s --check-prefix=LOWER
 
 // ============================================================================
 // GenP — General Permutation with user-defined apply + inv logic
@@ -414,9 +414,6 @@ func.func @groupby_roundtrip(%i: index, %j: index) -> (index, index) {
 // LOWER-NOT:   lego.tile_by
 // LOWER-NOT:   lego.apply
 // LOWER:       return
-func.func @tileby_roundtrip(%i: index, %j: index) -> (index, index) {
-  %inner = lego.row [2, 4, 2, 4] : !lego.layout
-  %tb = lego.tile_by %inner sizes [4, 16] : !lego.layout
 func.func @tileby_roundtrip(%i_t: index, %j_t: index, %i_b: index, %j_b: index) -> (index, index, index, index) {
   // TileBy(Row(8, 32), [[2, 4], [4, 8]])
   // d=2. q=2. Flattened dims [2, 4, 4, 8].

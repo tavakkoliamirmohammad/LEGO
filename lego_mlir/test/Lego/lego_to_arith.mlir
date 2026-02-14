@@ -1,4 +1,4 @@
-// RUN: lego-opt --lego-to-arith %s | FileCheck %s
+// RUN: lego-opt --lego-desugar --lego-to-arith %s | FileCheck %s
 
 // ============================================================================
 // Row — N-D Row-Major (identity permutation)

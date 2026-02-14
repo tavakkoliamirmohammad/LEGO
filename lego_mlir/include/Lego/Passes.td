@@ -3,6 +3,16 @@
 
 include "mlir/Pass/PassBase.td"
 
+def LegoDesugarPass : Pass<"lego-desugar", "mlir::ModuleOp"> {
+  let summary = "Desugar LEGO dialect syntactic sugars (like TileBy)";
+  let description = [{
+    This pass simplifies LEGO dialect operations by rewriting syntactic sugar ops
+    (e.g., TileBy) into their primitive components (GroupBy, OrderBy, RegP).
+  }];
+  let constructor = "mlir::lego::createLegoDesugarPass()";
+  let dependentDialects = ["mlir::lego::LegoDialect"];
+}
+
 def LegoToArithPass : Pass<"lego-to-arith", "mlir::ModuleOp"> {
   let summary = "Lower LEGO dialect to Arith/Affine";
   let description = [{
