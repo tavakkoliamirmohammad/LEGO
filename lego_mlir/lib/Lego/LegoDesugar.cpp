@@ -38,13 +38,10 @@ struct RowOpRewrite : public OpRewritePattern<RowOp> {
     std::iota(perm.begin(), perm.end(), 0);
 
     // Create RegPOp
-    OperationState regPState(loc, RegPOp::getOperationName());
-    regPState.addTypes(TypeRange{op.getType()});
-    regPState.addAttribute("perm", rewriter.getI64ArrayAttr(perm));
-    regPState.addAttribute("dims", op.getDims());
-    Operation *regPOp = rewriter.create(regPState);
+    auto regPOp = RegPOp::create(rewriter, loc, op.getType(),
+                                 rewriter.getI64ArrayAttr(perm), op.getDims());
 
-    rewriter.replaceOp(op, regPOp->getResults());
+    rewriter.replaceOp(op, regPOp.getResult());
     return success();
   }
 };
@@ -70,13 +67,10 @@ struct ColOpRewrite : public OpRewritePattern<ColOp> {
     }
 
     // Create RegPOp
-    OperationState regPState(loc, RegPOp::getOperationName());
-    regPState.addTypes(TypeRange{op.getType()});
-    regPState.addAttribute("perm", rewriter.getI64ArrayAttr(perm));
-    regPState.addAttribute("dims", op.getDims());
-    Operation *regPOp = rewriter.create(regPState);
+    auto regPOp = RegPOp::create(rewriter, loc, op.getType(),
+                                 rewriter.getI64ArrayAttr(perm), op.getDims());
 
-    rewriter.replaceOp(op, regPOp->getResults());
+    rewriter.replaceOp(op, regPOp.getResult());
     return success();
   }
 };
@@ -129,48 +123,38 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
         auto reshuffleDims = ::sigma<int64_t>(objDims, sigma_o);
         
         // Create RegP
-        OperationState regPState(loc, RegPOp::getOperationName());
-        regPState.addTypes(TypeRange{op.getType()});
-        regPState.addAttribute("perm", rewriter.getI64ArrayAttr(sigma_o_inv));
-        regPState.addAttribute("dims", rewriter.getI64ArrayAttr(reshuffleDims));
-        Operation *regPOp = rewriter.create(regPState);
-        
+        auto regPOp = RegPOp::create(
+            rewriter, loc, op.getType(), rewriter.getI64ArrayAttr(sigma_o_inv),
+            rewriter.getI64ArrayAttr(reshuffleDims));
+
         // Wrap in OrderBy
-        OperationState orderByState(loc, OrderByOp::getOperationName());
-        orderByState.addTypes(TypeRange{regPOp->getResult(0).getType()});
-        orderByState.addOperands(ValueRange{regPOp->getResult(0)});
-        Operation *orderByOp = rewriter.create(orderByState);
+        auto orderByOp = OrderByOp::create(rewriter, loc, regPOp.getType(),
+                                           ValueRange{regPOp.getResult()});
 
         groupByObjects.push_back(obj);
-        groupByObjects.push_back(orderByOp->getResult(0));
+        groupByObjects.push_back(orderByOp.getResult());
     }
     
     // Final reshuffle
     {
         auto sigma_dq = getSigmaPerm(d_tile, q_tile);
-        OperationState regPState(loc, RegPOp::getOperationName());
-        regPState.addTypes(TypeRange{op.getType()});
-        regPState.addAttribute("perm", rewriter.getI64ArrayAttr(sigma_dq));
-        regPState.addAttribute("dims", rewriter.getI64ArrayAttr(tileDims));
-        Operation *regPOp = rewriter.create(regPState);
+        auto regPOp = RegPOp::create(rewriter, loc, op.getType(),
+                                     rewriter.getI64ArrayAttr(sigma_dq),
+                                     rewriter.getI64ArrayAttr(tileDims));
 
-        OperationState orderByState(loc, OrderByOp::getOperationName());
-        orderByState.addTypes(TypeRange{regPOp->getResult(0).getType()});
-        orderByState.addOperands(ValueRange{regPOp->getResult(0)});
-        Operation *orderByOp = rewriter.create(orderByState);
-        
-        groupByObjects.push_back(orderByOp->getResult(0));
+        auto orderByOp = OrderByOp::create(rewriter, loc, regPOp.getType(),
+                                           ValueRange{regPOp.getResult()});
+
+        groupByObjects.push_back(orderByOp.getResult());
     }
 
     // 6. Create GroupByOp
     //    GroupBy([dims], new_order_by + ...)
-    OperationState groupByState(loc, GroupByOp::getOperationName());
-    groupByState.addTypes(TypeRange{op.getType()});
-    groupByState.addAttribute("group_dims", rewriter.getI64ArrayAttr(tileDims));
-    groupByState.addOperands(groupByObjects);
-    Operation *groupByOp = rewriter.create(groupByState);
-    
-    rewriter.replaceOp(op, groupByOp->getResults());
+    auto groupByOp = GroupByOp::create(rewriter, loc, op.getType(),
+                                      rewriter.getI64ArrayAttr(tileDims),
+                                      groupByObjects);
+
+    rewriter.replaceOp(op, groupByOp.getResult());
 
     return success();
   }
