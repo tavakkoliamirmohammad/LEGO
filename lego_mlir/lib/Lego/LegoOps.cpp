@@ -6,6 +6,39 @@ using namespace mlir;
 using namespace mlir::lego;
 using namespace mlir::transform;
 
+// ============================================================================
+// Custom Parsers and Printers
+// ============================================================================
+
+static void printGenPRegion(OpAsmPrinter &printer, Operation *op, Region &region) {
+  printer << " ";
+  if (region.empty()) {
+    printer << "{ }";
+    return;
+  }
+  Block &entry = region.front();
+  printer << "(";
+  llvm::interleaveComma(entry.getArguments(), printer, [&](BlockArgument arg) {
+    printer.printRegionArgument(arg);
+  });
+  printer << ") ";
+  
+  printer.printRegion(region, /*printEntryBlockArgs=*/false,
+                      /*printBlockTerminators=*/true);
+}
+
+static ParseResult parseGenPRegion(OpAsmParser &parser, Region &region) {
+  SmallVector<OpAsmParser::Argument> args;
+  if (parser.parseArgumentList(args, OpAsmParser::Delimiter::Paren,
+                               /*allowType=*/true, /*allowAttrs=*/true))
+    return failure();
+
+  // Parse the region.
+  // The parsed arguments are passed to the region parser to be used as the
+  // entry block arguments.
+  return parser.parseRegion(region, args, /*enableNameShadowing=*/false);
+}
+
 #define GET_OP_CLASSES
 #include "Lego/LegoOps.cpp.inc"
 #include "Lego/LegoUtils.h"

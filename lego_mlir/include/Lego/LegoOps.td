@@ -62,7 +62,7 @@ def GenPOp : Lego_Op<"gen_p", [Pure]> {
   let arguments = (ins I64ArrayAttr:$dims);
   let regions = (region SizedRegion<1>:$body, AnyRegion:$inv_body);
   let results = (outs Lego_LayoutType:$result);
-  let assemblyFormat = "$dims `apply` $body (`inv` $inv_body^)? attr-dict `:` type($result)";
+  let assemblyFormat = "$dims `apply` custom<GenPRegion>($body) `inv` custom<GenPRegion>($inv_body) attr-dict `:` type($result)";
 }
 
 def RegPOp : Lego_Op<"reg_p", [Pure]> {

@@ -10,10 +10,11 @@
 //   inv   { ^bb(%flat):     ... lego.yield %i, %j, ... }
 // ============================================================================
 
-// --- Simple GenP: apply only (no inv region) ---
+// --- Simple GenP: apply only (now with dummy inv) ---
 // PARSE-LABEL: func.func @genp_add
-// PARSE:       lego.gen_p [4, 4] apply
+// PARSE:       lego.gen_p [4, 4] apply (%{{.*}}: index, %{{.*}}: index) {
 // PARSE:       lego.yield
+// PARSE:       } inv (%{{.*}}: index) {
 
 // LOWER-LABEL: func.func @genp_add
 // LOWER-SAME:  (%[[I:.*]]: index, %[[J:.*]]: index)
@@ -22,10 +23,12 @@
 // LOWER:       %[[SUM:.*]] = arith.addi %[[I]], %[[J]] : index
 // LOWER:       return %[[SUM]] : index
 func.func @genp_add(%i: index, %j: index) -> index {
-  %layout = lego.gen_p [4, 4] apply {
-  ^bb0(%a: index, %b: index):
+  %layout = lego.gen_p [4, 4] apply (%a: index, %b: index) {
     %sum = arith.addi %a, %b : index
     lego.yield %sum : index
+  } inv (%flat: index) {
+    %z = arith.constant 0 : index
+    lego.yield %z, %z : index, index
   } : !lego.layout
   %f = lego.apply %layout(%i, %j) : !lego.layout
   return %f : index
@@ -33,8 +36,8 @@ func.func @genp_add(%i: index, %j: index) -> index {
 
 // --- GenP with both apply AND inv: simple divmod ---
 // PARSE-LABEL: func.func @genp_apply_inv_divmod
-// PARSE:       lego.gen_p [4, 8] apply
-// PARSE:       inv
+// PARSE:       lego.gen_p [4, 8] apply (%{{.*}}: index, %{{.*}}: index) {
+// PARSE:       } inv (%{{.*}}: index) {
 
 // LOWER-LABEL: func.func @genp_apply_inv_divmod
 // LOWER-SAME:  (%[[I:.*]]: index, %[[J:.*]]: index)
@@ -47,14 +50,12 @@ func.func @genp_add(%i: index, %j: index) -> index {
 // LOWER:       %[[JJ:.*]] = arith.remui %[[FLAT]], %[[C8]] : index
 // LOWER:       return %[[II]], %[[JJ]] : index, index
 func.func @genp_apply_inv_divmod(%i: index, %j: index) -> (index, index) {
-  %layout = lego.gen_p [4, 8] apply {
-  ^bb0(%a: index, %b: index):
+  %layout = lego.gen_p [4, 8] apply (%a: index, %b: index) {
     %c8 = arith.constant 8 : index
     %t = arith.muli %a, %c8 : index
     %f = arith.addi %t, %b : index
     lego.yield %f : index
-  } inv {
-  ^bb0(%flat: index):
+  } inv (%flat: index) {
     %c8 = arith.constant 8 : index
     %ii = arith.divui %flat, %c8 : index
     %jj = arith.remui %flat, %c8 : index
@@ -68,18 +69,16 @@ func.func @genp_apply_inv_divmod(%i: index, %j: index) -> (index, index) {
 
 // --- GenP 1D identity apply + inv ---
 // PARSE-LABEL: func.func @genp_1d_roundtrip
-// PARSE:       lego.gen_p [16] apply
-// PARSE:       inv
+// PARSE:       lego.gen_p [16] apply (%{{.*}}: index) {
+// PARSE:       } inv (%{{.*}}: index) {
 
 // LOWER-LABEL: func.func @genp_1d_roundtrip
 // LOWER-SAME:  (%[[X:.*]]: index)
 // LOWER:       return %[[X]] : index
 func.func @genp_1d_roundtrip(%x: index) -> index {
-  %layout = lego.gen_p [16] apply {
-  ^bb0(%a: index):
+  %layout = lego.gen_p [16] apply (%a: index) {
     lego.yield %a : index
-  } inv {
-  ^bb0(%f: index):
+  } inv (%f: index) {
     lego.yield %f : index
   } : !lego.layout
   %flat = lego.apply %layout(%x) : !lego.layout
@@ -102,7 +101,7 @@ func.func @genp_1d_roundtrip(%x: index) -> index {
 // ============================================================================
 
 // PARSE-LABEL: func.func @antidiag_4x4_apply
-// PARSE:       lego.gen_p [4, 4] apply
+// PARSE:       lego.gen_p [4, 4] apply (%{{.*}}: index, %{{.*}}: index) {
 // PARSE:       scf.if
 // PARSE:       lego.yield
 
@@ -119,8 +118,7 @@ func.func @genp_1d_roundtrip(%x: index) -> index {
 // LOWER:       %[[RES:.*]] = scf.if %[[CMP]]
 // LOWER:       return %[[RES]] : index
 func.func @antidiag_4x4_apply(%i: index, %j: index) -> index {
-  %layout = lego.gen_p [4, 4] apply {
-  ^bb0(%idx_i: index, %idx_j: index):
+  %layout = lego.gen_p [4, 4] apply (%idx_i: index, %idx_j: index) {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
@@ -147,6 +145,9 @@ func.func @antidiag_4x4_apply(%i: index, %j: index) -> index {
       scf.yield %flat : index
     }
     lego.yield %result : index
+  } inv (%f: index) {
+    %z = arith.constant 0 : index
+    lego.yield %z, %z : index, index
   } : !lego.layout
   %f = lego.apply %layout(%i, %j) : !lego.layout
   return %f : index
@@ -168,8 +169,8 @@ func.func @antidiag_4x4_apply(%i: index, %j: index) -> index {
 // ============================================================================
 
 // PARSE-LABEL: func.func @antidiag_4x4_full
-// PARSE:       lego.gen_p [4, 4] apply
-// PARSE:       inv
+// PARSE:       lego.gen_p [4, 4] apply (%{{.*}}: index, %{{.*}}: index) {
+// PARSE:       } inv (%{{.*}}: index) {
 // PARSE:       math.sqrt
 // PARSE:       math.floor
 
@@ -184,8 +185,7 @@ func.func @antidiag_4x4_apply(%i: index, %j: index) -> index {
 // LOWER:       math.floor
 // LOWER:       return
 func.func @antidiag_4x4_full(%x0: index) -> (index, index) {
-  %layout = lego.gen_p [4, 4] apply {
-  ^bb0(%idx_i: index, %idx_j: index):
+  %layout = lego.gen_p [4, 4] apply (%idx_i: index, %idx_j: index) {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
@@ -212,8 +212,7 @@ func.func @antidiag_4x4_full(%x0: index) -> (index, index) {
       scf.yield %flat : index
     }
     lego.yield %result : index
-  } inv {
-  ^bb0(%flat: index):
+  } inv (%flat: index) {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
@@ -297,7 +296,7 @@ func.func @antidiag_4x4_full(%x0: index) -> (index, index) {
 
 // --- GenP inside OrderBy ---
 // PARSE-LABEL: func.func @genp_in_orderby
-// PARSE:       lego.gen_p [4] apply
+// PARSE:       lego.gen_p [4] apply (%{{.*}}: index) {
 // PARSE:       lego.order_by
 
 // LOWER-LABEL: func.func @genp_in_orderby
@@ -306,11 +305,13 @@ func.func @antidiag_4x4_full(%x0: index) -> (index, index) {
 // LOWER-NOT:   lego.apply
 // LOWER:       return
 func.func @genp_in_orderby(%i: index, %j: index) -> index {
-  %double = lego.gen_p [4] apply {
-  ^bb0(%a: index):
+  %double = lego.gen_p [4] apply (%a: index) {
     %c2 = arith.constant 2 : index
     %res = arith.muli %a, %c2 : index
     lego.yield %res : index
+  } inv (%f: index) {
+     %c0 = arith.constant 0 : index
+     lego.yield %c0 : index
   } : !lego.layout
   %id = lego.reg_p perm [0] dims [8] : !lego.layout
   %ob = lego.order_by(%double, %id) : !lego.layout
@@ -320,7 +321,7 @@ func.func @genp_in_orderby(%i: index, %j: index) -> index {
 
 // --- GenP inside GroupBy ---
 // PARSE-LABEL: func.func @genp_in_groupby
-// PARSE:       lego.gen_p [6] apply
+// PARSE:       lego.gen_p [6] apply (%{{.*}}: index) {
 // PARSE:       lego.group_by [6]
 
 // LOWER-LABEL: func.func @genp_in_groupby
@@ -329,11 +330,13 @@ func.func @genp_in_orderby(%i: index, %j: index) -> index {
 // LOWER-NOT:   lego.apply
 // LOWER:       return
 func.func @genp_in_groupby(%i: index) -> index {
-  %rev = lego.gen_p [6] apply {
-  ^bb0(%a: index):
+  %rev = lego.gen_p [6] apply (%a: index) {
     %c5 = arith.constant 5 : index
     %res = arith.subi %c5, %a : index
     lego.yield %res : index
+  } inv (%f: index) {
+    %c0 = arith.constant 0 : index
+    lego.yield %c0 : index
   } : !lego.layout
   %gb = lego.group_by [6](%rev) : !lego.layout
   %f = lego.apply %gb(%i) : !lego.layout
@@ -432,14 +435,12 @@ func.func @tileby_roundtrip(%i_t: index, %j_t: index, %i_b: index, %j_b: index) 
 // LOWER-NOT:   lego.apply
 // LOWER:       return
 func.func @genp_roundtrip(%i: index, %j: index) -> (index, index) {
-  %layout = lego.gen_p [3, 5] apply {
-  ^bb0(%a: index, %b: index):
+  %layout = lego.gen_p [3, 5] apply (%a: index, %b: index) {
     %c5 = arith.constant 5 : index
     %t = arith.muli %a, %c5 : index
     %f = arith.addi %t, %b : index
     lego.yield %f : index
-  } inv {
-  ^bb0(%flat: index):
+  } inv (%flat: index) {
     %c5 = arith.constant 5 : index
     %ii = arith.divui %flat, %c5 : index
     %jj = arith.remui %flat, %c5 : index
