@@ -74,6 +74,7 @@ def RegPOp : Lego_Op<"reg_p", [Pure]> {
   let arguments = (ins I64ArrayAttr:$perm, I64ArrayAttr:$dims);
   let results = (outs Lego_LayoutType:$result);
   let assemblyFormat = "`perm` $perm `dims` $dims attr-dict `:` type($result)";
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -128,6 +129,7 @@ def TileByOp : Lego_Op<"tile_by", [Pure]> {
     let arguments = (ins Lego_LayoutType:$input, ArrayAttr:$tile_dims);
     let results = (outs Lego_LayoutType:$result);
     let assemblyFormat = "$input `tile_dims` $tile_dims attr-dict `:` type($result)";
+    let hasVerifier = 1;
 }
 
 def RowOp : Lego_Op<"row", [Pure]> {

@@ -41,7 +41,7 @@ func.func @test_tile_by_chain() -> !lego.layout {
   %c = lego.col [20] : !lego.layout
   %ob = lego.order_by(%r, %c) : !lego.layout
   
-  %tb = lego.tile_by %ob tile_dims [[2, 5], [5, 4]] : !lego.layout
+  %tb = lego.tile_by %ob tile_dims [[2], [5], [5], [4]] : !lego.layout
   return %tb : !lego.layout
 }
 
@@ -51,6 +51,6 @@ func.func @test_tile_by_chain() -> !lego.layout {
 // CHECK: %[[OB1:.*]] = lego.order_by(%[[RP1]])
 // CHECK: %[[RP2:.*]] = lego.reg_p perm [0] dims [20]
 // CHECK: %[[OB2:.*]] = lego.order_by(%[[RP2]])
-// CHECK: %[[RPF:.*]] = lego.reg_p perm [0, 2, 1, 3] dims [2, 5, 5, 4]
+// CHECK: %[[RPF:.*]] = lego.reg_p perm [0, 1, 2, 3] dims [2, 5, 5, 4]
 // CHECK: %[[OBF:.*]] = lego.order_by(%[[RPF]])
 // CHECK: lego.group_by [2, 5, 5, 4](%[[R_REGP]], %[[OB1]], %[[C_REGP]], %[[OB2]], %[[OBF]])

@@ -260,13 +260,13 @@ func.func @parse_groupby_with_orderby_chain(%i: index, %j: index) -> index {
 
 // CHECK-LABEL: func.func @parse_tileby_with_regp_inner
 // CHECK:       lego.reg_p perm [1, 0] dims [4, 8] : !lego.layout
-// CHECK:       lego.tile_by %{{.*}} tile_dims {{\[}}[4], [4]{{\]}} : !lego.layout
+// CHECK:       lego.tile_by %{{.*}} tile_dims {{\[}}[2, 2], [2, 4]{{\]}} : !lego.layout
 func.func @parse_tileby_with_regp_inner(%i: index, %j: index) -> index {
   %inner = lego.reg_p perm [1, 0] dims [4, 8] : !lego.layout
   // TileBy inner OrderBy?
   // Our implementation assumes input is OrderBy or single block.
   // RegP is acceptable.
-  %tb = lego.tile_by %inner tile_dims [[4], [4]] : !lego.layout
+  %tb = lego.tile_by %inner tile_dims [[2, 2], [2, 4]] : !lego.layout
   %f = lego.apply %tb(%i, %j) : !lego.layout
   return %f : index
 }

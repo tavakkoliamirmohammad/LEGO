@@ -8,6 +8,78 @@ using namespace mlir::transform;
 
 #define GET_OP_CLASSES
 #include "Lego/LegoOps.cpp.inc"
+#include "Lego/LegoUtils.h"
+#include <numeric>
+
+// ============================================================================
+// RegPOp Verification
+// ============================================================================
+
+LogicalResult RegPOp::verify() {
+  auto perm = extractI64Array(getPerm());
+  auto dims = extractI64Array(getDims());
+
+  if (perm.size() != dims.size()) {
+    return emitOpError("Permutation rank " + std::to_string(perm.size()) +
+                       " does not match dimensions rank " +
+                       std::to_string(dims.size()));
+  }
+
+  // Verify perm is a valid permutation of 0..size-1
+  SmallVector<int64_t> sortedPerm = perm;
+  std::sort(sortedPerm.begin(), sortedPerm.end());
+  for (size_t i = 0; i < sortedPerm.size(); ++i) {
+    if (sortedPerm[i] != (int64_t)i) {
+      return emitOpError("Invalid permutation: not a permutation of 0.." +
+                         std::to_string(sortedPerm.size() - 1));
+    }
+  }
+
+  return success();
+}
+
+// ============================================================================
+// TileByOp Verification
+// ============================================================================
+
+LogicalResult TileByOp::verify() {
+  auto info = extractNestedTileDims(getTileDims());
+  if (!info.valid) {
+    return emitOpError("Invalid tile dimensions structure. Expected nested list [[...], ...]");
+  }
+
+  int64_t d = info.d;
+  int64_t q = info.q; // Unused for check, but part of structure
+
+  // Get input (d, q) from OrderBy or other layout
+  auto [inputD, inputQ] = getLayoutDQ(getInput());
+  
+  if (inputD != 0 || inputQ != 0) {
+      if (d != inputD) {
+          return emitOpError("Inner tile dimension " + std::to_string(d) + 
+                             " does not match input layout dimension " + std::to_string(inputD));
+      }
+
+      // Verify global product of dimensions (volume preservation)
+      int64_t tileProduct = 1;
+      for (auto attr : getTileDims()) {
+          auto tileGroup = extractI64Array(cast<ArrayAttr>(attr));
+          for (auto x : tileGroup) tileProduct *= x;
+      }
+
+      int64_t inputProduct = 1;
+      auto inputDims = getLayoutInputDims(getInput());
+      for (auto x : inputDims) inputProduct *= x;
+
+      if (tileProduct != inputProduct) {
+           return emitOpError("Total product of tile dims (" + std::to_string(tileProduct) + 
+                              ") does not match total product of input dims (" + 
+                              std::to_string(inputProduct) + ")");
+      }
+  }
+
+  return success();
+}
 
 DiagnosedSilenceableFailure ApplyLayoutTransformOp::apply(
     transform::TransformRewriter &rewriter,
