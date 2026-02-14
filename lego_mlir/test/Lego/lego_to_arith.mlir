@@ -93,11 +93,12 @@ func.func @col_2d_apply(%i: index, %j: index) -> index {
 }
 
 // CHECK-LABEL: func.func @col_3d_apply
+// CHECK-SAME:  (%[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index)
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
 // CHECK-DAG:   %[[C6:.*]] = arith.constant 6 : index
-// CHECK-DAG:   %[[T1:.*]] = arith.muli %{{.*}}, %[[C6]] : index
-// CHECK-DAG:   %[[T2:.*]] = arith.muli %{{.*}}, %[[C2]] : index
-// CHECK-DAG:   %[[T3:.*]] = arith.addi %{{.*}}, %[[T2]] : index
+// CHECK-DAG:   %[[T1:.*]] = arith.muli %[[K]], %[[C6]] : index
+// CHECK-DAG:   %[[T2:.*]] = arith.muli %[[J]], %[[C2]] : index
+// CHECK-DAG:   %[[T3:.*]] = arith.addi %[[I]], %[[T2]] : index
 // CHECK:       %[[RES:.*]] = arith.addi %[[T3]], %[[T1]] : index
 // CHECK:       return %[[RES]] : index
 func.func @col_3d_apply(%i: index, %j: index, %k: index) -> index {

@@ -25,6 +25,10 @@ LogicalResult RegPOp::verify() {
                        std::to_string(dims.size()));
   }
 
+  for (int64_t d : dims) {
+      if (d <= 0) return emitOpError("Dimension " + std::to_string(d) + " must be strictly positive");
+  }
+
   // Verify perm is a valid permutation of 0..size-1
   SmallVector<int64_t> sortedPerm = perm;
   std::sort(sortedPerm.begin(), sortedPerm.end());
@@ -46,6 +50,10 @@ LogicalResult TileByOp::verify() {
   auto info = extractNestedTileDims(getTileDims());
   if (!info.valid) {
     return emitOpError("Invalid tile dimensions structure. Expected nested list [[...], ...]");
+  }
+
+  for (auto d : info.flatDims) {
+      if (d <= 0) return emitOpError("Tile dimension " + std::to_string(d) + " must be strictly positive");
   }
 
   int64_t d = info.d;
@@ -79,6 +87,30 @@ LogicalResult TileByOp::verify() {
   }
 
   return success();
+}
+
+// ============================================================================
+// RowOp Verification
+// ============================================================================
+
+LogicalResult RowOp::verify() {
+    auto dims = extractI64Array(getDims());
+    for (int64_t d : dims) {
+        if (d <= 0) return emitOpError("Dimension " + std::to_string(d) + " must be strictly positive");
+    }
+    return success();
+}
+
+// ============================================================================
+// ColOp Verification
+// ============================================================================
+
+LogicalResult ColOp::verify() {
+    auto dims = extractI64Array(getDims());
+    for (int64_t d : dims) {
+        if (d <= 0) return emitOpError("Dimension " + std::to_string(d) + " must be strictly positive");
+    }
+    return success();
 }
 
 DiagnosedSilenceableFailure ApplyLayoutTransformOp::apply(

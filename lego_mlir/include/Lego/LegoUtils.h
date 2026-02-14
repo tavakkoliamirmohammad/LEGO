@@ -37,9 +37,6 @@ SmallVector<T> sigma(ArrayRef<T> values, ArrayRef<int64_t> perm) {
   for (int64_t idx : perm) {
     if (idx >= 0 && idx < (int64_t)values.size()) {
       result.push_back(values[idx]);
-    } else {
-      llvm::errs() << "Permutation index out of bounds: " << idx << " for values of size " << values.size() << "\n";
-      assert(false && "Permutation index out of bounds");
     }
   }
   return result;

@@ -141,6 +141,7 @@ def RowOp : Lego_Op<"row", [Pure]> {
     let arguments = (ins I64ArrayAttr:$dims);
     let results = (outs Lego_LayoutType:$result);
     let assemblyFormat = "$dims attr-dict `:` type($result)";
+    let hasVerifier = 1;
 }
 
 def ColOp : Lego_Op<"col", [Pure]> {
@@ -152,6 +153,7 @@ def ColOp : Lego_Op<"col", [Pure]> {
     let arguments = (ins I64ArrayAttr:$dims);
     let results = (outs Lego_LayoutType:$result);
     let assemblyFormat = "$dims attr-dict `:` type($result)";
+    let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//

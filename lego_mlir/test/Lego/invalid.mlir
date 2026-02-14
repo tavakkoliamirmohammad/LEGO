@@ -37,3 +37,37 @@ func.func @test_regp_invalid_perm_content() {
   %p = lego.reg_p perm [0, 1, 3] dims [10, 10, 10] : !lego.layout
   return
 }
+
+// -----
+
+func.func @test_row_zero_dim() {
+  // expected-error @+1 {{Dimension 0 must be strictly positive}}
+  %r = lego.row [10, 0] : !lego.layout
+  return
+}
+
+// -----
+
+func.func @test_col_neg_dim() {
+  // expected-error @+1 {{Dimension -5 must be strictly positive}}
+  %c = lego.col [10, -5] : !lego.layout
+  return
+}
+
+// -----
+
+func.func @test_regp_zero_dim() {
+  // expected-error @+1 {{Dimension 0 must be strictly positive}}
+  %p = lego.reg_p perm [0, 1] dims [10, 0] : !lego.layout
+  return
+}
+
+// -----
+
+func.func @test_tileby_zero_dim() {
+  %r = lego.row [10] : !lego.layout
+  %ob = lego.order_by(%r) : !lego.layout
+  // expected-error @+1 {{Tile dimension 0 must be strictly positive}}
+  %tb = lego.tile_by %ob tile_dims [[0]] : !lego.layout
+  return
+}
