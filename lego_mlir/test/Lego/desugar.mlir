@@ -21,14 +21,6 @@ func.func @test_col_desugar() -> !lego.layout {
 // CHECK-LABEL: func @test_tile_by_row
 func.func @test_tile_by_row() -> !lego.layout {
   // TileBy(Row(12, 12), [[4, 4], [3, 3]])
-  // Input: Row(12, 12) -> RegP([12, 12], [0, 1])
-  // Desugar chain:
-  //   obj=RegP([12, 12], [0, 1])
-  //   reshuffle=RegP(...) wrapped in OrderBy
-  
-  // Note: The previous test expected `lego.row` in the output because `RowOp` wasn't desugared yet.
-  // Now `lego.row` itself is desugared to `lego.reg_p`.
-  
   %0 = lego.row [12, 12] : !lego.layout
   %1 = lego.tile_by %0 tile_dims [[4, 4], [3, 3]] : !lego.layout
   return %1 : !lego.layout
@@ -39,15 +31,12 @@ func.func @test_tile_by_row() -> !lego.layout {
 // CHECK: %[[OB1:.*]] = lego.order_by(%[[REGP1]])
 // CHECK: %[[REGP2:.*]] = lego.reg_p perm [0, 2, 1, 3] dims [4, 4, 3, 3]
 // CHECK: %[[OB2:.*]] = lego.order_by(%[[REGP2]])
-// CHECK: %[[RES:.*]] = lego.group_by [4, 4, 3, 3] (%[[ROW_REGP]], %[[OB1]], %[[OB2]])
+// CHECK: %[[RES:.*]] = lego.group_by [4, 4, 3, 3](%[[ROW_REGP]], %[[OB1]], %[[OB2]])
 // CHECK: return %[[RES]]
 
 // CHECK-LABEL: func @test_tile_by_chain
 func.func @test_tile_by_chain() -> !lego.layout {
   // Chain: OrderBy(Row(10), Col(20))
-  // Row(10) -> RegP([10], [0])
-  // Col(20) -> RegP([20], [0])
-  
   %r = lego.row [10] : !lego.layout
   %c = lego.col [20] : !lego.layout
   %ob = lego.order_by(%r, %c) : !lego.layout
@@ -64,4 +53,4 @@ func.func @test_tile_by_chain() -> !lego.layout {
 // CHECK: %[[OB2:.*]] = lego.order_by(%[[RP2]])
 // CHECK: %[[RPF:.*]] = lego.reg_p perm [0, 2, 1, 3] dims [2, 5, 5, 4]
 // CHECK: %[[OBF:.*]] = lego.order_by(%[[RPF]])
-// CHECK: lego.group_by [2, 5, 5, 4] (%[[R_REGP]], %[[OB1]], %[[C_REGP]], %[[OB2]], %[[OBF]])
+// CHECK: lego.group_by [2, 5, 5, 4](%[[R_REGP]], %[[OB1]], %[[C_REGP]], %[[OB2]], %[[OBF]])
