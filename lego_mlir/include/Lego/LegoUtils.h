@@ -38,9 +38,8 @@ SmallVector<T> sigma(ArrayRef<T> values, ArrayRef<int64_t> perm) {
     if (idx >= 0 && idx < (int64_t)values.size()) {
       result.push_back(values[idx]);
     } else {
-      // Handle out of bounds if necessary, though lego structure implies valid perms
-      // For safety, maybe push default or assert?
-      // assert(false && "Permutation index out of bounds");
+      llvm::errs() << "Permutation index out of bounds: " << idx << " for values of size " << values.size() << "\n";
+      assert(false && "Permutation index out of bounds");
     }
   }
   return result;
@@ -110,6 +109,35 @@ inline TileDimsInfo extractNestedTileDims(ArrayAttr tileDimsAttr) {
   return info;
 }
 
+inline SmallVector<int64_t> getLayoutInputDims(Value layout) {
+  Operation *defOp = layout.getDefiningOp();
+  if (!defOp) return {};
+
+  if (auto rowOp = dyn_cast<RowOp>(defOp))
+    return extractI64Array(rowOp.getDims());
+
+  if (auto colOp = dyn_cast<ColOp>(defOp))
+    return extractI64Array(colOp.getDims());
+
+  if (auto regPOp = dyn_cast<RegPOp>(defOp))
+    return extractI64Array(regPOp.getDims());
+
+  if (auto genPOp = dyn_cast<GenPOp>(defOp))
+    return extractI64Array(genPOp.getDims());
+
+  if (auto orderByOp = dyn_cast<OrderByOp>(defOp)) {
+    // Concatanation of dims of the perms
+    SmallVector<int64_t> dims;
+    for (Value v : orderByOp.getPerms()) {
+      auto subDims = getLayoutInputDims(v);
+      dims.append(subDims.begin(), subDims.end());
+    }
+    return dims;
+  }
+
+  return {};
+}
+
 // Helper to get {d, q} for a layout op.
 // Most primitive ops (Row, Col, RegP, GenP) have q=1, d=rank.
 inline std::pair<int, int> getLayoutDQ(Value layout) {
@@ -133,53 +161,13 @@ inline std::pair<int, int> getLayoutDQ(Value layout) {
     return {d, 1};
   }
   if (auto orderByOp = dyn_cast<OrderByOp>(defOp)) {
-      // Recurse? OrderBy is composition.
-      // Python: d = sum(o.d for o in chain), q = 1?
-      // Actually OrderBy is a transformation block. 
-      // If used inside TileBy, we need its d.
-      // Let's assume OrderBy reduces to a block with dimensions equal to sum of output dims of parts?
-      // For TileBy input, we cared about input dims.
-      return {0, 0}; // TODO: Implement if needed for OrderBy directly
+      ValueRange perms = orderByOp.getPerms();
+      int q = perms.size();
+      if (q == 0) return {0, 0};
+      int d = getLayoutInputDims(perms[0]).size();
+      return {d, q};
   }
   return {0, 0};
-}
-
-inline SmallVector<int64_t> getLayoutInputDims(Value layout) {
-  Operation *defOp = layout.getDefiningOp();
-  if (!defOp) return {};
-
-  if (auto rowOp = dyn_cast<RowOp>(defOp))
-    return extractI64Array(rowOp.getDims());
-
-  if (auto colOp = dyn_cast<ColOp>(defOp))
-    return extractI64Array(colOp.getDims());
-
-  if (auto regPOp = dyn_cast<RegPOp>(defOp))
-    return extractI64Array(regPOp.getDims());
-
-  if (auto genPOp = dyn_cast<GenPOp>(defOp))
-    return extractI64Array(genPOp.getDims());
-
-  if (auto orderByOp = dyn_cast<OrderByOp>(defOp)) {
-    // Input dims of OrderBy is the concatenation of input dims of its components?
-    // Wait, OrderBy(l1, l2) applies l1 to first part of indices, l2 to second.
-    // So inputs are concat of inputs.
-    SmallVector<int64_t> dims;
-    for (Value v : orderByOp.getPerms()) {
-      auto subDims = getLayoutInputDims(v);
-      dims.append(subDims.begin(), subDims.end());
-    }
-    return dims;
-  }
-  
-  if (auto tileByOp = dyn_cast<TileByOp>(defOp)) {
-    // TileBy changes input dims? 
-    // TileBy(input, [[d_1..d_k], ...])
-    // The input dims of TileBy op itself are the dims of the `input` layout.
-    return getLayoutInputDims(tileByOp.getInput());
-  }
-
-  return {};
 }
 
 } // namespace lego
