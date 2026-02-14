@@ -22,7 +22,7 @@ namespace {
 // ============================================================================
 
 Value getConstantIndex(OpBuilder &b, Location loc, int64_t val) {
-  return b.create<arith::ConstantIndexOp>(loc, val);
+  return arith::ConstantIndexOp::create(b, loc, val);
 }
 
 // Forward declarations
@@ -45,12 +45,12 @@ Value flattenIndex(OpBuilder &b, Location loc, ValueRange indices,
   // Iterate backwards: flat = i_N + d_N * (...)
   for (int k = dims.size() - 1; k >= 0; --k) {
     Value idx = indices[k];
-    Value term = b.create<arith::MulIOp>(loc, idx, multiplier);
-    flat = b.create<arith::AddIOp>(loc, flat, term);
+    Value term = arith::MulIOp::create(b, loc, idx, multiplier);
+    flat = arith::AddIOp::create(b, loc, flat, term);
 
     if (k > 0) {
       Value dim = getConstantIndex(b, loc, dims[k]);
-      multiplier = b.create<arith::MulIOp>(loc, multiplier, dim);
+      multiplier = arith::MulIOp::create(b, loc, multiplier, dim);
     }
   }
   return flat;
@@ -67,9 +67,9 @@ SmallVector<Value> unflattenIndex(OpBuilder &b, Location loc, Value flatIndex,
     for (int j = k + 1; j < rank; ++j)
       stride *= dims[j];
     Value strideVal = getConstantIndex(b, loc, stride);
-    Value idx = b.create<arith::DivUIOp>(loc, current, strideVal);
+    Value idx = arith::DivUIOp::create(b, loc, current, strideVal);
     indices.push_back(idx);
-    current = b.create<arith::RemUIOp>(loc, current, strideVal);
+    current = arith::RemUIOp::create(b, loc, current, strideVal);
   }
   return indices;
 }
@@ -175,8 +175,8 @@ Value applyOrderBy(OpBuilder &b, Location loc, OrderByOp op,
       size *= d;
     Value sizeVal = getConstantIndex(b, loc, size);
 
-    Value flatMul = b.create<arith::MulIOp>(loc, flatIndex, sizeVal);
-    flatIndex = b.create<arith::AddIOp>(loc, flatMul, innerFlat);
+    Value flatMul = arith::MulIOp::create(b, loc, flatIndex, sizeVal);
+    flatIndex = arith::AddIOp::create(b, loc, flatMul, innerFlat);
   }
   return flatIndex;
 }
@@ -195,8 +195,8 @@ SmallVector<Value> applyInverseOrderBy(OpBuilder &b, Location loc,
       size *= d;
     Value sizeVal = getConstantIndex(b, loc, size);
 
-    Value innerFlat = b.create<arith::RemUIOp>(loc, flatIndex, sizeVal);
-    flatIndex = b.create<arith::DivUIOp>(loc, flatIndex, sizeVal);
+    Value innerFlat = arith::RemUIOp::create(b, loc, flatIndex, sizeVal);
+    flatIndex = arith::DivUIOp::create(b, loc, flatIndex, sizeVal);
 
     SmallVector<Value> innerIndices =
         applyInverseLayout(b, loc, perm, innerFlat);
