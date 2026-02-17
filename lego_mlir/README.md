@@ -119,8 +119,8 @@ Used within the transform dialect to apply a layout to a target operation (e.g.,
 The LEGO dialect provides several canonicalization patterns to simplify layout expressions and applications:
 
 - **Algebraic Identities**:
-    - `lego.apply(L, lego.apply_inverse(L, flat)) \to flat`
-    - `lego.apply_inverse(L, lego.apply(L, indices)) \to indices`
+    - `lego.apply(L, lego.apply_inverse(L, flat)) -> flat`
+    - `lego.apply_inverse(L, lego.apply(L, indices)) -> indices`
 - **Layout Simplification**:
     - Linear `lego.gen_p` operations are automatically converted to `lego.reg_p` if they represent a pure dimension permutation and scaling. This enables better reasoning and optimization of generic layouts.
 
