@@ -138,6 +138,176 @@ LogicalResult RowOp::verify() {
 // ColOp Verification
 // ============================================================================
 
+// ============================================================================
+// Layout Algebraic Identity Patterns
+// ============================================================================
+
+namespace {
+struct SimplifyApplyInverse : public OpRewritePattern<ApplyOp> {
+  using OpRewritePattern<ApplyOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ApplyOp op,
+                                PatternRewriter &rewriter) const override {
+    // apply(L, apply_inverse(L, flat)) -> flat
+    auto invOp = op.getIndices()[0].getDefiningOp<ApplyInverseOp>();
+    if (!invOp) return failure();
+
+    if (invOp.getLayout() != op.getLayout()) return failure();
+
+    rewriter.replaceOp(op, invOp.getFlatIndex());
+    return success();
+  }
+};
+
+struct SimplifyInverseApply : public OpRewritePattern<ApplyInverseOp> {
+  using OpRewritePattern<ApplyInverseOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ApplyInverseOp op,
+                                PatternRewriter &rewriter) const override {
+    // apply_inverse(L, apply(L, indices)) -> indices
+    auto applyOp = op.getFlatIndex().getDefiningOp<ApplyOp>();
+    if (!applyOp) return failure();
+
+    if (applyOp.getLayout() != op.getLayout()) return failure();
+
+    rewriter.replaceOp(op, applyOp.getIndices());
+    return success();
+  }
+};
+} // namespace
+
+void ApplyOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                          MLIRContext *context) {
+  results.add<SimplifyApplyInverse>(context);
+}
+
+void ApplyInverseOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                 MLIRContext *context) {
+  results.add<SimplifyInverseApply>(context);
+}
+
+void OrderByOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                            MLIRContext *context) {
+}
+
+void RegPOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                         MLIRContext *context) {
+    // Identity RegP can be simplified if we have a "Null" or "Identity" layout op.
+    // However, currently we don't have a dedicated IdentityOp. 
+    // We could fold it into its users if they can handle generic layouts.
+}
+
+namespace {
+
+// Helper to extract a linear combination from a value
+// Returns a map of block argument index -> stride
+static std::optional<DenseMap<int, int64_t>> extractStrides(Value v, Block *entry) {
+    DenseMap<int, int64_t> strides;
+    
+    // Base case: block argument
+    if (auto blockArg = dyn_cast<BlockArgument>(v)) {
+        if (blockArg.getOwner() == entry) {
+            strides[blockArg.getArgNumber()] = 1;
+            return strides;
+        }
+        return std::nullopt;
+    }
+
+    // Base case: constant (not allowed as a separate term for now, unless 0)
+    APInt constValue;
+    if (matchPattern(v, m_ConstantInt(&constValue))) {
+        if (constValue.getSExtValue() == 0) return strides;
+        return std::nullopt; // constant offset not supported in RegP
+    }
+
+    Operation *op = v.getDefiningOp();
+    if (!op) return std::nullopt;
+
+    if (auto addOp = dyn_cast<arith::AddIOp>(op)) {
+        auto lhs = extractStrides(addOp.getLhs(), entry);
+        auto rhs = extractStrides(addOp.getRhs(), entry);
+        if (!lhs || !rhs) return std::nullopt;
+        for (auto &it : *lhs) strides[it.first] += it.second;
+        for (auto &it : *rhs) strides[it.first] += it.second;
+        return strides;
+    }
+
+    if (auto mulOp = dyn_cast<arith::MulIOp>(op)) {
+        Value val, multiplier;
+        APInt m;
+        if (matchPattern(mulOp.getLhs(), m_ConstantInt(&m))) {
+            multiplier = mulOp.getLhs();
+            val = mulOp.getRhs();
+        } else if (matchPattern(mulOp.getRhs(), m_ConstantInt(&m))) {
+            multiplier = mulOp.getRhs();
+            val = mulOp.getLhs();
+        } else {
+            return std::nullopt;
+        }
+
+        auto innerStrides = extractStrides(val, entry);
+        if (!innerStrides) return std::nullopt;
+        int64_t mValue = m.getSExtValue();
+        for (auto &it : *innerStrides) strides[it.first] += it.second * mValue;
+        return strides;
+    }
+
+    return std::nullopt;
+}
+
+struct SimplifyLinearGenP : public OpRewritePattern<GenPOp> {
+  using OpRewritePattern<GenPOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(GenPOp op,
+                                PatternRewriter &rewriter) const override {
+    auto dims = extractI64Array(op.getDims());
+    int rank = dims.size();
+    
+    Block &block = op.getBody().front();
+    Operation *term = block.getTerminator();
+    if (term->getNumOperands() != 1) return failure();
+
+    auto stridesOpt = extractStrides(term->getOperand(0), &block);
+    if (!stridesOpt) return failure();
+    auto &detectedStrides = *stridesOpt;
+
+    // We want to find a permutation P s.t. detectedStrides[P[i]] = product_{j=i+1..N-1} dims[P[j]]
+    // This is equivalent to finding a permutation that reproduces the detected strides.
+    
+    SmallVector<int64_t> perm(rank, -1);
+    SmallVector<bool> used(rank, false);
+    
+    // Greedily match strides. The smallest stride must be 1 (for the last dimension in perm).
+    // The next smallest must be dims[P[last]].
+    
+    int64_t currentTargetStride = 1;
+    for (int i = rank - 1; i >= 0; --i) {
+        bool found = false;
+        for (int j = 0; j < rank; ++j) {
+            if (!used[j] && detectedStrides[j] == currentTargetStride) {
+                perm[i] = j;
+                used[j] = true;
+                currentTargetStride *= dims[j];
+                found = true;
+                break;
+            }
+        }
+        if (!found) return failure();
+    }
+
+    rewriter.replaceOpWithNewOp<RegPOp>(op, op.getType(),
+                                       rewriter.getI64ArrayAttr(perm),
+                                       rewriter.getI64ArrayAttr(dims));
+    return success();
+  }
+};
+} // namespace
+
+void GenPOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                         MLIRContext *context) {
+  results.add<SimplifyLinearGenP>(context);
+}
+
 LogicalResult ColOp::verify() {
     auto dims = extractI64Array(getDims());
     for (int64_t d : dims) {
