@@ -76,7 +76,6 @@ def RegPOp : Lego_Op<"reg_p", [Pure]> {
   let results = (outs Lego_LayoutType:$result);
   let assemblyFormat = "`perm` $perm `dims` $dims attr-dict `:` type($result)";
   let hasVerifier = 1;
-  let hasCanonicalizer = 1;
 }
 
 //===----------------------------------------------------------------------===//

@@ -186,17 +186,6 @@ void ApplyInverseOp::getCanonicalizationPatterns(RewritePatternSet &results,
   results.add<SimplifyInverseApply>(context);
 }
 
-void OrderByOp::getCanonicalizationPatterns(RewritePatternSet &results,
-                                            MLIRContext *context) {
-}
-
-void RegPOp::getCanonicalizationPatterns(RewritePatternSet &results,
-                                         MLIRContext *context) {
-    // Identity RegP can be simplified if we have a "Null" or "Identity" layout op.
-    // However, currently we don't have a dedicated IdentityOp. 
-    // We could fold it into its users if they can handle generic layouts.
-}
-
 namespace {
 
 // Helper to extract a linear combination from a value
