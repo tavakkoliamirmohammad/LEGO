@@ -114,6 +114,22 @@ Used within the transform dialect to apply a layout to a target operation (e.g.,
     -   `lego.apply_inverse` is lowered to a sequence of `arith.divui` and `arith.remui`.
     -   `lego.gen_p` bodies are inlined.
 
+## Canonicalization
+
+The LEGO dialect provides several canonicalization patterns to simplify layout expressions and applications:
+
+- **Algebraic Identities**:
+    - `lego.apply(L, lego.apply_inverse(L, flat)) -> flat`
+    - `lego.apply_inverse(L, lego.apply(L, indices)) -> indices`
+- **Layout Simplification**:
+    - Linear `lego.gen_p` operations are automatically converted to `lego.reg_p` if they represent a pure dimension permutation and scaling. This enables better reasoning and optimization of generic layouts.
+
+## Verification
+
+The dialect includes a dedicated verification pass to ensure layout consistency:
+
+- **Consistency Check (`lego-verify-consistency`)**: Analyzes `lego.gen_p` operations to verify that the `apply` and `inv` regions are mathematically consistent (i.e., they define an actual inverse mapping). This pass uses symbolic evaluation to detect potential bugs in manually defined layouts.
+
 ## Semantics
 
 ### Flattening

@@ -63,6 +63,7 @@ def GenPOp : Lego_Op<"gen_p", [Pure]> {
   let regions = (region SizedRegion<1>:$body, AnyRegion:$inv_body);
   let results = (outs Lego_LayoutType:$result);
   let assemblyFormat = "$dims `apply` custom<GenPRegion>($body) `inv` custom<GenPRegion>($inv_body) attr-dict `:` type($result)";
+  let hasCanonicalizer = 1;
 }
 
 def RegPOp : Lego_Op<"reg_p", [Pure]> {
@@ -169,6 +170,7 @@ def ApplyOp : Lego_Op<"apply", [Pure]> {
   let arguments = (ins Lego_LayoutType:$layout, Variadic<Index>:$indices);
   let results = (outs Index:$flat_index);
   let assemblyFormat = "$layout `(` $indices `)` attr-dict `:` type($layout)";
+  let hasCanonicalizer = 1;
 }
 
 def ApplyInverseOp : Lego_Op<"apply_inverse", [Pure]> {
@@ -180,6 +182,7 @@ def ApplyInverseOp : Lego_Op<"apply_inverse", [Pure]> {
   let arguments = (ins Lego_LayoutType:$layout, Index:$flat_index);
   let results = (outs Variadic<Index>:$indices);
   let assemblyFormat = "$layout `(` $flat_index `)` attr-dict `:` type($layout) `->` type($indices)";
+  let hasCanonicalizer = 1;
 }
 
 //===----------------------------------------------------------------------===//
