@@ -5,6 +5,7 @@ add_mlir_dialect_library(MLIRLego
   LegoOps.cpp
   LegoDesugar.cpp
   LegoToArith.cpp
+  LegoVerifyConsistency.cpp
 
   DEPENDS
   MLIRLegoDialectIncGen
