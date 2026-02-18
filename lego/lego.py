@@ -441,6 +441,8 @@ class GroupBy(LayoutBlock):
             *(e.free_symbols for t in [self.dims()] + [x.dims() for x in self.objects] for e in t if isinstance(e, sp.Expr)))))
 
     def __getitem__(self, key):
+        if not isinstance(key, tuple):
+            key = (key,)
         result = []
         self.constraints = {}
         logical_range = self.dims()
@@ -450,7 +452,11 @@ class GroupBy(LayoutBlock):
         i = 0
         for idx, item in enumerate(key):
             if isinstance(item, slice):
-                dim = len(self.objects[0].dims())
+                # Count slices to determine broadcasting rank
+                all_slices = [i for i, it in enumerate(key) if isinstance(it, slice)]
+                num_slices = len(all_slices)
+                slice_rank = all_slices.index(idx)
+                
                 start = 0
                 end = logical_range[idx]
                 if item.start is not None:
@@ -458,7 +464,7 @@ class GroupBy(LayoutBlock):
                 if item.stop is not None:
                     end = item.stop
                 expr_new_axis = TritonRange(
-                    get_arange(start, end), idx % dim, dim)
+                    get_arange(start, end), slice_rank, num_slices)
                 sym = sp.symbols(f"_tr{i}", integer=True)
                 i += 1
                 tr_to_dummy[expr_new_axis] = sym
