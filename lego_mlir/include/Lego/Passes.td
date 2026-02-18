@@ -45,4 +45,14 @@ def LegoVerifyConsistencyPass : Pass<"lego-verify-consistency", "mlir::ModuleOp"
   ];
 }
 
+def LegoArithSimplificationPass : Pass<"lego-arith-simplification", "mlir::ModuleOp"> {
+  let summary = "Simplify arithmetic operations using LEGO-specific algebraic identities";
+  let description = [{
+    This pass implements algebraic simplifications that standard Arith canonicalizations misses,
+    such as (q * d + r) % d -> r % d.
+  }];
+  let constructor = "mlir::lego::createLegoArithSimplificationPass()";
+  let dependentDialects = ["mlir::arith::ArithDialect"];
+}
+
 #endif // LEGO_PASSES_TD
