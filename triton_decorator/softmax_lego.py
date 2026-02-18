@@ -24,7 +24,7 @@ def naive_softmax(x):
 @triton.jit
 def softmax_kernel(output_ptr, input_ptr, input_row_stride, output_row_stride, n_rows, n_cols, BLOCK_SIZE: tl.constexpr,
                    num_stages: tl.constexpr):
-    # Layouts matching softmax_sympy.py - using arguments directly
+    
     L_in = OrderBy(Row(n_rows, n_cols)).TileBy([n_rows, n_cols])
     L_out = OrderBy(Row(n_rows, n_cols)).TileBy([n_rows, n_cols])
 
@@ -32,18 +32,19 @@ def softmax_kernel(output_ptr, input_ptr, input_row_stride, output_row_stride, n
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
     for row_idx in tl.range(row_start, n_rows, row_step, num_stages=num_stages):
-        input_offset = L_in[row_idx, 0:BLOCK_SIZE]
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        input_offset = L_in[row_idx, col_offsets]
         input_ptrs = input_ptr + input_offset
 
-        mask = tl.arange(0, BLOCK_SIZE)[None, :] < n_cols
+        mask = col_offsets < n_cols
         row = tl.load(input_ptrs, mask=mask, other=-float('inf'))
         
-        row_minus_max = row - tl.max(row, axis=1)
+        row_minus_max = row - tl.max(row, axis=0)
         numerator = tl.exp(row_minus_max)
-        denominator = tl.sum(numerator, axis=1)
+        denominator = tl.sum(numerator, axis=0)
         softmax_output = numerator / denominator
 
-        output_offset = L_out[row_idx, 0:BLOCK_SIZE]
+        output_offset = L_out[row_idx, col_offsets]
         output_ptrs = output_ptr + output_offset
         tl.store(output_ptrs, softmax_output, mask=mask)
 
