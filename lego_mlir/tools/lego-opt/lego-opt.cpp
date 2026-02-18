@@ -23,16 +23,22 @@
 #include "Lego/LegoDialect.h"
 #include "Lego/LegoOps.h"
 
+// Needed for registerArithPasses
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
+
 int main(int argc, char **argv) {
   // mlir::registerAllPasses();
   // Register minimal passes
   mlir::registerCanonicalizerPass();
   mlir::registerCSEPass();
   mlir::registerSymbolDCEPass();
+  // Register Arith passes (needed for int-range-optimizations)
+  mlir::arith::registerArithPasses();
   // Register LEGO passes
   mlir::lego::registerLegoToArithPass();
   mlir::lego::registerLegoDesugarPass();
   mlir::lego::registerLegoVerifyConsistencyPass();
+  mlir::lego::registerLegoArithSimplificationPass();
 
   mlir::DialectRegistry registry;
   // mlir::registerAllDialects(registry);
