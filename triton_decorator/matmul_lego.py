@@ -60,12 +60,17 @@ def matmul_kernel(
     num_pid_m = tl.cdiv(M, BM)
     num_pid_n = tl.cdiv(N, BN)
     
-    # PID Layout for L2 cache optimization
+    # PID Layout for L2 cache optimization (Group-major):
+    # This reorders the linear 'pid' into a 2D (pid_m, pid_n) such that it traverses 
+    # in groups (blocks) to improve L2 cache locality, similar to Triton's manual tiling.
     L_pid = OrderBy(Col(Max(num_pid_m // GM, 1), 1),
                     Col(Min(num_pid_m, GM), num_pid_n)).TileBy([num_pid_m, num_pid_n])
     pid_m, pid_n = L_pid.inv(pid)
 
-    # Matrix layouts
+    # Matrix layouts with 2D tiling:
+    # OrderBy(Row(M, N)): defines the global row-major layout.
+    # TileBy([M/BM, N/BN], [BM, BK]): tiles the global matrix into blocks of size (BM, BK).
+    # This allows indexing like L_A[block_m, block_k, :, :] to get memory offsets for a block.
     L_A = OrderBy(Row(M, K)).TileBy([M/BM, K/BK], [BM, BK])
     L_B = OrderBy(Row(K, N)).TileBy([K/BK, N/BN], [BK, BN])
     L_C = OrderBy(Row(M, N)).TileBy([M/BM, N/BN], [BM, BN])

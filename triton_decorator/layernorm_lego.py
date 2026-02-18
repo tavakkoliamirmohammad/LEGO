@@ -13,9 +13,14 @@ def _layer_norm_fwd_fused(
     BLOCK_SIZE_N: tl.constexpr,
 ):
     # Layouts defined locally using arguments
+    # Define LEGO layouts:
+    # 1. L_XY: Row-major matrix of size (M, N).
+    #    TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N]): tiles into (M, N/BLOCK_SIZE_N) tiles,
+    #    each of size (1, BLOCK_SIZE_N). 
     L_XY = OrderBy(Row(M, N)).TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
+    # 2. L_M: Linear layout for Mean/Rstd vectors of size M.
     L_M = OrderBy(Row(M)).TileBy([M])
-
+    
     pid = tl.program_id(0)
     range_n = tl.arange(0, BLOCK_SIZE_N)
     _mean = tl.zeros([BLOCK_SIZE_N], dtype=tl.float32)
@@ -53,19 +58,24 @@ def _layer_norm_fwd_fused(
 @lego_jit
 @triton.jit
 def _layer_norm_bwd_dx_fused(DX, DY, DW, DB, X, W, Mean, Rstd, Lock, stride, M, N, GROUP_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
-    # Layouts defined locally using arguments
-    L_XY = OrderBy(Row(M, N)).TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
-    L_M = OrderBy(Row(M)).TileBy([M])
-    L_W = OrderBy(Row(1, N)).TileBy([1, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
-    W_BWD_L = OrderBy(Row(BLOCK_SIZE_N)).TileBy([BLOCK_SIZE_N])
-
     pid = tl.program_id(0)
     range_n = tl.arange(0, BLOCK_SIZE_N)
     mask = range_n < N
     lock_id = pid % GROUP_SIZE_M
     Lock_ptr = Lock + lock_id
-    Count = Lock_ptr + GROUP_SIZE_M
+    Count = Lock_ptr + GROUP_SIZE_M   
     
+    # Layouts defined locally using arguments
+    # Layouts for backward pass:
+    # L_XY: same tiling as forward.
+    L_XY = OrderBy(Row(M, N)).TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
+    # L_M: layout for per-row statistics.
+    L_M = OrderBy(Row(M)).TileBy([M])
+    # L_W: layout for weight and bias (size 1 x N), tiled similarly to X.
+    L_W = OrderBy(Row(1, N)).TileBy([1, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
+    W_BWD_L = OrderBy(Row(BLOCK_SIZE_N)).TileBy([BLOCK_SIZE_N])
+    
+    # Access X for weight/bias gradient accumulation (tile lock_id, column-tile 0). 
     offset_dwdb = L_XY[lock_id, 0, 0, range_n]
     DW_ptrs = DW + offset_dwdb
     DB_ptrs = DB + offset_dwdb

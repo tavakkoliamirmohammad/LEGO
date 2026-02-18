@@ -24,16 +24,22 @@ def naive_softmax(x):
 @triton.jit
 def softmax_kernel(output_ptr, input_ptr, input_row_stride, output_row_stride, n_rows, n_cols, BLOCK_SIZE: tl.constexpr,
                    num_stages: tl.constexpr):
-    
-    L_in = OrderBy(Row(n_rows, n_cols)).TileBy([n_rows, n_cols])
-    L_out = OrderBy(Row(n_rows, n_cols)).TileBy([n_rows, n_cols])
-
     # Persistent program logic
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
+
+    # Define LEGO layouts for input and output:
+    # 1. Row(n_rows, n_cols): represents a 2D row-major layout.
+    # 2. OrderBy(...): specifies that the elements should be ordered according to the Row layout.
+    # 3. TileBy([n_rows, n_cols]): tiles the entire matrix into a single large tile 
+    #    (or more precisely, it just treats the whole matrix as one tile here because 
+    #    the tiling matches the dimensions).
+    L_in = OrderBy(Row(n_rows, n_cols)).TileBy([n_rows, n_cols])
+    L_out = OrderBy(Row(n_rows, n_cols)).TileBy([n_rows, n_cols])
+
     for row_idx in tl.range(row_start, n_rows, row_step, num_stages=num_stages):
         col_offsets = tl.arange(0, BLOCK_SIZE)
-        input_offset = L_in[row_idx, col_offsets]
+        input_offset = L_in[row_idx, col_offsets] # Access elements at row_idx and col_offsets
         input_ptrs = input_ptr + input_offset
 
         mask = col_offsets < n_cols

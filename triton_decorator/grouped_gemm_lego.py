@@ -56,7 +56,8 @@ def lego_grouped_matmul_kernel(
         gn = tl.load(group_gemm_sizes + g * 3 + 1)
         gk = tl.load(group_gemm_sizes + g * 3 + 2)
         
-        # Layouts defined locally using loaded dimensions
+        # Layouts defined locally using loaded dimensions for each GEMM problem.
+        # This allows handling different matrix sizes in a single kernel.
         L_A = OrderBy(Row(gm, gk)).TileBy([gm/BLOCK_SIZE_M, gk/BLOCK_SIZE_K], [BLOCK_SIZE_M, BLOCK_SIZE_K])
         L_B = OrderBy(Row(gk, gn)).TileBy([gk/BLOCK_SIZE_K, gn/BLOCK_SIZE_N], [BLOCK_SIZE_K, BLOCK_SIZE_N])
         L_C = OrderBy(Row(gm, gn)).TileBy([gm/BLOCK_SIZE_M, gn/BLOCK_SIZE_N], [BLOCK_SIZE_M, BLOCK_SIZE_N])
