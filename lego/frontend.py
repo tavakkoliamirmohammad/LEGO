@@ -60,6 +60,14 @@ def jit(fn=None, **kwargs):
         # Remove all decorators from the function
         func_def.decorator_list = []
         
+        # Normalize line numbers to 1-based for the new file
+        lineno_offset = func_def.lineno - 1
+        for node in ast.walk(tree):
+            if hasattr(node, 'lineno'):
+                node.lineno -= lineno_offset
+            if hasattr(node, 'end_lineno') and node.end_lineno is not None:
+                node.end_lineno -= lineno_offset
+        
         # Override Symbol to add integer/positive assumptions (critical for simplification speed)
         def _symbol_with_assumptions(name, **kw):
             kw.setdefault('integer', True)
@@ -147,7 +155,26 @@ def jit(fn=None, **kwargs):
                     new_body.append(stmt)
                     continue
                 
-                # 3. Handle Assignments
+                # 3. Handle While Loops
+                if isinstance(stmt, ast.While):
+                    # Replace LEGO vars in the test
+                    stmt.test = transformer.visit(stmt.test)
+                    # Recurse into body
+                    stmt.body = _process_stmts(stmt.body)
+                    new_body.append(stmt)
+                    continue
+
+                # 4. Handle If blocks
+                if isinstance(stmt, ast.If):
+                    # Replace LEGO vars in the test
+                    stmt.test = transformer.visit(stmt.test)
+                    # Recurse into bodies
+                    stmt.body = _process_stmts(stmt.body)
+                    stmt.orelse = _process_stmts(stmt.orelse)
+                    new_body.append(stmt)
+                    continue
+                
+                # 5. Handle Assignments
                 if isinstance(stmt, ast.Assign):
                     # Check for explicit Symbol declaration
                     value_node = stmt.value
@@ -180,16 +207,19 @@ def jit(fn=None, **kwargs):
                             name = stmt.targets[0].id
                             
                             if isinstance(val, (sp.Symbol, LayoutBlock)):
-                                # Pure compile-time object -> remove stmt, track in env
+                                # Pure alias or layout -> remove stmt, track in env for inlining
                                 eval_env[name] = val
                                 compile_time_names.add(name)
                                 continue
                             elif isinstance(val, sp.Expr):
-                                # Compile-time expression -> store code for inlining
+                                # Compile-time expression -> Emit assignment, do NOT inline
                                 simplified = sp.simplify(val)
                                 code = printer.doprint(simplified)
-                                lego_code[name] = code
-                                eval_env[name] = val
+                                new_stmt = ast.parse(f"{name} = {code}").body[0]
+                                ast.copy_location(new_stmt, stmt)
+                                new_body.append(new_stmt)
+                                # Subsequent expressions should use the variable name
+                                eval_env[name] = _symbol_with_assumptions(name)
                                 continue
                             else:
                                 # Runtime result (e.g. tl.program_id) -> Keep stmt
@@ -235,10 +265,10 @@ def jit(fn=None, **kwargs):
                     new_body.append(stmt)
                     continue
 
-                # 4. Other Statements
+                # 6. Other Statements
                 # Transform to replace LEGO vars
-                transformer.visit(stmt)
-                new_body.append(stmt)
+                new_stmt = transformer.visit(stmt)
+                new_body.append(new_stmt)
             
             return new_body
         

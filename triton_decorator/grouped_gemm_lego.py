@@ -7,6 +7,35 @@ from lego import jit as lego_jit
 from sympy import Max, Min
 
 @lego_jit
+@triton.autotune(
+    configs=[
+        triton.Config({
+            'BLOCK_SIZE_M': 128,
+            'BLOCK_SIZE_N': 128,
+            'BLOCK_SIZE_K': 32,
+            'NUM_SM': 84,
+        }),
+        triton.Config({
+            'BLOCK_SIZE_M': 128,
+            'BLOCK_SIZE_N': 128,
+            'BLOCK_SIZE_K': 32,
+            'NUM_SM': 128,
+        }),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 64,
+            'BLOCK_SIZE_K': 32,
+            'NUM_SM': 84,
+        }),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 64,
+            'BLOCK_SIZE_K': 32,
+            'NUM_SM': 128,
+        }),
+    ],
+    key=['group_size'],
+)
 @triton.jit
 def lego_grouped_matmul_kernel(
     group_a_ptrs,
@@ -34,31 +63,37 @@ def lego_grouped_matmul_kernel(
 
         num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
         num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
-        num_tiles = tl.where(True, num_m_tiles * num_n_tiles, 0)
+        num_tiles = num_m_tiles * num_n_tiles
         
-        start = tl.where(True, tl.maximum(tile_idx, last_problem_end), 0)
-        stop = tl.where(True, last_problem_end + num_tiles, 0)
-        
-        for current_tile_idx in range(start, stop, NUM_SM):
-            k = tl.where(True, gk, 0)
+        # iterate through the tiles in the current gemm problem
+        while (tile_idx >= last_problem_end and tile_idx < last_problem_end + num_tiles):
+            # pick up a tile from the current gemm problem
             a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
             b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
             c_ptr = tl.load(group_c_ptrs + g).to(tl.pointer_type(tl.float16))
             
-            tile_idx_in_gemm = current_tile_idx - last_problem_end
+            # figure out tile coordinates
+            tile_idx_in_gemm = tile_idx - last_problem_end
             tile_m_idx = tile_idx_in_gemm // num_n_tiles
             tile_n_idx = tile_idx_in_gemm % num_n_tiles
 
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-            for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
-                a = tl.load(a_ptr + L_A[tile_m_idx, kk, :, :])
-                b = tl.load(b_ptr + L_B[kk, tile_n_idx, :, :])
+            for kk in range(0, tl.cdiv(gk, BLOCK_SIZE_K)):
+                a_ptrs = a_ptr + L_A[tile_m_idx, kk, :, :]
+                b_ptrs = b_ptr + L_B[kk, tile_n_idx, :, :]
+                tl.multiple_of(a_ptrs, [16, 16])
+                tl.multiple_of(b_ptrs, [16, 16])
+                a = tl.load(a_ptrs)
+                b = tl.load(b_ptrs)
                 accumulator += tl.dot(a, b)
             
-            tl.store(c_ptr + L_C[tile_m_idx, tile_n_idx, :, :], accumulator.to(tl.float16))
+            c_ptrs = c_ptr + L_C[tile_m_idx, tile_n_idx, :, :]
+            tl.store(c_ptrs, accumulator.to(tl.float16))
 
-        num_iters = tl.cdiv(stop - start, NUM_SM)
-        tile_idx = start + num_iters * NUM_SM
+            # go to the next tile by advancing NUM_SM
+            tile_idx += NUM_SM
+
+        # get ready to go to the next gemm problem
         last_problem_end = last_problem_end + num_tiles
 
 def lego_group_gemm_fn(group_A, group_B):
@@ -77,11 +112,11 @@ def lego_group_gemm_fn(group_A, group_B):
     d_a_ptrs = torch.tensor(A_addrs, device=device); d_b_ptrs = torch.tensor(B_addrs, device=device)
     d_c_ptrs = torch.tensor(C_addrs, device=device); d_g_sizes = torch.tensor(g_sizes, dtype=torch.int32, device=device)
     d_g_lds = torch.tensor(g_lds, dtype=torch.int32, device=device)
-    NUM_SM = 84 
-    grid = (NUM_SM, )
+    
+    # Grid and launch using autotuned parameters
+    grid = lambda META: (META['NUM_SM'], )
     lego_grouped_matmul_kernel[grid](
         d_a_ptrs, d_b_ptrs, d_c_ptrs, d_g_sizes, d_g_lds, group_size,
-        NUM_SM=NUM_SM, BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, BLOCK_SIZE_K=32,
     )
     return group_C
 
