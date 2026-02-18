@@ -29,4 +29,16 @@ def Lego_LayoutType : TypeDef<Lego_Dialect, "Layout"> {
     let description = "Represents a layout object (e.g., Row-Major, Tiled, etc.)";
 }
 
+def Lego_ViewType : TypeDef<Lego_Dialect, "View"> {
+    let mnemonic = "view";
+    let summary = "A structured view over a memory buffer";
+    let description = [{
+        Represents a logical view over a physical memory buffer, defined by a Lego layout.
+        The view abstraction allows multidimensional access to flat or complex buffers
+        abstracting away the index calculation logic.
+    }];
+    let parameters = (ins "Type":$elementType);
+    let assemblyFormat = "`<` $elementType `>`";
+}
+
 #endif // LEGO_DIALECT
