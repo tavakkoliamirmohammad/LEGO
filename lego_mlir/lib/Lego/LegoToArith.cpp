@@ -380,9 +380,8 @@ struct StoreOpLowering : public OpRewritePattern<StoreOp> {
     if (!flatIndex)
       return failure();
 
-    rewriter.create<memref::StoreOp>(op.getLoc(), value, memref,
-                                     ValueRange{flatIndex});
-    rewriter.eraseOp(op);
+    rewriter.replaceOpWithNewOp<memref::StoreOp>(op, value, memref,
+                                                 ValueRange{flatIndex});
     return success();
   }
 };

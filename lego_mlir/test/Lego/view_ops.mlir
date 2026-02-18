@@ -1,4 +1,4 @@
-// RUN: lego-opt %s -lego-desugar -lego-to-arith -split-input-file | FileCheck %s
+// RUN: lego-opt %s -lego-lower -split-input-file | FileCheck %s
 
 // CHECK-LABEL: func @test_basic_view
 // CHECK-SAME: (%[[MEM:.*]]: memref<100xf32>, %[[I:.*]]: index, %[[J:.*]]: index, %[[VAL:.*]]: f32)
@@ -19,8 +19,7 @@ func.func @test_basic_view(%mem: memref<100xf32>, %i: index, %j: index, %val: f3
   lego.store %val, %view[%i, %j] : f32, !lego.view<f32>, index, index
   
   // Load logic: ret = view[i, j]
-  // CHECK: %[[FLAT_LOAD:.*]] = arith.addi {{.*}} : index
-  // CHECK: %[[RET:.*]] = memref.load %[[MEM]][%[[FLAT_LOAD]]]
+  // CHECK: %[[RET:.*]] = memref.load %[[MEM]][%[[FLAT]]]
   %ret = lego.load %view[%i, %j] : !lego.view<f32>, index, index
   return %ret : f32
 }

@@ -18,6 +18,8 @@ std::unique_ptr<Pass> createLegoDesugarPass();
 std::unique_ptr<Pass> createLegoVerifyConsistencyPass();
 std::unique_ptr<Pass> createLegoArithSimplificationPass();
 
+void registerLegoPipelines();
+
 #define GEN_PASS_DECL_LEGOTOARITHPASS
 #define GEN_PASS_DECL_LEGODESUGARPASS
 #define GEN_PASS_DECL_LEGOVERIFYCONSISTENCYPASS
