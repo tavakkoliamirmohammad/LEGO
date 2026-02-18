@@ -1,7 +1,6 @@
 import torch
 import triton
 import triton.language as tl
-import sympy as sp
 import lego
 from lego.lego import *
 from lego import jit as lego_jit
@@ -13,11 +12,12 @@ def _layer_norm_fwd_fused(
     M, N, eps,
     BLOCK_SIZE_N: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    # Layouts defined locally using arguments
     L_XY = OrderBy(Row(M, N)).TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
     L_M = OrderBy(Row(M)).TileBy([M], [1])
     L_W = OrderBy(Row(1, N)).TileBy([1, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
 
+    pid = tl.program_id(0)
     _mean = tl.zeros([1, BLOCK_SIZE_N], dtype=tl.float32)
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
         offset_x = L_XY[pid, k, 0, 0:BLOCK_SIZE_N]
@@ -53,12 +53,13 @@ def _layer_norm_fwd_fused(
 @lego_jit
 @triton.jit
 def _layer_norm_bwd_dx_fused(DX, DY, DW, DB, X, W, Mean, Rstd, Lock, stride, M, N, GROUP_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
-    pid = tl.program_id(0)
+    # Layouts defined locally using arguments
     L_XY = OrderBy(Row(M, N)).TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
     L_M = OrderBy(Row(M)).TileBy([M], [1])
     L_W = OrderBy(Row(1, N)).TileBy([1, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
     W_BWD_L = OrderBy(Row(1, BLOCK_SIZE_N)).TileBy([1], [BLOCK_SIZE_N])
 
+    pid = tl.program_id(0)
     mask = tl.arange(0, BLOCK_SIZE_N)[None, :] < N
     lock_id = pid % GROUP_SIZE_M
     Lock_ptr = Lock + lock_id
@@ -144,6 +145,9 @@ class LEGOLayerNorm(torch.autograd.Function):
         x, w, b, m, v = ctx.saved_tensors
         N = w.shape[0]
         GROUP_SIZE_M = 64
+        if N <= 8192: GROUP_SIZE_M = 96
+        if N <= 4096: GROUP_SIZE_M = 128
+        if N <= 1024: GROUP_SIZE_M = 256
         locks = torch.zeros(2 * GROUP_SIZE_M, dtype=torch.int32, device=w.device)
         _dw = torch.zeros((GROUP_SIZE_M, N), dtype=x.dtype, device=w.device)
         _db = torch.zeros((GROUP_SIZE_M, N), dtype=x.dtype, device=w.device)
@@ -154,7 +158,7 @@ class LEGOLayerNorm(torch.autograd.Function):
         M, N = x_arg.shape
         _layer_norm_bwd_dx_fused[(M, )](
             dx, dy, _dw, _db, x, w, m, v, locks,
-            x_arg.stride(0), M, N, # Fixed missing stride argument
+            x_arg.stride(0), M, N,
             BLOCK_SIZE_N=ctx.BLOCK_SIZE,
             GROUP_SIZE_M=GROUP_SIZE_M,
             num_warps=ctx.num_warps)
@@ -169,14 +173,13 @@ lego_layer_norm = LEGOLayerNorm.apply
 
 def test_lego_layer_norm(M, N, dtype, eps=1e-5, device='cuda'):
     x_shape = (M, N)
-    w_shape = (x_shape[-1], )
-    weight = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
-    bias = torch.rand(w_shape, dtype=dtype, device=device, requires_grad=True)
+    weight = torch.rand(N, dtype=dtype, device=device, requires_grad=True)
+    bias = torch.rand(N, dtype=dtype, device=device, requires_grad=True)
     x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=device)
     dy = .1 * torch.randn_like(x)
     x.requires_grad_(True)
-    y_tri = lego_layer_norm(x, w_shape, weight, bias, eps)
-    y_ref = torch.nn.functional.layer_norm(x, w_shape, weight, bias, eps).to(dtype)
+    y_tri = lego_layer_norm(x, (N, ), weight, bias, eps)
+    y_ref = torch.nn.functional.layer_norm(x, (N, ), weight, bias, eps).to(dtype)
     y_tri.backward(dy, retain_graph=True)
     dx_tri, dw_tri, db_tri = [_.grad.clone() for _ in [x, weight, bias]]
     x.grad, weight.grad, bias.grad = None, None, None
@@ -188,5 +191,52 @@ def test_lego_layer_norm(M, N, dtype, eps=1e-5, device='cuda'):
     assert torch.allclose(dw_tri, dw_ref, atol=2e-2, rtol=1e-2)
     print(f"✅ LayerNorm match for M={M}, N={N}")
 
+@triton.testing.perf_report([
+    triton.testing.Benchmark(
+        x_names=['N'],
+        x_vals=[2 ** i for i in range(7, 14)],
+        line_arg='provider',
+        line_vals=['lego', 'torch'],
+        line_names=['LEGO', 'Torch'],
+        styles=[('blue', '-'), ('orange', '-')],
+        ylabel='GB/s',
+        plot_name='layer-norm-forward',
+        args={'M': 4096, 'dtype': torch.float16, 'mode': 'forward'},
+    ),
+    triton.testing.Benchmark(
+        x_names=['N'],
+        x_vals=[2 ** i for i in range(7, 14)],
+        line_arg='provider',
+        line_vals=['lego', 'torch'],
+        line_names=['LEGO', 'Torch'],
+        styles=[('blue', '-'), ('orange', '-')],
+        ylabel='GB/s',
+        plot_name='layer-norm-backward',
+        args={'M': 4096, 'dtype': torch.float16, 'mode': 'backward'},
+    )
+])
+def benchmark(M, N, dtype, provider, mode, eps=1e-5, device='cuda'):
+    x_shape = (M, N)
+    weight = torch.rand(N, dtype=dtype, device=device, requires_grad=True)
+    bias = torch.rand(N, dtype=dtype, device=device, requires_grad=True)
+    x = torch.randn(x_shape, dtype=dtype, device=device, requires_grad=True)
+    dy = torch.randn_like(x)
+    quantiles = [0.5, 0.2, 0.8]
+
+    def op():
+        if provider == "lego":
+            return lego_layer_norm(x, (N, ), weight, bias, eps)
+        return torch.nn.functional.layer_norm(x, (N, ), weight, bias, eps)
+
+    if mode == 'forward':
+        ms, min_ms, max_ms = triton.testing.do_bench(op, quantiles=quantiles)
+        gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+    else:
+        y = op()
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: y.backward(dy, retain_graph=True), quantiles=quantiles, grad_to_none=[x])
+        gbps = lambda ms: 3 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+    return gbps(ms), gbps(max_ms), gbps(min_ms)
+
 if __name__ == "__main__":
     test_lego_layer_norm(1151, 8192, torch.float16)
+    benchmark.run(print_data=True, show_plots=False)

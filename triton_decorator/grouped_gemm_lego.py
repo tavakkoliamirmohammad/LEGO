@@ -1,10 +1,10 @@
 import torch
 import triton
 import triton.language as tl
-import sympy as sp
 import lego
 from lego.lego import *
 from lego import jit as lego_jit
+from sympy import Max, Min
 
 @lego_jit
 @triton.jit
@@ -20,14 +20,6 @@ def lego_grouped_matmul_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
 ):
-    gm_sym = Symbol('gm')
-    gn_sym = Symbol('gn')
-    gk_sym = Symbol('gk')
-    
-    L_A = OrderBy(Row(gm_sym, gk_sym)).TileBy([gm_sym/BLOCK_SIZE_M, gk_sym/BLOCK_SIZE_K], [BLOCK_SIZE_M, BLOCK_SIZE_K])
-    L_B = OrderBy(Row(gk_sym, gn_sym)).TileBy([gk_sym/BLOCK_SIZE_K, gn_sym/BLOCK_SIZE_N], [BLOCK_SIZE_K, BLOCK_SIZE_N])
-    L_C = OrderBy(Row(gm_sym, gn_sym)).TileBy([gm_sym/BLOCK_SIZE_M, gn_sym/BLOCK_SIZE_N], [BLOCK_SIZE_M, BLOCK_SIZE_N])
-
     tile_idx = tl.program_id(0)
     last_problem_end = 0
     for g in range(group_size):
@@ -35,6 +27,11 @@ def lego_grouped_matmul_kernel(
         gn = tl.load(group_gemm_sizes + g * 3 + 1)
         gk = tl.load(group_gemm_sizes + g * 3 + 2)
         
+        # Layouts defined locally using loaded dimensions
+        L_A = OrderBy(Row(gm, gk)).TileBy([gm/BLOCK_SIZE_M, gk/BLOCK_SIZE_K], [BLOCK_SIZE_M, BLOCK_SIZE_K])
+        L_B = OrderBy(Row(gk, gn)).TileBy([gk/BLOCK_SIZE_K, gn/BLOCK_SIZE_N], [BLOCK_SIZE_K, BLOCK_SIZE_N])
+        L_C = OrderBy(Row(gm, gn)).TileBy([gm/BLOCK_SIZE_M, gn/BLOCK_SIZE_N], [BLOCK_SIZE_M, BLOCK_SIZE_N])
+
         num_m_tiles = tl.cdiv(gm, BLOCK_SIZE_M)
         num_n_tiles = tl.cdiv(gn, BLOCK_SIZE_N)
         num_tiles = tl.where(True, num_m_tiles * num_n_tiles, 0)
@@ -43,7 +40,6 @@ def lego_grouped_matmul_kernel(
         stop = tl.where(True, last_problem_end + num_tiles, 0)
         
         for current_tile_idx in range(start, stop, NUM_SM):
-            # Guard 'k' to ensure it's kept in source for the inner loop's 'range'
             k = tl.where(True, gk, 0)
             a_ptr = tl.load(group_a_ptrs + g).to(tl.pointer_type(tl.float16))
             b_ptr = tl.load(group_b_ptrs + g).to(tl.pointer_type(tl.float16))
@@ -55,15 +51,11 @@ def lego_grouped_matmul_kernel(
 
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
             for kk in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
-                offset_a = L_A[tile_m_idx, kk, 0:BLOCK_SIZE_M, 0:BLOCK_SIZE_K]
-                offset_b = L_B[kk, tile_n_idx, 0:BLOCK_SIZE_K, 0:BLOCK_SIZE_N]
-                a = tl.load(a_ptr + offset_a)
-                b = tl.load(b_ptr + offset_b)
+                a = tl.load(a_ptr + L_A[tile_m_idx, kk, :, :])
+                b = tl.load(b_ptr + L_B[kk, tile_n_idx, :, :])
                 accumulator += tl.dot(a, b)
-            c = accumulator.to(tl.float16)
-
-            offset_c = L_C[tile_m_idx, tile_n_idx, 0:BLOCK_SIZE_M, 0:BLOCK_SIZE_N]
-            tl.store(c_ptr + offset_c, c)
+            
+            tl.store(c_ptr + L_C[tile_m_idx, tile_n_idx, :, :], accumulator.to(tl.float16))
 
         num_iters = tl.cdiv(stop - start, NUM_SM)
         tile_idx = start + num_iters * NUM_SM
@@ -93,6 +85,31 @@ def lego_group_gemm_fn(group_A, group_B):
     )
     return group_C
 
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['N'],
+        x_vals=[2**i for i in range(7, 13)],
+        line_arg='provider',
+        line_vals=['torch', 'lego'],
+        line_names=["Torch", "LEGO"],
+        styles=[('blue', '-'), ('red', '-')],
+        ylabel="runtime(ms)",
+        plot_name="group-gemm-performance",
+        args={},
+    ))
+def benchmark(N, provider):
+    group_size = 4
+    group_A, group_B = [], []
+    for i in range(group_size):
+        group_A.append(torch.rand((N, N), device="cuda", dtype=torch.float16))
+        group_B.append(torch.rand((N, N), device="cuda", dtype=torch.float16))
+
+    if provider == 'lego':
+        ms = triton.testing.do_bench(lambda: lego_group_gemm_fn(group_A, group_B))
+    else:
+        ms = triton.testing.do_bench(lambda: [torch.matmul(a, b) for a, b in zip(group_A, group_B)])
+    return ms
+
 if __name__ == "__main__":
     group_m, group_n, group_k = [1024, 512, 256, 128], [1024, 512, 256, 128], [1024, 512, 256, 128]
     group_A, group_B = [], []
@@ -104,3 +121,4 @@ if __name__ == "__main__":
     for i in range(len(group_m)):
         assert torch.allclose(ref_out[i], tri_out[i], atol=2e-2, rtol=1e-2)
     print("✅ Grouped GEMM match")
+    benchmark.run(show_plots=False, print_data=True)
