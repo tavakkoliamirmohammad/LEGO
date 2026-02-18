@@ -132,6 +132,14 @@ inline SmallVector<int64_t> getLayoutInputDims(Value layout) {
     return dims;
   }
 
+  if (auto groupByOp = dyn_cast<GroupByOp>(defOp)) {
+    return extractI64Array(groupByOp.getGroupDims());
+  }
+
+  if (auto tileByOp = dyn_cast<TileByOp>(defOp)) {
+    return getLayoutInputDims(tileByOp.getInput());
+  }
+
   return {};
 }
 

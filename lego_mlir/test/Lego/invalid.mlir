@@ -71,3 +71,11 @@ func.func @test_tileby_zero_dim() {
   %tb = lego.tile_by %ob tile_dims [[0]] : !lego.layout
   return
 }
+// -----
+
+func.func @test_cast_view_mismatch(%mem: memref<50xf32>) {
+  %row = lego.row [10, 10] : !lego.layout
+  // expected-error @+1 {{MemRef total number of elements (50) does not match layout volume (100)}}
+  %view = lego.cast_view %mem, %row : memref<50xf32>, !lego.layout -> !lego.view<f32>
+  return
+}

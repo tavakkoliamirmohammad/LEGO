@@ -138,9 +138,45 @@ LogicalResult RowOp::verify() {
 // ColOp Verification
 // ============================================================================
 
+LogicalResult ColOp::verify() {
+    auto dims = extractI64Array(getDims());
+    for (int64_t d : dims) {
+        if (d <= 0) return emitOpError("Dimension " + std::to_string(d) + " must be strictly positive");
+    }
+    return success();
+}
+
 // ============================================================================
-// Layout Algebraic Identity Patterns
+// CastViewOp Verification
 // ============================================================================
+
+LogicalResult CastViewOp::verify() {
+    auto memrefType = cast<MemRefType>(getMemref().getType());
+    if (!memrefType.hasStaticShape()) {
+        // For now, only support static shapes for size checking.
+        return success();
+    }
+
+    int64_t memrefElements = memrefType.getNumElements();
+    
+    auto layoutDims = getLayoutInputDims(getLayout());
+    if (layoutDims.empty()) {
+        // Might be a dynamic layout or something getLayoutInputDims doesn't handle yet.
+        return success();
+    }
+
+    int64_t layoutVolume = 1;
+    for (int64_t d : layoutDims) {
+        layoutVolume *= d;
+    }
+
+    if (memrefElements != layoutVolume) {
+        return emitOpError("MemRef total number of elements (" + std::to_string(memrefElements) +
+                           ") does not match layout volume (" + std::to_string(layoutVolume) + ")");
+    }
+
+    return success();
+}
 
 namespace {
 struct SimplifyApplyInverse : public OpRewritePattern<ApplyOp> {
@@ -295,14 +331,6 @@ struct SimplifyLinearGenP : public OpRewritePattern<GenPOp> {
 void GenPOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                          MLIRContext *context) {
   results.add<SimplifyLinearGenP>(context);
-}
-
-LogicalResult ColOp::verify() {
-    auto dims = extractI64Array(getDims());
-    for (int64_t d : dims) {
-        if (d <= 0) return emitOpError("Dimension " + std::to_string(d) + " must be strictly positive");
-    }
-    return success();
 }
 
 DiagnosedSilenceableFailure ApplyLayoutTransformOp::apply(

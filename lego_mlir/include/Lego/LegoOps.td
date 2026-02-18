@@ -212,4 +212,47 @@ def ApplyLayoutTransformOp : Op<Lego_Dialect, "lego.transform_loop",
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// View Abstraction Operations
+//===----------------------------------------------------------------------===//
+
+def CastViewOp : Lego_Op<"cast_view", [Pure]> {
+  let summary = "Creates a Lego View from a memref and a layout";
+  let description = [{
+    Wraps a standard `memref` with a `lego.layout`, creating a `!lego.view`.
+    This operation does not copy data; it merely provides a logical view.
+  }];
+  let arguments = (ins AnyMemRef:$memref, Lego_LayoutType:$layout);
+  let results = (outs Lego_ViewType:$view);
+  let assemblyFormat = "$memref `,` $layout attr-dict `:` type($memref) `,` type($layout) `->` type($view)";
+  let hasVerifier = 1;
+}
+
+def LoadOp : Lego_Op<"load", [
+    TypesMatchWith<"result type matches element type of view",
+                   "view", "result",
+                   "cast<ViewType>($_self).getElementType()">]> {
+  let summary = "Load a value from a Lego View";
+  let description = [{
+    Loads a value from the view at the specified logical indices.
+    The indices are mapped to a flat index via the view's layout.
+  }];
+  let arguments = (ins Lego_ViewType:$view, Variadic<Index>:$indices);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$view `[` $indices `]` attr-dict `:` type($view) `,` type($indices)";
+}
+
+def StoreOp : Lego_Op<"store", [
+    TypesMatchWith<"value type matches element type of view",
+                   "view", "value",
+                   "cast<ViewType>($_self).getElementType()">]> {
+  let summary = "Store a value into a Lego View";
+  let description = [{
+    Stores a value into the view at the specified logical indices.
+    The indices are mapped to a flat index via the view's layout.
+  }];
+  let arguments = (ins AnyType:$value, Lego_ViewType:$view, Variadic<Index>:$indices);
+  let assemblyFormat = "$value `,` $view `[` $indices `]` attr-dict `:` type($value) `,` type($view) `,` type($indices)";
+}
+
 #endif // LEGO_OPS

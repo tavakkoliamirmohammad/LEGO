@@ -335,6 +335,70 @@ struct ApplyInverseOpLowering : public OpRewritePattern<ApplyInverseOp> {
   }
 };
 
+struct LoadOpLowering : public OpRewritePattern<LoadOp> {
+  using OpRewritePattern<LoadOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(LoadOp op,
+                                PatternRewriter &rewriter) const override {
+    Value view = op.getView();
+    auto castOp = view.getDefiningOp<CastViewOp>();
+    if (!castOp) {
+      return op.emitOpError(
+          "expected view to be defined by lego.cast_view for now");
+    }
+
+    Value memref = castOp.getMemref();
+    Value layout = castOp.getLayout();
+    ValueRange indices = op.getIndices();
+
+    Value flatIndex = applyLayout(rewriter, op.getLoc(), layout, indices);
+    if (!flatIndex)
+      return failure();
+
+    rewriter.replaceOpWithNewOp<memref::LoadOp>(op, memref,
+                                                 ValueRange{flatIndex});
+    return success();
+  }
+};
+
+struct StoreOpLowering : public OpRewritePattern<StoreOp> {
+  using OpRewritePattern<StoreOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(StoreOp op,
+                                PatternRewriter &rewriter) const override {
+    Value view = op.getView();
+    auto castOp = view.getDefiningOp<CastViewOp>();
+    if (!castOp)
+      return failure();
+
+    Value memref = castOp.getMemref();
+    Value layout = castOp.getLayout();
+    ValueRange indices = op.getIndices();
+    Value value = op.getValue();
+
+    Value flatIndex = applyLayout(rewriter, op.getLoc(), layout, indices);
+    if (!flatIndex)
+      return failure();
+
+    rewriter.replaceOpWithNewOp<memref::StoreOp>(op, value, memref,
+                                                 ValueRange{flatIndex});
+    return success();
+  }
+};
+
+struct CastViewOpLowering : public OpRewritePattern<CastViewOp> {
+  using OpRewritePattern<CastViewOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(CastViewOp op,
+                                PatternRewriter &rewriter) const override {
+    if (op.use_empty()) {
+      rewriter.eraseOp(op);
+      return success();
+    }
+    return failure();
+  }
+};
+
 // ============================================================================
 // Pass
 // ============================================================================
@@ -349,7 +413,8 @@ struct LegoToArithPassImpl
     MLIRContext *context = &getContext();
 
     RewritePatternSet patterns(context);
-    patterns.add<ApplyOpLowering, ApplyInverseOpLowering>(context);
+    patterns.add<ApplyOpLowering, ApplyInverseOpLowering, LoadOpLowering,
+                 StoreOpLowering, CastViewOpLowering>(context);
 
     if (failed(applyPatternsGreedily(module, std::move(patterns)))) {
       signalPassFailure();
