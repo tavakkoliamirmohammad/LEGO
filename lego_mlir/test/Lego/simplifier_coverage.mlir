@@ -56,3 +56,36 @@ func.func @test_B_C(%x: index) -> index {
   // CHECK: return %[[X]]
   return %res : index
 }
+
+  // A6: (c*d + r) / d -> c + r/d (Constant handling)
+  // CHECK-LABEL: func.func @test_A6_const
+  // CHECK-SAME: (%[[R:.*]]: index)
+  func.func @test_A6_const(%r: index) -> index {
+    %c10 = arith.constant 10 : index
+    %c20 = arith.constant 20 : index
+    %0 = arith.addi %r, %c20 : index
+    
+    // Expect: 2 + r/10
+    // CHECK: %[[C2:.*]] = arith.constant 2
+    // CHECK: %[[DIV:.*]] = arith.divui %[[R]], %{{.*}}
+    // CHECK: %[[RES:.*]] = arith.addi %[[DIV]], %[[C2]]
+    // CHECK: return %[[RES]]
+    %1 = arith.divui %0, %c10 : index
+    return %1 : index
+  }
+
+  // A2 check: (q*d + r) / d with r potentially >= d
+  // CHECK-LABEL: func.func @test_A2_large_rem
+  // CHECK-SAME: (%[[Q:.*]]: index, %[[R:.*]]: index)
+  func.func @test_A2_large_rem(%q: index, %r: index) -> index {
+    %c10 = arith.constant 10 : index
+    %0 = arith.muli %q, %c10 : index
+    %1 = arith.addi %0, %r : index
+    
+    // Should rewrite to q + r/10
+    // CHECK: %[[DIV_REM:.*]] = arith.divui %[[R]], %{{.*}}
+    // CHECK: %[[RES:.*]] = arith.addi %[[Q]], %[[DIV_REM]]
+    // CHECK: return %[[RES]]
+    %2 = arith.divui %1, %c10 : index
+    return %2 : index
+  }

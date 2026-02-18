@@ -2,6 +2,7 @@
 #include "Lego/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 using namespace mlir;
@@ -75,13 +76,58 @@ struct SimplifyDivId : public OpRewritePattern<arith::DivUIOp> {
           
           // Result = q + (r / d)
           // We let subsequent canonicalizations handle (r / d) -> 0 if simplification is possible.
-          Value rDivD = rewriter.create<arith::DivUIOp>(op.getLoc(), other, divisor);
+          Value rDivD = arith::DivUIOp::create(rewriter, op.getLoc(), other, divisor);
           rewriter.replaceOpWithNewOp<arith::AddIOp>(op, q, rDivD);
           return success();
         }
       }
     }
     return failure();
+  }
+};
+
+// Pattern A6: (x + c) / d -> x/d + c/d  (if c % d == 0)
+struct SimplifyDivConst : public OpRewritePattern<arith::DivUIOp> {
+  using OpRewritePattern<arith::DivUIOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::DivUIOp op,
+                                PatternRewriter &rewriter) const override {
+    Value numerator = op.getLhs();
+    Value divisor = op.getRhs();
+
+    // Match divisor being a constant
+    APInt dVal;
+    if (!matchPattern(divisor, m_ConstantInt(&dVal)) || dVal.isZero())
+      return failure();
+
+    // Match numerator = addi(x, c)
+    auto addOp = numerator.getDefiningOp<arith::AddIOp>();
+    if (!addOp)
+      return failure();
+
+    Value x;
+    APInt cVal;
+    
+
+    // Check commutativity: x + c or c + x
+    if (matchPattern(addOp.getRhs(), m_ConstantInt(&cVal))) {
+      x = addOp.getLhs();
+    } else if (matchPattern(addOp.getLhs(), m_ConstantInt(&cVal))) {
+      x = addOp.getRhs();
+    } else {
+      return failure();
+    }
+
+    // Check if c is a multiple of d
+    if (cVal.urem(dVal) != 0)
+      return failure();
+
+    // Rewrite to (x / d) + (c / d)
+    Value newDiv = arith::DivUIOp::create(rewriter, op.getLoc(), x, divisor);
+    Value newConst = arith::ConstantOp::create(rewriter, op.getLoc(), rewriter.getIndexAttr(cVal.udiv(dVal).getZExtValue()));
+    
+    rewriter.replaceOpWithNewOp<arith::AddIOp>(op, newDiv, newConst);
+    return success();
   }
 };
 
@@ -143,7 +189,7 @@ struct LegoArithSimplificationPass
           LegoArithSimplificationPass> {
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
-    patterns.add<SimplifyRemId, SimplifyDivId, ReconstructId>(&getContext());
+    patterns.add<SimplifyRemId, SimplifyDivId, SimplifyDivConst, ReconstructId>(&getContext());
     
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
