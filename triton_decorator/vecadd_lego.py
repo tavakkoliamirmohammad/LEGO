@@ -16,13 +16,12 @@ def vecadd_kernel(x_ptr, y_ptr, z_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     L = OrderBy(Row(n_elements)).TileBy([n_elements / BLOCK_SIZE, BLOCK_SIZE])
     
     pid = tl.program_id(0)
-    range_n = tl.arange(0, BLOCK_SIZE)
     
     # Get offsets for this program's tile
-    offsets = L[pid, range_n]
+    offsets = L[pid, :]
     
     # Masking for elements beyond n_elements
-    mask = (pid * BLOCK_SIZE + range_n) < n_elements
+    mask = (pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)) < n_elements
     
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
