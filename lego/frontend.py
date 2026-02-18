@@ -206,20 +206,24 @@ def jit(fn=None, **kwargs):
                         if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
                             name = stmt.targets[0].id
                             
-                            if isinstance(val, (sp.Symbol, LayoutBlock)):
-                                # Pure alias or layout -> remove stmt, track in env for inlining
+                            if isinstance(val, LayoutBlock):
+                                # Pure layout object -> remove stmt, track in env for compile-time use
                                 eval_env[name] = val
                                 compile_time_names.add(name)
                                 continue
                             elif isinstance(val, sp.Expr):
-                                # Compile-time expression -> Emit assignment, do NOT inline
+                                # Compile-time expression (includes sp.Symbol) -> Emit assignment if meaningful
                                 simplified = sp.simplify(val)
                                 code = printer.doprint(simplified)
-                                new_stmt = ast.parse(f"{name} = {code}").body[0]
-                                ast.copy_location(new_stmt, stmt)
-                                new_body.append(new_stmt)
-                                # Subsequent expressions should use the variable name
-                                eval_env[name] = _symbol_with_assumptions(name)
+                                if code != name:
+                                    new_stmt = ast.parse(f"{name} = {code}").body[0]
+                                    ast.copy_location(new_stmt, stmt)
+                                    new_body.append(new_stmt)
+                                    # Subsequent expressions should use the variable name
+                                    eval_env[name] = _symbol_with_assumptions(name)
+                                else:
+                                    # Self-alias (e.g. n_rows = n_rows symbol) -> just track in env
+                                    eval_env[name] = val
                                 continue
                             else:
                                 # Runtime result (e.g. tl.program_id) -> Keep stmt

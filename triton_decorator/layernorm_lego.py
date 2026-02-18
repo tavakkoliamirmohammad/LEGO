@@ -14,37 +14,37 @@ def _layer_norm_fwd_fused(
 ):
     # Layouts defined locally using arguments
     L_XY = OrderBy(Row(M, N)).TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
-    L_M = OrderBy(Row(M)).TileBy([M], [1])
-    L_W = OrderBy(Row(1, N)).TileBy([1, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
+    L_M = OrderBy(Row(M)).TileBy([M])
 
     pid = tl.program_id(0)
-    _mean = tl.zeros([1, BLOCK_SIZE_N], dtype=tl.float32)
+    range_n = tl.arange(0, BLOCK_SIZE_N)
+    _mean = tl.zeros([BLOCK_SIZE_N], dtype=tl.float32)
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        offset_x = L_XY[pid, k, 0, 0:BLOCK_SIZE_N]
-        mask = (k * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)[None, :]) < N
-        a = tl.load(X + offset_x, mask=mask, other=0.).to(tl.float32)
+        offset_x = L_XY[pid, k, 0, range_n]
+        cols = L_XY[0, k, 0, range_n]
+        a = tl.load(X + offset_x, mask=cols < N, other=0.).to(tl.float32)
         _mean += a
     mean = tl.sum(_mean) / N
     
-    _var = tl.zeros([1, BLOCK_SIZE_N], dtype=tl.float32)
+    _var = tl.zeros([BLOCK_SIZE_N], dtype=tl.float32)
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        offset_x = L_XY[pid, k, 0, 0:BLOCK_SIZE_N]
-        mask = (k * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)[None, :]) < N
-        x = tl.load(X + offset_x, mask=mask, other=0.).to(tl.float32)
-        x = tl.where(mask, x - mean, 0.)
+        offset_x = L_XY[pid, k, 0, range_n]
+        cols = L_XY[0, k, 0, range_n]
+        x = tl.load(X + offset_x, mask=cols < N, other=0.).to(tl.float32)
+        x = tl.where(cols < N, x - mean, 0.)
         _var += x * x
     var = tl.sum(_var) / N
     rstd = 1 / tl.sqrt(var + eps)
     
-    tl.store(Mean + L_M[pid, 0], mean)
-    tl.store(Rstd + L_M[pid, 0], rstd)
+    tl.store(Mean + L_M[pid,], mean)
+    tl.store(Rstd + L_M[pid,], rstd)
     
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        mask = (k * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)[None, :]) < N
-        offset_w = L_W[0, k, 0, 0:BLOCK_SIZE_N]
-        w = tl.load(W + offset_w, mask=mask)
-        b = tl.load(B + offset_w, mask=mask)
-        offset_x = L_XY[pid, k, 0, 0:BLOCK_SIZE_N]
+        cols = L_XY[0, k, 0, range_n]
+        mask = cols < N
+        w = tl.load(W + cols, mask=mask)
+        b = tl.load(B + cols, mask=mask)
+        offset_x = L_XY[pid, k, 0, range_n]
         x = tl.load(X + offset_x, mask=mask, other=0.).to(tl.float32)
         x_hat = (x - mean) * rstd
         y = x_hat * w + b
@@ -55,29 +55,30 @@ def _layer_norm_fwd_fused(
 def _layer_norm_bwd_dx_fused(DX, DY, DW, DB, X, W, Mean, Rstd, Lock, stride, M, N, GROUP_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
     # Layouts defined locally using arguments
     L_XY = OrderBy(Row(M, N)).TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
-    L_M = OrderBy(Row(M)).TileBy([M], [1])
+    L_M = OrderBy(Row(M)).TileBy([M])
     L_W = OrderBy(Row(1, N)).TileBy([1, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
-    W_BWD_L = OrderBy(Row(1, BLOCK_SIZE_N)).TileBy([1], [BLOCK_SIZE_N])
+    W_BWD_L = OrderBy(Row(BLOCK_SIZE_N)).TileBy([BLOCK_SIZE_N])
 
     pid = tl.program_id(0)
-    mask = tl.arange(0, BLOCK_SIZE_N)[None, :] < N
+    range_n = tl.arange(0, BLOCK_SIZE_N)
+    mask = range_n < N
     lock_id = pid % GROUP_SIZE_M
     Lock_ptr = Lock + lock_id
     Count = Lock_ptr + GROUP_SIZE_M
     
-    offset_dwdb = L_XY[lock_id, 0, 0, 0:BLOCK_SIZE_N]
+    offset_dwdb = L_XY[lock_id, 0, 0, range_n]
     DW_ptrs = DW + offset_dwdb
     DB_ptrs = DB + offset_dwdb
     
-    offset_x = L_XY[pid, 0, 0, 0:BLOCK_SIZE_N]
+    offset_x = L_XY[pid, 0, 0, range_n]
     x = tl.load(X + offset_x, mask=mask, other=0).to(tl.float32)
     dy = tl.load(DY + offset_x, mask=mask, other=0).to(tl.float32)
     
-    offset_w = W_BWD_L[0, 0:BLOCK_SIZE_N]
+    offset_w = W_BWD_L[range_n,]
     w = tl.load(W + offset_w, mask=mask).to(tl.float32)
     
-    mean = tl.load(Mean + L_M[pid, 0])
-    rstd = tl.load(Rstd + L_M[pid, 0])
+    mean = tl.load(Mean + L_M[pid,])
+    rstd = tl.load(Rstd + L_M[pid,])
     
     xhat = (x - mean) * rstd
     wdy = w * dy
