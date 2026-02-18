@@ -25,31 +25,31 @@ def _layer_norm_fwd_fused(
     range_n = tl.arange(0, BLOCK_SIZE_N)
     _mean = tl.zeros([BLOCK_SIZE_N], dtype=tl.float32)
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        offset_x = L_XY[pid, k, 0, range_n]
-        cols = L_XY[0, k, 0, range_n]
+        offset_x = L_XY[pid, k, 0, :]
+        cols = L_XY[0, k, 0, :]
         a = tl.load(X + offset_x, mask=cols < N, other=0.).to(tl.float32)
         _mean += a
     mean = tl.sum(_mean) / N
     
     _var = tl.zeros([BLOCK_SIZE_N], dtype=tl.float32)
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        offset_x = L_XY[pid, k, 0, range_n]
-        cols = L_XY[0, k, 0, range_n]
+        offset_x = L_XY[pid, k, 0, :]
+        cols = L_XY[0, k, 0, :]
         x = tl.load(X + offset_x, mask=cols < N, other=0.).to(tl.float32)
         x = tl.where(cols < N, x - mean, 0.)
         _var += x * x
     var = tl.sum(_var) / N
     rstd = 1 / tl.sqrt(var + eps)
     
-    tl.store(Mean + L_M[pid,], mean)
-    tl.store(Rstd + L_M[pid,], rstd)
+    tl.store(Mean + L_M[pid], mean)
+    tl.store(Rstd + L_M[pid], rstd)
     
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        cols = L_XY[0, k, 0, range_n]
+        cols = L_XY[0, k, 0, :]
         mask = cols < N
         w = tl.load(W + cols, mask=mask)
         b = tl.load(B + cols, mask=mask)
-        offset_x = L_XY[pid, k, 0, range_n]
+        offset_x = L_XY[pid, k, 0, :]
         x = tl.load(X + offset_x, mask=mask, other=0.).to(tl.float32)
         x_hat = (x - mean) * rstd
         y = x_hat * w + b
@@ -76,19 +76,19 @@ def _layer_norm_bwd_dx_fused(DX, DY, DW, DB, X, W, Mean, Rstd, Lock, stride, M, 
     W_BWD_L = OrderBy(Row(BLOCK_SIZE_N)).TileBy([BLOCK_SIZE_N])
     
     # Access X for weight/bias gradient accumulation (tile lock_id, column-tile 0). 
-    offset_dwdb = L_XY[lock_id, 0, 0, range_n]
+    offset_dwdb = L_XY[lock_id, 0, 0, :]
     DW_ptrs = DW + offset_dwdb
     DB_ptrs = DB + offset_dwdb
     
-    offset_x = L_XY[pid, 0, 0, range_n]
+    offset_x = L_XY[pid, 0, 0, :]
     x = tl.load(X + offset_x, mask=mask, other=0).to(tl.float32)
     dy = tl.load(DY + offset_x, mask=mask, other=0).to(tl.float32)
     
-    offset_w = W_BWD_L[range_n,]
+    offset_w = W_BWD_L[:]
     w = tl.load(W + offset_w, mask=mask).to(tl.float32)
     
-    mean = tl.load(Mean + L_M[pid,])
-    rstd = tl.load(Rstd + L_M[pid,])
+    mean = tl.load(Mean + L_M[pid])
+    rstd = tl.load(Rstd + L_M[pid])
     
     xhat = (x - mean) * rstd
     wdy = w * dy
