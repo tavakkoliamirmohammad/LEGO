@@ -25,7 +25,7 @@ def vecadd_kernel(x_ptr, y_ptr, z_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     offsets = L[pid, :]
     
     # Masking for elements beyond n_elements
-    mask = (pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)) < n_elements
+    mask = offsets < n_elements
     
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
