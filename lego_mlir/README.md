@@ -2,6 +2,8 @@
 
 The LEGO (Layouts for Efficient GPU Optimization) dialect provides operations to define and apply data layout transformations. It treats layouts as first-class citizens in MLIR, enabling complex index manipulations through a composable and high-level abstraction.
 
+For a detailed deep-dive into the internal architecture, operations, and lowering flow, please refer to the [Architecture Documentation](architecture.md).
+
 ## Overview
 
 The core idea of the LEGO dialect is to separate the *definition* of a layout from its *application*. A layout defines a bidirectional mapping between N-dimensional logical indices and a 1-dimensional physical (flat) index.
@@ -137,5 +139,19 @@ A multi-dimensional index $(i_0, \dots, i_N)$ with dimensions $(D_0, \dots, D_N)
 $$ \text{flat} = \sum_{k=0}^{N} \left( i_k \times \prod_{j=k+1}^{N} D_j \right) $$
 This is a standard row-major packing where the last dimension is contiguous.
 
+
 ### Unflattening
 A flat index is unflattened by computing moduli and divisions in reverse order of the stride products.
+
+## Optimization
+
+To ensure efficient code generation, the LEGO dialect works in tandem with specific optimization passes:
+
+1.  **Arithmetic Simplification (`lego-arith-simplification`)**:
+    -   Implements algebraic identities specific to index arithmetic (e.g., `(q*d+r)/d -> q` when `r<d`).
+    -   Eliminates redundant calculations generated during the lowering process.
+
+2.  **Integer Range Optimizations (`--int-range-optimizations`)**:
+    -   Standard MLIR pass that performs value range analysis.
+    -   Crucial for proving bounds (e.g., `r < d`) that enable the algebraic simplifications to trigger.
+    -   **Recommendation**: Run `lego-arith-simplification` followed by `--int-range-optimizations` and `canonicalize`.
