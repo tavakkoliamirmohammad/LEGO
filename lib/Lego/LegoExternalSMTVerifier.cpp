@@ -3,7 +3,12 @@
 #include "Lego/Passes.h"
 #include "Lego/LegoUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SMT/IR/SMTOps.h"
+#include "mlir/Target/SMTLIB/ExportSMTLIB.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/OwningOpRef.h"
 #include <fstream>
 #include <cstdlib>
 #include <sys/wait.h>
@@ -15,95 +20,85 @@ using namespace mlir::lego;
 namespace {
 
 struct SMTBuilder {
-  std::string smtLib;
-  DenseMap<Value, std::string> valNames;
-  int varCounter = 0;
+  OpBuilder &builder;
+  DenseMap<Value, Value> valMap;
 
-  std::string getOrCreateName(Value v) {
-    if (valNames.count(v)) return valNames[v];
-    std::string name = "v" + std::to_string(varCounter++);
-    valNames[v] = name;
-    return name;
-  }
+  SMTBuilder(OpBuilder &b) : builder(b) {}
 
-  void visit(Value v) {
-    if (valNames.count(v)) return;
+  Value getOrCreate(Value v) {
+    if (valMap.count(v)) return valMap[v];
     
     Operation *defOp = v.getDefiningOp();
     if (!defOp) {
-      std::string name = getOrCreateName(v);
-      smtLib += "(declare-const " + name + " Int)\n";
-      return;
+      // Input argument -> symbolic variable
+      Type smtTy = v.getType().isInteger(1) ? 
+                   Type(builder.getType<smt::BoolType>()) : 
+                   Type(builder.getType<smt::IntType>());
+      Value var = smt::DeclareFunOp::create(builder, v.getLoc(), smtTy, StringAttr{});
+      valMap[v] = var;
+      return var;
     }
 
     for (Value operand : defOp->getOperands()) {
-      visit(operand);
+      getOrCreate(operand);
     }
 
-    std::string name = getOrCreateName(v);
-
+    Location loc = v.getLoc();
     if (auto constOp = dyn_cast<arith::ConstantOp>(defOp)) {
       if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue())) {
-        std::string typeStr = v.getType().isInteger(1) ? "Bool" : "Int";
-        smtLib += "(declare-const " + name + " " + typeStr + ")\n";
-        if (typeStr == "Bool") {
-          smtLib += "(assert (= " + name + " " + (intAttr.getInt() ? "true" : "false") + "))\n";
+        if (v.getType().isInteger(1)) {
+          valMap[v] = smt::BoolConstantOp::create(builder, loc, intAttr.getInt() != 0);
         } else {
-          smtLib += "(assert (= " + name + " " + std::to_string(intAttr.getInt()) + "))\n";
+          valMap[v] = smt::IntConstantOp::create(builder, loc, intAttr);
         }
-      } else {
-        std::string typeStr = v.getType().isInteger(1) ? "Bool" : "Int";
-        smtLib += "(declare-const " + name + " " + typeStr + ")\n";
       }
     } else if (auto addOp = dyn_cast<arith::AddIOp>(defOp)) {
-      smtLib += "(declare-const " + name + " Int)\n";
-      smtLib += "(assert (= " + name + " (+ " + valNames[addOp.getLhs()] + " " + valNames[addOp.getRhs()] + ")))\n";
+      valMap[v] = smt::IntAddOp::create(builder, loc, ValueRange{valMap[addOp.getLhs()], valMap[addOp.getRhs()]});
     } else if (auto subOp = dyn_cast<arith::SubIOp>(defOp)) {
-      smtLib += "(declare-const " + name + " Int)\n";
-      smtLib += "(assert (= " + name + " (- " + valNames[subOp.getLhs()] + " " + valNames[subOp.getRhs()] + ")))\n";
+      valMap[v] = smt::IntSubOp::create(builder, loc, valMap[subOp.getLhs()], valMap[subOp.getRhs()]);
     } else if (auto mulOp = dyn_cast<arith::MulIOp>(defOp)) {
-      smtLib += "(declare-const " + name + " Int)\n";
-      smtLib += "(assert (= " + name + " (* " + valNames[mulOp.getLhs()] + " " + valNames[mulOp.getRhs()] + ")))\n";
+      valMap[v] = smt::IntMulOp::create(builder, loc, ValueRange{valMap[mulOp.getLhs()], valMap[mulOp.getRhs()]});
     } else if (auto divOp = dyn_cast<arith::DivUIOp>(defOp)) {
-      smtLib += "(declare-const " + name + " Int)\n";
-      smtLib += "(assert (= " + name + " (div " + valNames[divOp.getLhs()] + " " + valNames[divOp.getRhs()] + ")))\n";
+      valMap[v] = smt::IntDivOp::create(builder, loc, valMap[divOp.getLhs()], valMap[divOp.getRhs()]);
     } else if (auto divSIOp = dyn_cast<arith::DivSIOp>(defOp)) {
-      smtLib += "(declare-const " + name + " Int)\n";
-      smtLib += "(assert (= " + name + " (div " + valNames[divSIOp.getLhs()] + " " + valNames[divSIOp.getRhs()] + ")))\n";
+      valMap[v] = smt::IntDivOp::create(builder, loc, valMap[divSIOp.getLhs()], valMap[divSIOp.getRhs()]);
     } else if (auto remOp = dyn_cast<arith::RemUIOp>(defOp)) {
-      smtLib += "(declare-const " + name + " Int)\n";
-      smtLib += "(assert (= " + name + " (mod " + valNames[remOp.getLhs()] + " " + valNames[remOp.getRhs()] + ")))\n";
+      valMap[v] = smt::IntModOp::create(builder, loc, valMap[remOp.getLhs()], valMap[remOp.getRhs()]);
     } else if (auto remSIOp = dyn_cast<arith::RemSIOp>(defOp)) {
-      smtLib += "(declare-const " + name + " Int)\n";
-      smtLib += "(assert (= " + name + " (mod " + valNames[remSIOp.getLhs()] + " " + valNames[remSIOp.getRhs()] + ")))\n";
+      valMap[v] = smt::IntModOp::create(builder, loc, valMap[remSIOp.getLhs()], valMap[remSIOp.getRhs()]);
     } else if (auto cmpOp = dyn_cast<arith::CmpIOp>(defOp)) {
-      smtLib += "(declare-const " + name + " Bool)\n";
-      std::string pred = "";
+      auto lhs = valMap[cmpOp.getLhs()];
+      auto rhs = valMap[cmpOp.getRhs()];
       switch (cmpOp.getPredicate()) {
-        case arith::CmpIPredicate::eq: pred = "="; break;
-        case arith::CmpIPredicate::ne: pred = "distinct"; break;
+        case arith::CmpIPredicate::eq: 
+          valMap[v] = smt::EqOp::create(builder, loc, lhs, rhs); break;
+        case arith::CmpIPredicate::ne: 
+          valMap[v] = smt::DistinctOp::create(builder, loc, ValueRange{lhs, rhs}); break;
         case arith::CmpIPredicate::slt:
-        case arith::CmpIPredicate::ult: pred = "<"; break;
+        case arith::CmpIPredicate::ult: 
+          valMap[v] = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::lt, lhs, rhs); break;
         case arith::CmpIPredicate::sle:
-        case arith::CmpIPredicate::ule: pred = "<="; break;
+        case arith::CmpIPredicate::ule: 
+          valMap[v] = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::le, lhs, rhs); break;
         case arith::CmpIPredicate::sgt:
-        case arith::CmpIPredicate::ugt: pred = ">"; break;
+        case arith::CmpIPredicate::ugt: 
+          valMap[v] = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::gt, lhs, rhs); break;
         case arith::CmpIPredicate::sge:
-        case arith::CmpIPredicate::uge: pred = ">="; break;
+        case arith::CmpIPredicate::uge: 
+          valMap[v] = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::ge, lhs, rhs); break;
       }
-      smtLib += "(assert (= " + name + " (" + pred + " " + valNames[cmpOp.getLhs()] + " " + valNames[cmpOp.getRhs()] + ")))\n";
-    } else if (auto castOp = dyn_cast<arith::IndexCastOp>(defOp)) {
-      valNames[v] = valNames[castOp.getIn()];
-    } else if (auto extOp = dyn_cast<arith::ExtUIOp>(defOp)) {
-      valNames[v] = valNames[extOp.getIn()];
-    } else if (auto extSOp = dyn_cast<arith::ExtSIOp>(defOp)) {
-      valNames[v] = valNames[extSOp.getIn()];
-    } else if (auto truncOp = dyn_cast<arith::TruncIOp>(defOp)) {
-      valNames[v] = valNames[truncOp.getIn()];
-    } else {
-      std::string typeStr = v.getType().isInteger(1) ? "Bool" : "Int";
-      smtLib += "(declare-const " + name + " " + typeStr + ")\n";
+    } else if (isa<arith::IndexCastOp, arith::ExtUIOp, arith::ExtSIOp, arith::TruncIOp>(defOp)) {
+      valMap[v] = getOrCreate(defOp->getOperand(0));
     }
+
+    if (!valMap.count(v)) {
+      // Fallback: create a new symbolic variable
+      Type smtTy = v.getType().isInteger(1) ? 
+                   Type(builder.getType<smt::BoolType>()) : 
+                   Type(builder.getType<smt::IntType>());
+      valMap[v] = smt::DeclareFunOp::create(builder, loc, smtTy, StringAttr{});
+    }
+    return valMap[v];
   }
 };
 
@@ -113,7 +108,12 @@ struct LegoExternalSMTVerifierPassImpl
   using mlir::lego::impl::LegoExternalSMTVerifierPassBase<
       LegoExternalSMTVerifierPassImpl>::LegoExternalSMTVerifierPassBase;
 
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<smt::SMTDialect>();
+  }
+
   void runOnOperation() override {
+    getContext().getOrLoadDialect<smt::SMTDialect>();
     ModuleOp module = getOperation();
     SmallVector<AssumeOp> assumes;
     SmallVector<AssertApplyBoundsOp> applies;
@@ -127,103 +127,116 @@ struct LegoExternalSMTVerifierPassImpl
 
     if (applies.empty() && invs.empty()) return;
 
+    MLIRContext *ctx = &getContext();
     for (auto apply : applies) {
-      SMTBuilder builder;
-      builder.smtLib += "; SMT formulation for AssertApplyBoundsOp\n";
-      builder.smtLib += "(set-logic QF_NIA)\n";
+      OwningOpRef<ModuleOp> smtModule = ModuleOp::create(apply.getLoc());
+      OpBuilder b(smtModule->getBodyRegion());
+      auto solver = smt::SolverOp::create(b, apply.getLoc(), TypeRange{}, ValueRange{});
+      if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
+      
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(&solver.getRegion().front());
+      
+      smt::SetLogicOp::create(b, apply.getLoc(), "QF_NIA");
+      SMTBuilder builder(b);
 
       SmallVector<Value> dims = getLayoutInputDims(apply.getLayout());
-      for (Value d : dims) builder.visit(d);
-
-      for (Value idx : apply.getIndices()) builder.visit(idx);
+      for (Value d : dims) builder.getOrCreate(d);
+      for (Value idx : apply.getIndices()) builder.getOrCreate(idx);
 
       for (auto assume : assumes) {
-         builder.visit(assume.getCondition());
-         builder.smtLib += "(assert " + builder.valNames[assume.getCondition()] + ")\n";
+         Value cond = builder.getOrCreate(assume.getCondition());
+         smt::AssertOp::create(b, assume.getLoc(), cond);
       }
 
-      std::string outOfBounds = "(or ";
+      SmallVector<Value> oobExprs;
+      Value zero = smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(0));
       for (size_t i = 0; i < apply.getIndices().size(); ++i) {
-          std::string idxName = builder.valNames[apply.getIndices()[i]];
-          std::string dimName = "1";
-          if (i < dims.size()) {
-             dimName = builder.valNames[dims[i]];
-          }
-          outOfBounds += "(< " + idxName + " 0) ";
-          outOfBounds += "(>= " + idxName + " " + dimName + ") ";
+          Value idx = builder.getOrCreate(apply.getIndices()[i]);
+          Value dim = (i < dims.size()) ? builder.getOrCreate(dims[i]) : 
+                      smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(1));
+          
+          oobExprs.push_back(smt::IntCmpOp::create(b, apply.getLoc(), smt::IntPredicate::lt, idx, zero));
+          oobExprs.push_back(smt::IntCmpOp::create(b, apply.getLoc(), smt::IntPredicate::ge, idx, dim));
       }
-      outOfBounds += "false)"; // Trailing false to handle single-element `or` cleanly if needed
-      builder.smtLib += "(assert " + outOfBounds + ")\n";
-      builder.smtLib += "(check-sat)\n";
+      Value finalOOB = oobExprs.size() == 1 ? oobExprs[0] : smt::OrOp::create(b, apply.getLoc(), oobExprs);
+      smt::AssertOp::create(b, apply.getLoc(), finalOOB);
       
-      char tempPattern[] = "/tmp/lego_smt_XXXXXX";
-      int fd = mkstemp(tempPattern);
-      if (fd == -1) {
-          apply.emitError("Failed to create temporary SMT file");
+      auto checkOp = smt::CheckOp::create(b, apply.getLoc(), TypeRange{});
+      for (Region &r : checkOp->getRegions()) {
+          OpBuilder::InsertionGuard g(b);
+          b.setInsertionPointToStart(&r.emplaceBlock());
+          smt::YieldOp::create(b, apply.getLoc(), ValueRange{});
+      }
+      smt::YieldOp::create(b, apply.getLoc(), ValueRange{});
+
+      
+      std::string smtLib;
+      llvm::raw_string_ostream os(smtLib);
+      if (failed(smt::exportSMTLIB(*smtModule, os))) {
+          apply.emitError("Failed to export SMT-LIB");
           signalPassFailure();
           continue;
       }
-      std::string tempFile(tempPattern);
-      std::ofstream out(tempFile);
-      out << builder.smtLib;
-      out.close();
-      close(fd);
 
-      int ret = system(("PATH=/uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/venv/bin:$PATH python3 /uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/verify_bounds.py " + tempFile).c_str());
-      remove(tempFile.c_str());
-      if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) {
+      if (verifyBounds(apply, smtLib)) {
           apply.emitError("Out-of-bounds access is possible (proven by Z3)");
           signalPassFailure();
       }
     }
 
     for (auto inv : invs) {
-      SMTBuilder builder;
-      builder.smtLib += "; SMT formulation for AssertInvBoundsOp\n";
-      builder.smtLib += "(set-logic QF_NIA)\n";
+      OwningOpRef<ModuleOp> smtModule = ModuleOp::create(inv.getLoc());
+      OpBuilder b(smtModule->getBodyRegion());
+      auto solver = smt::SolverOp::create(b, inv.getLoc(), TypeRange{}, ValueRange{});
+      if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
+      
+      OpBuilder::InsertionGuard guard(b);
+      b.setInsertionPointToStart(&solver.getRegion().front());
+      
+      smt::SetLogicOp::create(b, inv.getLoc(), "QF_NIA");
+      SMTBuilder builder(b);
 
       SmallVector<Value> dims = getLayoutInputDims(inv.getLayout());
-      for (Value d : dims) builder.visit(d);
-      builder.visit(inv.getFlatIndex());
+      for (Value d : dims) builder.getOrCreate(d);
+      builder.getOrCreate(inv.getFlatIndex());
 
       for (auto assume : assumes) {
-         builder.visit(assume.getCondition());
-         builder.smtLib += "(assert " + builder.valNames[assume.getCondition()] + ")\n";
+         Value cond = builder.getOrCreate(assume.getCondition());
+         smt::AssertOp::create(b, assume.getLoc(), cond);
       }
 
-      std::string volName = "vol_0";
-      builder.smtLib += "(declare-const " + volName + " Int)\n";
-      if (dims.empty()) {
-         builder.smtLib += "(assert (= " + volName + " 1))\n";
-      } else {
-         std::string volExpr = builder.valNames[dims[0]];
-         for (size_t i = 1; i < dims.size(); ++i) {
-           volExpr = "(* " + volExpr + " " + builder.valNames[dims[i]] + ")";
-         }
-         builder.smtLib += "(assert (= " + volName + " " + volExpr + "))\n";
+      Value vol = smt::IntConstantOp::create(b, inv.getLoc(), b.getI64IntegerAttr(1));
+      if (!dims.empty()) {
+          SmallVector<Value> dimVals;
+          for (Value d : dims) dimVals.push_back(builder.getOrCreate(d));
+          vol = dimVals.size() == 1 ? dimVals[0] : smt::IntMulOp::create(b, inv.getLoc(), dimVals);
       }
 
-      std::string flatIdx = builder.valNames[inv.getFlatIndex()];
-      std::string outOfBounds = "(or (< " + flatIdx + " 0) (>= " + flatIdx + " " + volName + "))";
-      builder.smtLib += "(assert " + outOfBounds + ")\n";
-      builder.smtLib += "(check-sat)\n";
+      Value flatIdx = builder.getOrCreate(inv.getFlatIndex());
+      Value zero = smt::IntConstantOp::create(b, inv.getLoc(), b.getI64IntegerAttr(0));
+      Value ltZero = smt::IntCmpOp::create(b, inv.getLoc(), smt::IntPredicate::lt, flatIdx, zero);
+      Value geVol = smt::IntCmpOp::create(b, inv.getLoc(), smt::IntPredicate::ge, flatIdx, vol);
+      Value oob = smt::OrOp::create(b, inv.getLoc(), ValueRange{ltZero, geVol});
+      
+      smt::AssertOp::create(b, inv.getLoc(), oob);
+      auto checkOp = smt::CheckOp::create(b, inv.getLoc(), TypeRange{});
+      for (Region &r : checkOp->getRegions()) {
+          OpBuilder::InsertionGuard g(b);
+          b.setInsertionPointToStart(&r.emplaceBlock());
+          smt::YieldOp::create(b, inv.getLoc(), ValueRange{});
+      }
+      smt::YieldOp::create(b, inv.getLoc(), ValueRange{});
 
-      char tempPattern[] = "/tmp/lego_smt_inv_XXXXXX";
-      int fd = mkstemp(tempPattern);
-      if (fd == -1) {
-          inv.emitError("Failed to create temporary SMT file");
+      std::string smtLib;
+      llvm::raw_string_ostream os(smtLib);
+      if (failed(smt::exportSMTLIB(*smtModule, os))) {
+          inv.emitError("Failed to export SMT-LIB");
           signalPassFailure();
           continue;
       }
-      std::string tempFile(tempPattern);
-      std::ofstream out(tempFile);
-      out << builder.smtLib;
-      out.close();
-      close(fd);
 
-      int ret = system(("PATH=/uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/venv/bin:$PATH python3 /uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/verify_bounds.py " + tempFile).c_str());
-      remove(tempFile.c_str());
-      if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) {
+      if (verifyBounds(inv, smtLib)) {
           inv.emitError("Out-of-bounds flat index is possible (proven by Z3)");
           signalPassFailure();
       }
@@ -233,6 +246,23 @@ struct LegoExternalSMTVerifierPassImpl
     for (auto apply : applies) apply.erase();
     for (auto inv : invs) inv.erase();
     for (auto assume : assumes) assume.erase();
+  }
+
+private:
+  bool verifyBounds(Operation *op, const std::string &smtLib) {
+    char tempPattern[] = "/tmp/lego_smt_XXXXXX";
+    int fd = mkstemp(tempPattern);
+    if (fd == -1) return false;
+    
+    std::string tempFile(tempPattern);
+    std::ofstream out(tempFile);
+    out << smtLib;
+    out.close();
+    close(fd);
+
+    int ret = system(("PATH=/uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/venv/bin:$PATH python3 /uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/verify_bounds.py " + tempFile).c_str());
+    remove(tempFile.c_str());
+    return (WIFEXITED(ret) && WEXITSTATUS(ret) == 1);
   }
 };
 

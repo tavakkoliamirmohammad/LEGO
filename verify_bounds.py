@@ -1,34 +1,24 @@
 import sys
 import z3
 
+import sys
+import subprocess
+
 def verify(smt2_file):
     try:
-        # Load the SMT2 file
-        assertions = z3.parse_smt2_file(smt2_file)
+        # Run z3 executable
+        result = subprocess.run(['z3', smt2_file], capture_output=True, text=True)
         
-        # Create a solver
-        solver = z3.Solver()
-        solver.add(assertions)
-        
-        # Check satisfiability
-        result = solver.check()
-        
-        if result == z3.sat:
+        output = result.stdout.strip()
+        if output.startswith('sat'):
             print("SAT: Out-of-bounds access is possible!")
-            model = solver.model()
-            print("Counterexample:")
-            # Sort declarations by name for deterministic output
-            decls = sorted(model.decls(), key=lambda d: d.name())
-            for decl in decls:
-                print(f"  {decl.name()} = {model[decl]}")
+            # Note: We could run z3 again with (get-model) if needed
             sys.exit(1)
-            
-        elif result == z3.unsat:
+        elif output.startswith('unsat'):
             print("UNSAT: Bounds are provably safe.")
             sys.exit(0)
-            
         else:
-            print(f"UNKNOWN: Solver returned {result}")
+            print(f"UNKNOWN/ERROR: Solver returned:\n{output}\nStderr: {result.stderr}")
             sys.exit(2)
             
     except Exception as e:
