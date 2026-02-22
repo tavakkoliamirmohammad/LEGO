@@ -65,3 +65,37 @@ func.func @test_tile_by_chain() -> !lego.layout {
 // CHECK: %[[RPF:.*]] = lego.reg_p perm [0, 1, 2, 3] dims[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}]
 // CHECK: %[[OBF:.*]] = lego.order_by(%[[RPF]])
 // CHECK: lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[R_REGP]], %[[OB1]], %[[C_REGP]], %[[OB2]], %[[OBF]])
+
+// CHECK-LABEL: func.func @test_assume_bounds
+// CHECK-SAME: (%[[VAL:arg[0-9]+]]: index, %[[LB:arg[0-9]+]]: index, %[[UB:arg[0-9]+]]: index)
+func.func @test_assume_bounds(%arg0: index, %arg1: index, %arg2: index) {
+  lego.assume_bounds %arg0 lb: %arg1 ub: %arg2
+  return
+}
+// CHECK: %[[CMP_LB:.*]] = arith.cmpi sge, %[[VAL]], %[[LB]] : index
+// CHECK: lego.assume %[[CMP_LB]]
+// CHECK: %[[CMP_UB:.*]] = arith.cmpi slt, %[[VAL]], %[[UB]] : index
+// CHECK: lego.assume %[[CMP_UB]]
+// CHECK: return
+
+// CHECK-LABEL: func.func @test_assume_bounds_lb_only
+// CHECK-SAME: (%[[VAL:arg[0-9]+]]: index, %[[LB:arg[0-9]+]]: index)
+func.func @test_assume_bounds_lb_only(%arg0: index, %arg1: index) {
+  lego.assume_bounds %arg0 lb: %arg1
+  return
+}
+// CHECK: %[[CMP_LB:.*]] = arith.cmpi sge, %[[VAL]], %[[LB]] : index
+// CHECK: lego.assume %[[CMP_LB]]
+// CHECK-NOT: arith.cmpi slt
+// CHECK: return
+
+// CHECK-LABEL: func.func @test_assume_bounds_ub_only
+// CHECK-SAME: (%[[VAL:arg[0-9]+]]: index, %[[UB:arg[0-9]+]]: index)
+func.func @test_assume_bounds_ub_only(%arg0: index, %arg1: index) {
+  lego.assume_bounds %arg0 ub: %arg1
+  return
+}
+// CHECK: %[[CMP_UB:.*]] = arith.cmpi slt, %[[VAL]], %[[UB]] : index
+// CHECK: lego.assume %[[CMP_UB]]
+// CHECK-NOT: arith.cmpi sge
+// CHECK: return
