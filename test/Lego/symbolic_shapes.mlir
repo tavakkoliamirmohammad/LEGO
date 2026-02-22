@@ -35,13 +35,15 @@ func.func @reg_p_symbolic(%i: index, %j: index, %d0: index, %d1: index) -> index
 
 // CHECK-LABEL: func.func @gen_p_symbolic
 // CHECK-SAME:  (%[[GI:.*]]: index, %[[GJ:.*]]: index, %[[GD0:.*]]: index, %[[GD1:.*]]: index)
-// CHECK:       %[[GRES:.*]] = arith.addi %[[GI]], %[[GJ]] : index
+// CHECK:       %[[GMUL:.*]] = arith.muli %[[GI]], %[[GD1]] : index
+// CHECK:       %[[GRES:.*]] = arith.addi %[[GMUL]], %[[GJ]] : index
 // CHECK:       return %[[GRES]] : index
 func.func @gen_p_symbolic(%i: index, %j: index, %d0: index, %d1: index) -> index {
   %layout = lego.gen_p [%d0, %d1]
     apply (%arg0: index, %arg1: index) {
-      %sum = arith.addi %arg0, %arg1 : index
-      lego.yield %sum : index
+      %mul = arith.muli %arg0, %d1 : index
+      %res = arith.addi %mul, %arg1 : index
+      lego.yield %res : index
     }
     inv (%flat: index) {
       %ii = arith.divui %flat, %d1 : index

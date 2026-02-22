@@ -73,8 +73,9 @@ func.func @test_gen_p_view(%mem: memref<16xf32>, %i: index, %j: index) -> f32 {
   %c4 = arith.constant 4 : index
   %layout = lego.gen_p [%c4, %c4]
     apply (%a: index, %b: index) {
-      %sum = arith.addi %a, %b : index
-      lego.yield %sum : index
+      %mul = arith.muli %a, %c4 : index
+      %res = arith.addi %mul, %b : index
+      lego.yield %res : index
     }
     inv (%flat: index) { 
         %c = arith.constant 0 : index

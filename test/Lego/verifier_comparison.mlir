@@ -4,7 +4,6 @@
 // gen_p: Symbolic vs Concrete
 // ============================================================================
 
-// -----
 func.func @gen_p_concrete_pass(%i: index, %j: index) -> index {
   %c10 = arith.constant 10 : index
   %c0 = arith.constant 0 : index
@@ -13,8 +12,9 @@ func.func @gen_p_concrete_pass(%i: index, %j: index) -> index {
 
   %layout = lego.gen_p [%c10, %c10]
     apply (%arg0: index, %arg1: index) {
-      %sum = arith.addi %arg0, %arg1 : index
-      lego.yield %sum : index
+      %mul = arith.muli %arg0, %c10 : index
+      %res = arith.addi %mul, %arg1 : index
+      lego.yield %res : index
     }
     inv (%flat: index) {
       %ii = arith.divui %flat, %c10 : index
@@ -33,8 +33,9 @@ func.func @gen_p_symbolic_pass(%i: index, %j: index, %N: index, %M: index) -> in
 
   %layout = lego.gen_p [%N, %M]
     apply (%arg0: index, %arg1: index) {
-      %sum = arith.addi %arg0, %arg1 : index
-      lego.yield %sum : index
+      %mul = arith.muli %arg0, %M : index
+      %res = arith.addi %mul, %arg1 : index
+      lego.yield %res : index
     }
     inv (%flat: index) {
       %ii = arith.divui %flat, %M : index
@@ -55,8 +56,9 @@ func.func @gen_p_concrete_fail(%i: index, %j: index) {
 
   %layout = lego.gen_p [%c10, %c10]
     apply (%arg0: index, %arg1: index) {
-      %sum = arith.addi %arg0, %arg1 : index
-      lego.yield %sum : index
+      %mul = arith.muli %arg0, %c10 : index
+      %res = arith.addi %mul, %arg1 : index
+      lego.yield %res : index
     }
     inv (%flat: index) {
       %ii = arith.divui %flat, %c10 : index
@@ -76,8 +78,9 @@ func.func @gen_p_symbolic_fail(%i: index, %j: index, %N: index, %M: index, %K: i
 
   %layout = lego.gen_p [%N, %M]
     apply (%arg0: index, %arg1: index) {
-      %sum = arith.addi %arg0, %arg1 : index
-      lego.yield %sum : index
+      %mul = arith.muli %arg0, %M : index
+      %res = arith.addi %mul, %arg1 : index
+      lego.yield %res : index
     }
     inv (%flat: index) {
       %ii = arith.divui %flat, %M : index
