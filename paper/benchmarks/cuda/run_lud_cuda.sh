@@ -1,4 +1,4 @@
-export PYTHONPATH=../..:$PYTHONPATH
+export PYTHONPATH=../../../python:$PYTHONPATH
 cd "$(dirname "$0")"
 
 cd lud

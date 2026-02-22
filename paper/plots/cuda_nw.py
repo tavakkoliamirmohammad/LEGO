@@ -3,7 +3,7 @@ import re
 import numpy as np
 import matplotlib.pyplot as plt
 
-with open("../result/cuda/nw.txt", "r") as file:
+with open("../results/cuda/nw.txt", "r") as file:
     data = file.read()
 
 pattern = r"Running tests with SIZE = (\d+).*?original.*?Execution time:\s*([\d.]+).*?antidiag.*?Execution time:\s*([\d.]+)"

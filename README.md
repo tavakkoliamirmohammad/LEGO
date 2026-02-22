@@ -105,7 +105,7 @@ From the root of the artifact repository, the experiments can be reproduced with
 1. **Generate all kernel source code**
 
    ```bash
-   ./benchmarks/gen_all_kernel.sh
+   ./paper/benchmarks/gen_all_kernel.sh
    ```
 
    This script generates all required kernel source files (Triton, CUDA, and MLIR) used in the evaluation.
@@ -113,7 +113,7 @@ From the root of the artifact repository, the experiments can be reproduced with
 2. **Run all benchmarks and produce figures and tables**
 
    ```bash
-   ./benchmarks/run_all_kernels.sh
+   ./paper/benchmarks/run_all_kernels.sh
    ```
 
    This script runs all benchmarks and generates the figures and tables reported in the paper.

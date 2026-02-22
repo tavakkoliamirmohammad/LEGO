@@ -1,4 +1,4 @@
-export PYTHONPATH=..:$PYTHONPATH
+export PYTHONPATH=../../python:$PYTHONPATH
 cd "$(dirname "$0")"
 echo "Generating all kernel configurations..."
 echo "Generating all Triton kernels..."

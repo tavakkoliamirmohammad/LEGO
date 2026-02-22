@@ -1,4 +1,4 @@
-export PYTHONPATH=..:$PYTHONPATH
+export PYTHONPATH=../../python:$PYTHONPATH
 cd "$(dirname "$0")"
 echo "Run MLIR Benchmarks"
 bash mlir/run_mlir_benchmark.sh
@@ -13,5 +13,5 @@ bash cuda/gen_roofline_cuda.sh
 echo "Roofline data generation completed."
 
 echo "Extracting Figures"
-bash ../extract_figure.sh
+bash ../scripts/extract_figure.sh
 echo "Figures extracted."

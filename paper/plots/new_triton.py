@@ -10,7 +10,7 @@ import numpy as np
 
 
 def read_text() -> str:
-    prefix = "../result/triton/"
+    prefix = "../results/triton/"
     path = ["group_gemm.txt", "softmax.txt",
             "layernorm.txt", "softmax.txt", "matmul.txt"]
     res = ""

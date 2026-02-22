@@ -5,7 +5,7 @@ import pandas as pd
 from pathlib import Path
 
 # --- Load log ---
-log_path = Path("../result/cuda/lud.txt")
+log_path = Path("../results/cuda/lud.txt")
 with log_path.open("r") as f:
     raw_log = f.read()
 

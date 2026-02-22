@@ -102,8 +102,8 @@ def main():
                     help="Output figure path.")
     args = ap.parse_args()
 
-    cube_path = Path("../result/cuda/bricks-f3d.txt")
-    lap_path  = Path("../result/cuda/bricks-laplace.txt")
+    cube_path = Path("../results/cuda/bricks-f3d.txt")
+    lap_path  = Path("../results/cuda/bricks-laplace.txt")
     if not cube_path.exists():
         sys.exit(f"Cube log not found: {cube_path}")
     if not lap_path.exists():

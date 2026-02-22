@@ -2,7 +2,7 @@
 import re
 from collections import defaultdict
 
-with open("../result/mlir/transpose.txt", "r", encoding="utf-8") as file:
+with open("../results/mlir/transpose.txt", "r", encoding="utf-8") as file:
     data = file.read()
 
 pattern = r'(.*?)\s*:\s*(\d+):\s*\nAverage:\s*([\d.]+)\s*ms'
