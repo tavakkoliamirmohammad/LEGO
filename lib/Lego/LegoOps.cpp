@@ -312,6 +312,25 @@ struct SimplifyInverseApply : public OpRewritePattern<ApplyInverseOp> {
 };
 } // namespace
 
+// ============================================================================
+// ApplyOp / ApplyInverseOp
+// ============================================================================
+
+LogicalResult ApplyOp::verify() {
+  auto layout = getLayout();
+  auto indices = getIndices();
+  auto expectedDims = getLayoutInputDims(layout);
+  if (expectedDims.empty())
+    return success();
+
+  if (indices.size() != expectedDims.size()) {
+    return emitOpError("number of indices (")
+           << indices.size() << ") does not match layout rank ("
+           << expectedDims.size() << ")";
+  }
+  return success();
+}
+
 void ApplyOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                           MLIRContext *context) {
   results.add<SimplifyApplyInverse>(context);

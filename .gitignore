@@ -8,3 +8,4 @@ test.*
 *.csv
 build
 third_party/**
+.agents

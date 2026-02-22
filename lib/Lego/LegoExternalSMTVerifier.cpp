@@ -7,6 +7,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <sys/wait.h>
+#include <unistd.h>
 
 using namespace mlir;
 using namespace mlir::lego;
@@ -155,12 +156,21 @@ struct LegoExternalSMTVerifierPassImpl
       builder.smtLib += "(assert " + outOfBounds + ")\n";
       builder.smtLib += "(check-sat)\n";
       
-      std::string tempFile = "/tmp/lego_smt_" + std::to_string(rand()) + ".smt2";
+      char tempPattern[] = "/tmp/lego_smt_XXXXXX";
+      int fd = mkstemp(tempPattern);
+      if (fd == -1) {
+          apply.emitError("Failed to create temporary SMT file");
+          signalPassFailure();
+          continue;
+      }
+      std::string tempFile(tempPattern);
       std::ofstream out(tempFile);
       out << builder.smtLib;
       out.close();
+      close(fd);
 
-      int ret = system(("python3 /uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/verify_bounds.py " + tempFile).c_str());
+      int ret = system(("PATH=/uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/venv/bin:$PATH python3 /uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/verify_bounds.py " + tempFile).c_str());
+      remove(tempFile.c_str());
       if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) {
           apply.emitError("Out-of-bounds access is possible (proven by Z3)");
           signalPassFailure();
@@ -198,12 +208,21 @@ struct LegoExternalSMTVerifierPassImpl
       builder.smtLib += "(assert " + outOfBounds + ")\n";
       builder.smtLib += "(check-sat)\n";
 
-      std::string tempFile = "/tmp/lego_smt_" + std::to_string(rand()) + ".smt2";
+      char tempPattern[] = "/tmp/lego_smt_inv_XXXXXX";
+      int fd = mkstemp(tempPattern);
+      if (fd == -1) {
+          inv.emitError("Failed to create temporary SMT file");
+          signalPassFailure();
+          continue;
+      }
+      std::string tempFile(tempPattern);
       std::ofstream out(tempFile);
       out << builder.smtLib;
       out.close();
+      close(fd);
 
-      int ret = system(("python3 /uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/verify_bounds.py " + tempFile).c_str());
+      int ret = system(("PATH=/uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/venv/bin:$PATH python3 /uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/verify_bounds.py " + tempFile).c_str());
+      remove(tempFile.c_str());
       if (WIFEXITED(ret) && WEXITSTATUS(ret) == 1) {
           inv.emitError("Out-of-bounds flat index is possible (proven by Z3)");
           signalPassFailure();

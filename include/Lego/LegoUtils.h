@@ -108,7 +108,7 @@ inline SmallVector<Value> getLayoutInputDims(Value layout) {
   }
 
   if (auto tileByOp = dyn_cast<TileByOp>(defOp)) {
-    return getLayoutInputDims(tileByOp.getInput());
+    return llvm::to_vector(tileByOp.getTileDims());
   }
 
   return {};

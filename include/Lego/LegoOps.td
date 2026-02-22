@@ -169,6 +169,7 @@ def ApplyOp : Lego_Op<"apply", [Pure]> {
   let results = (outs Index:$flat_index);
   let assemblyFormat = "$layout `(` $indices `)` attr-dict `:` type($layout)";
   let hasCanonicalizer = 1;
+  let hasVerifier = 1;
 }
 
 def ApplyInverseOp : Lego_Op<"apply_inverse", [Pure]> {
