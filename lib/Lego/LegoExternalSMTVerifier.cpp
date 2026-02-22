@@ -228,6 +228,11 @@ struct LegoExternalSMTVerifierPassImpl
           signalPassFailure();
       }
     }
+
+    // Erase markers after verification
+    for (auto apply : applies) apply.erase();
+    for (auto inv : invs) inv.erase();
+    for (auto assume : assumes) assume.erase();
   }
 };
 

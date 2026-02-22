@@ -47,7 +47,7 @@ func.func @gen_p_symbolic_pass(%i: index, %j: index, %N: index, %M: index) -> in
 }
 
 // -----
-func.func @gen_p_concrete_fail(%i: index, %j: index) {
+func.func @gen_p_concrete_fail(%i: index, %j: index) -> index {
   %c10 = arith.constant 10 : index
   %c100 = arith.constant 100 : index
   %c0 = arith.constant 0 : index
@@ -67,11 +67,11 @@ func.func @gen_p_concrete_fail(%i: index, %j: index) {
     } : !lego.layout
   // expected-error@+1 {{Out-of-bounds access is possible (proven by Z3)}}
   %f = lego.apply %layout(%i, %j) : !lego.layout
-  return
+  return %f : index
 }
 
 // -----
-func.func @gen_p_symbolic_fail(%i: index, %j: index, %N: index, %M: index, %K: index) {
+func.func @gen_p_symbolic_fail(%i: index, %j: index, %N: index, %M: index, %K: index) -> index {
   %c0 = arith.constant 0 : index
   lego.assume_bounds %i lb : %c0 ub : %K // K could be > N
   lego.assume_bounds %j lb : %c0 ub : %M
@@ -89,7 +89,7 @@ func.func @gen_p_symbolic_fail(%i: index, %j: index, %N: index, %M: index, %K: i
     } : !lego.layout
   // expected-error@+1 {{Out-of-bounds access is possible (proven by Z3)}}
   %f = lego.apply %layout(%i, %j) : !lego.layout
-  return
+  return %f : index
 }
 
 // ============================================================================
@@ -139,7 +139,7 @@ func.func @tile_by_symbolic_bounded_pass(%i: index, %j: index, %N: index, %M: in
 }
 
 // -----
-func.func @tile_by_symbolic_bounded_fail(%i: index, %j: index, %N: index, %M: index, %K: index) {
+func.func @tile_by_symbolic_bounded_fail(%i: index, %j: index, %N: index, %M: index, %K: index) -> index {
   %c0 = arith.constant 0 : index
   // i is bounded by K, which is unknown relative to N
   lego.assume_bounds %i lb : %c0 ub : %K
@@ -150,7 +150,7 @@ func.func @tile_by_symbolic_bounded_fail(%i: index, %j: index, %N: index, %M: in
   %tb = lego.tile_by %ob tile_dims [[%N, %M]] : !lego.layout
   // expected-error@+1 {{Out-of-bounds access is possible (proven by Z3)}}
   %f = lego.apply %tb(%i, %j) : !lego.layout
-  return
+  return %f : index
 }
 
 // ============================================================================
@@ -178,7 +178,7 @@ func.func @tile_by_4d_pass(%i0: index, %i1: index, %i2: index, %i3: index) -> in
 }
 
 // -----
-func.func @tile_by_4d_fail(%i0: index, %i1: index, %i2: index, %i3: index) {
+func.func @tile_by_4d_fail(%i0: index, %i1: index, %i2: index, %i3: index) -> index {
   %c10 = arith.constant 10 : index
   %c2 = arith.constant 2 : index
   %c5 = arith.constant 5 : index
@@ -195,5 +195,5 @@ func.func @tile_by_4d_fail(%i0: index, %i1: index, %i2: index, %i3: index) {
   %tb = lego.tile_by %ob tile_dims [[%c2, %c2], [%c5, %c5]] : !lego.layout
   // expected-error@+1 {{Out-of-bounds access is possible (proven by Z3)}}
   %f = lego.apply %tb(%i0, %i1, %i2, %i3) : !lego.layout
-  return
+  return %f : index
 }
