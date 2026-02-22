@@ -16,7 +16,5 @@ add_mlir_dialect_library(MLIRLego
 
   LINK_LIBS PUBLIC
   MLIRIR
-  MLIRTransformDialect
-  MLIRTransformDialectInterfaces
   MLIRSideEffectInterfaces
 )
