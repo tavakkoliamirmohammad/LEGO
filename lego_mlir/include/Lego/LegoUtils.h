@@ -75,56 +75,27 @@ inline SmallVector<int64_t> getSigmaPerm(int d, int q) {
   return perm;
 }
 
-struct TileDimsInfo {
-  SmallVector<int64_t> flatDims;
-  int64_t d = 0;
-  int64_t q = 0;
-  bool valid = false;
-};
+// extractNestedTileDims is deprecated and removed. TileByOp now uses $tile_shape and flat $tile_dims.
 
-inline TileDimsInfo extractNestedTileDims(ArrayAttr tileDimsAttr) {
-  TileDimsInfo info;
-  if (!tileDimsAttr) return info;
-  info.q = tileDimsAttr.size();
-  if (info.q == 0) return info; // Empty outer list
-
-  for (Attribute innerAttr : tileDimsAttr) {
-    auto innerArray = dyn_cast<ArrayAttr>(innerAttr);
-    if (!innerArray) return {}; // Invalid structure: expected nested list
-
-    if (info.d == 0) {
-      info.d = innerArray.size();
-      if (info.d == 0) return {}; // Empty inner list not allowed
-    } else if ((int64_t)innerArray.size() != info.d) {
-      return {}; // Dimensional mismatch: all groups must have size d
-    }
-
-    auto dims = extractI64Array(innerArray);
-    info.flatDims.append(dims.begin(), dims.end());
-  }
-  info.valid = true;
-  return info;
-}
-
-inline SmallVector<int64_t> getLayoutInputDims(Value layout) {
+inline SmallVector<Value> getLayoutInputDims(Value layout) {
   Operation *defOp = layout.getDefiningOp();
   if (!defOp) return {};
 
   if (auto rowOp = dyn_cast<RowOp>(defOp))
-    return extractI64Array(rowOp.getDims());
+    return llvm::to_vector(rowOp.getDims());
 
   if (auto colOp = dyn_cast<ColOp>(defOp))
-    return extractI64Array(colOp.getDims());
+    return llvm::to_vector(colOp.getDims());
 
   if (auto regPOp = dyn_cast<RegPOp>(defOp))
-    return extractI64Array(regPOp.getDims());
+    return llvm::to_vector(regPOp.getDims());
 
   if (auto genPOp = dyn_cast<GenPOp>(defOp))
-    return extractI64Array(genPOp.getDims());
+    return llvm::to_vector(genPOp.getDims());
 
   if (auto orderByOp = dyn_cast<OrderByOp>(defOp)) {
     // Concatanation of dims of the perms
-    SmallVector<int64_t> dims;
+    SmallVector<Value> dims;
     for (Value v : orderByOp.getPerms()) {
       auto subDims = getLayoutInputDims(v);
       dims.append(subDims.begin(), subDims.end());
@@ -133,7 +104,7 @@ inline SmallVector<int64_t> getLayoutInputDims(Value layout) {
   }
 
   if (auto groupByOp = dyn_cast<GroupByOp>(defOp)) {
-    return extractI64Array(groupByOp.getGroupDims());
+    return llvm::to_vector(groupByOp.getGroupDims());
   }
 
   if (auto tileByOp = dyn_cast<TileByOp>(defOp)) {

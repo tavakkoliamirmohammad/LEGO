@@ -2,7 +2,8 @@
 
 // CHECK: warning: inv region yields constant zero, but apply region is non-constant or non-zero. Potential inconsistency.
 func.func @inconsistent_genp(%i: index, %j: index) -> index {
-  %layout = lego.gen_p [4, 4] apply (%a: index, %b: index) {
+  %c4 = arith.constant 4 : index
+  %layout = lego.gen_p [%c4, %c4] apply (%a: index, %b: index) {
     %sum = arith.addi %a, %b : index
     lego.yield %sum : index
   } inv (%flat: index) {
@@ -15,7 +16,9 @@ func.func @inconsistent_genp(%i: index, %j: index) -> index {
 
 // CHECK-NOT: warning
 func.func @consistent_genp(%i: index, %j: index) -> (index, index) {
-  %layout = lego.gen_p [4, 8] apply (%a: index, %b: index) {
+  %cc4 = arith.constant 4 : index
+  %cc8 = arith.constant 8 : index
+  %layout = lego.gen_p [%cc4, %cc8] apply (%a: index, %b: index) {
     %c8 = arith.constant 8 : index
     %t = arith.muli %a, %c8 : index
     %f = arith.addi %t, %b : index
