@@ -95,3 +95,13 @@ func.func @test_cast_view_mismatch(%mem: memref<50xf32>) {
   %view = lego.cast_view %mem, %row : memref<50xf32>, !lego.layout -> !lego.view<f32>
   return
 }
+
+// -----
+
+func.func @apply_rank_mismatch(%i: index) {
+  %c10 = arith.constant 10 : index
+  %r = lego.row [%c10, %c10] : !lego.layout
+  // expected-error@+1 {{'lego.apply' op number of indices (1) does not match layout rank (2)}}
+  %f = lego.apply %r(%i) : !lego.layout
+  return
+}

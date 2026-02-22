@@ -169,6 +169,7 @@ def ApplyOp : Lego_Op<"apply", [Pure]> {
   let results = (outs Index:$flat_index);
   let assemblyFormat = "$layout `(` $indices `)` attr-dict `:` type($layout)";
   let hasCanonicalizer = 1;
+  let hasVerifier = 1;
 }
 
 def ApplyInverseOp : Lego_Op<"apply_inverse", [Pure]> {
@@ -225,6 +226,43 @@ def StoreOp : Lego_Op<"store", [
   }];
   let arguments = (ins AnyType:$value, Lego_ViewType:$view, Variadic<Index>:$indices);
   let assemblyFormat = "$value `,` $view `[` $indices `]` attr-dict `:` type($value) `,` type($view) `,` type($indices)";
+}
+
+//===----------------------------------------------------------------------===//
+// Bounds Verification Operations
+//===----------------------------------------------------------------------===//
+
+def AssumeOp : Lego_Op<"assume"> {
+  let summary = "Provide hints to the bounds verifier";
+  let description = [{
+    `lego.assume` asserts that a given boolean condition always holds true at runtime.
+    The verifier will use this as an axiom.
+  }];
+  let arguments = (ins I1:$condition);
+  let assemblyFormat = "$condition attr-dict";
+}
+
+def AssumeBoundsOp : Lego_Op<"assume_bounds", [AttrSizedOperandSegments]> {
+  let summary = "Sugar op to assume bounds of an index";
+  let description = [{
+    A sugar operation that asserts the value is bounded by optional lower and/or upper bounds.
+    Lower bounded (inclusive) and upper bounded (exclusive).
+    Lowered to `lego.assume` and `arith.cmpi` during desugaring.
+  }];
+  let arguments = (ins Index:$value, Optional<Index>:$lb, Optional<Index>:$ub);
+  let assemblyFormat = "$value (`lb` `:` $lb^)? (`ub` `:` $ub^)? attr-dict";
+}
+
+def AssertApplyBoundsOp : Lego_Op<"assert_apply_bounds"> {
+  let summary = "Asserts that the input indices to a layout apply are within bounds";
+  let arguments = (ins Lego_LayoutType:$layout, Variadic<Index>:$indices);
+  let assemblyFormat = "$layout `(` $indices `)` attr-dict `:` type($layout)";
+}
+
+def AssertInvBoundsOp : Lego_Op<"assert_inv_bounds"> {
+  let summary = "Asserts that the input flat index to a layout apply_inverse is within bounds";
+  let arguments = (ins Lego_LayoutType:$layout, Index:$flat_index);
+  let assemblyFormat = "$layout `(` $flat_index `)` attr-dict `:` type($layout)";
 }
 
 #endif // LEGO_OPS

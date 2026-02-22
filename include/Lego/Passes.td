@@ -53,4 +53,20 @@ def LegoArithSimplificationPass : Pass<"lego-arith-simplification", "mlir::Modul
   let dependentDialects = ["mlir::arith::ArithDialect"];
 }
 
+def LegoGenerateBoundsChecksPass : Pass<"lego-generate-bounds-checks", "mlir::ModuleOp"> {
+  let summary = "Insert bounds check assertions for lego.apply and lego.apply_inverse ops";
+  let description = [{
+    Finds `lego.apply` and `lego.apply_inverse` ops and inserts `lego.assert_apply_bounds`
+    and `lego.assert_inv_bounds` before them for verification.
+  }];
+  let constructor = "mlir::lego::createLegoGenerateBoundsChecksPass()";
+  let dependentDialects = ["mlir::lego::LegoDialect"];
+}
+
+def LegoExternalSMTVerifierPass : Pass<"lego-external-smt-verifier", "mlir::ModuleOp"> {
+  let summary = "Verify layout bounds using an external SMT solver (Z3)";
+  let description = "Extracts arithmetic slices for lego.assert_* ops and runs external z3.";
+  let constructor = "mlir::lego::createLegoExternalSMTVerifierPass()";
+}
+
 #endif // LEGO_PASSES_TD

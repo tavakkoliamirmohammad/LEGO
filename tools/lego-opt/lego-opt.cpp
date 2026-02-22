@@ -19,6 +19,7 @@
 
 #include "Lego/LegoDialect.h"
 #include "Lego/LegoOps.h"
+#include "mlir/Dialect/SMT/IR/SMTDialect.h"
 
 // Needed for registerArithPasses
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
@@ -36,6 +37,8 @@ int main(int argc, char **argv) {
   mlir::lego::registerLegoDesugarPass();
   mlir::lego::registerLegoVerifyConsistencyPass();
   mlir::lego::registerLegoArithSimplificationPass();
+  mlir::lego::registerLegoGenerateBoundsChecksPass();
+  mlir::lego::registerLegoExternalSMTVerifierPass();
   mlir::lego::registerLegoPipelines();
 
   mlir::DialectRegistry registry;
@@ -43,7 +46,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::func::FuncDialect, mlir::arith::ArithDialect,
                   mlir::scf::SCFDialect, mlir::memref::MemRefDialect,
                   mlir::math::MathDialect>();
-  registry.insert<mlir::lego::LegoDialect>();
+  registry.insert<mlir::lego::LegoDialect, mlir::smt::SMTDialect>();
   
   // Register the transform dialect extension if needed, 
   // currently we just register the dialect which includes the ops.

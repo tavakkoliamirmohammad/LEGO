@@ -160,6 +160,33 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
 };
 
 // ============================================================================
+// AssumeBoundsOp Rewrite Pattern
+// ============================================================================
+
+struct AssumeBoundsOpRewrite : public OpRewritePattern<AssumeBoundsOp> {
+  using OpRewritePattern<AssumeBoundsOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(AssumeBoundsOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value val = op.getValue();
+
+    if (Value lb = op.getLb()) {
+      auto cmp = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge, val, lb);
+      AssumeOp::create(rewriter, loc, cmp.getResult());
+    }
+
+    if (Value ub = op.getUb()) {
+      auto cmp = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt, val, ub);
+      AssumeOp::create(rewriter, loc, cmp.getResult());
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// ============================================================================
 // Pass Definition
 // ============================================================================
 
@@ -173,7 +200,8 @@ struct LegoDesugarPassImpl
     MLIRContext *context = &getContext();
 
     RewritePatternSet patterns(context);
-    patterns.add<TileByOpRewrite, RowOpRewrite, ColOpRewrite>(context);
+    patterns.add<TileByOpRewrite, RowOpRewrite, ColOpRewrite,
+                 AssumeBoundsOpRewrite>(context);
 
     if (failed(applyPatternsGreedily(module, std::move(patterns)))) {
       signalPassFailure();
