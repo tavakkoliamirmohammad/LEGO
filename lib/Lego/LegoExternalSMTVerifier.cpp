@@ -3,16 +3,21 @@
 #include "Lego/Passes.h"
 #include "Lego/LegoUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SMT/IR/SMTOps.h"
 #include "mlir/Target/SMTLIB/ExportSMTLIB.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
+#include "mlir/IR/AsmState.h"
 #include <fstream>
 #include <cstdlib>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <cstdio>
+#include <memory>
+#include <array>
 
 using namespace mlir;
 using namespace mlir::lego;
@@ -22,8 +27,34 @@ namespace {
 struct SMTBuilder {
   OpBuilder &builder;
   DenseMap<Value, Value> valMap;
+  AsmState &state;
+  unsigned nextId = 0;
 
-  SMTBuilder(OpBuilder &b) : builder(b) {}
+  SMTBuilder(OpBuilder &b, AsmState &s) 
+    : builder(b), state(s) {}
+
+  std::string getSSAName(Value v) {
+    std::string s;
+    llvm::raw_string_ostream os(s);
+    v.printAsOperand(os, state);
+    
+    // Sanitize the name for SMT-LIB
+    std::string sanitized;
+    for (char c : s) {
+      if (isalnum(c)) {
+        sanitized += c;
+      } else if (c == '%') {
+        // Skip prefix
+      } else {
+        sanitized += '_';
+      }
+    }
+    
+    if (sanitized.empty() || sanitized.find("UNKNOWN") != std::string::npos) {
+      return "v" + std::to_string(nextId++);
+    }
+    return sanitized;
+  }
 
   Value getOrCreate(Value v) {
     if (valMap.count(v)) return valMap[v];
@@ -34,7 +65,7 @@ struct SMTBuilder {
       Type smtTy = v.getType().isInteger(1) ? 
                    Type(builder.getType<smt::BoolType>()) : 
                    Type(builder.getType<smt::IntType>());
-      Value var = smt::DeclareFunOp::create(builder, v.getLoc(), smtTy, StringAttr{});
+      Value var = smt::DeclareFunOp::create(builder, v.getLoc(), smtTy, builder.getStringAttr(getSSAName(v)));
       valMap[v] = var;
       return var;
     }
@@ -96,7 +127,7 @@ struct SMTBuilder {
       Type smtTy = v.getType().isInteger(1) ? 
                    Type(builder.getType<smt::BoolType>()) : 
                    Type(builder.getType<smt::IntType>());
-      valMap[v] = smt::DeclareFunOp::create(builder, loc, smtTy, StringAttr{});
+      valMap[v] = smt::DeclareFunOp::create(builder, loc, smtTy, builder.getStringAttr(getSSAName(v)));
     }
     return valMap[v];
   }
@@ -127,6 +158,8 @@ struct LegoExternalSMTVerifierPassImpl
 
     if (applies.empty() && invs.empty()) return;
 
+    AsmState state(module);
+    
     MLIRContext *ctx = &getContext();
     for (auto apply : applies) {
       OwningOpRef<ModuleOp> smtModule = ModuleOp::create(apply.getLoc());
@@ -138,7 +171,7 @@ struct LegoExternalSMTVerifierPassImpl
       b.setInsertionPointToStart(&solver.getRegion().front());
       
       smt::SetLogicOp::create(b, apply.getLoc(), "QF_NIA");
-      SMTBuilder builder(b);
+      SMTBuilder builder(b, state);
 
       SmallVector<Value> dims = getLayoutInputDims(apply.getLayout());
       for (Value d : dims) builder.getOrCreate(d);
@@ -179,6 +212,7 @@ struct LegoExternalSMTVerifierPassImpl
           continue;
       }
 
+
       if (verifyBounds(apply, smtLib)) {
           apply.emitError("Out-of-bounds access is possible (proven by Z3)");
           signalPassFailure();
@@ -195,7 +229,7 @@ struct LegoExternalSMTVerifierPassImpl
       b.setInsertionPointToStart(&solver.getRegion().front());
       
       smt::SetLogicOp::create(b, inv.getLoc(), "QF_NIA");
-      SMTBuilder builder(b);
+      SMTBuilder builder(b, state);
 
       SmallVector<Value> dims = getLayoutInputDims(inv.getLayout());
       for (Value d : dims) builder.getOrCreate(d);
@@ -236,6 +270,7 @@ struct LegoExternalSMTVerifierPassImpl
           continue;
       }
 
+
       if (verifyBounds(inv, smtLib)) {
           inv.emitError("Out-of-bounds flat index is possible (proven by Z3)");
           signalPassFailure();
@@ -250,19 +285,61 @@ struct LegoExternalSMTVerifierPassImpl
 
 private:
   bool verifyBounds(Operation *op, const std::string &smtLib) {
-    char tempPattern[] = "/tmp/lego_smt_XXXXXX";
-    int fd = mkstemp(tempPattern);
-    if (fd == -1) return false;
-    
-    std::string tempFile(tempPattern);
-    std::ofstream out(tempFile);
-    out << smtLib;
-    out.close();
-    close(fd);
+    int out_pipe[2]; // Parent write, child read
+    int in_pipe[2];  // Child write, parent read
+    if (pipe(out_pipe) == -1 || pipe(in_pipe) == -1) return false;
 
-    int ret = system(("PATH=/uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/venv/bin:$PATH python3 /uufs/chpc.utah.edu/common/home/u1419116/projects/LEGO_transform/verify_bounds.py " + tempFile).c_str());
-    remove(tempFile.c_str());
-    return (WIFEXITED(ret) && WEXITSTATUS(ret) == 1);
+    pid_t pid = fork();
+    if (pid == -1) return false;
+
+    if (pid == 0) {
+        // Child process
+        dup2(out_pipe[0], STDIN_FILENO);
+        dup2(in_pipe[1], STDOUT_FILENO);
+        dup2(in_pipe[1], STDERR_FILENO); // Capture errors too
+
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+
+        execlp("z3", "z3", "-in", nullptr);
+        _exit(1);
+    }
+
+    // Parent process
+    close(out_pipe[0]);
+    close(in_pipe[1]);
+
+    // Send SMT-LIB to Z3. 
+    // The SMT-LIB export usually ends with (check-sat)\n(reset).
+    // We want to insert (get-model) between them.
+    std::string modifiedLib = smtLib;
+    size_t pos = modifiedLib.find("(check-sat)");
+    if (pos != std::string::npos) {
+        modifiedLib.insert(pos + 11, "\n(get-model)");
+    }
+    
+    write(out_pipe[1], modifiedLib.c_str(), modifiedLib.size());
+    close(out_pipe[1]); // EOF to Z3
+
+    // Read response
+    std::string result;
+    char buffer[4096];
+    ssize_t n;
+    while ((n = read(in_pipe[0], buffer, sizeof(buffer))) > 0) {
+        result.append(buffer, n);
+    }
+    close(in_pipe[0]);
+    waitpid(pid, nullptr, 0);
+
+    // Z3 output handling:
+    // If we see "sat", the subsequent output is the model.
+    if (result.find("sat") != std::string::npos && result.find("unsat") == std::string::npos) {
+        llvm::errs() << "--- Z3 Counter-example ---\n" << result << "\n--------------------------\n";
+        return true;
+    }
+    return false;
   }
 };
 
