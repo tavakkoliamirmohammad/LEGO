@@ -24,8 +24,8 @@ struct LegoVerifyConsistencyPassImpl
     module.walk([&](GenPOp op) {
       if (op.getInvBody().empty()) return;
 
-      auto dims = extractI64Array(op.getDims());
-      int rank = dims.size();
+      auto dimsVals = op.getDims();
+      int rank = dimsVals.size();
       
       Block &applyBlock = op.getBody().front();
       Block &invBlock = op.getInvBody().front();

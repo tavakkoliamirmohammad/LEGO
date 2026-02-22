@@ -39,9 +39,72 @@ static ParseResult parseGenPRegion(OpAsmParser &parser, Region &region) {
   return parser.parseRegion(region, args, /*enableNameShadowing=*/false);
 }
 
+#include "Lego/LegoUtils.h"
+#include <numeric>
+
+static ParseResult parseNestedTileDims(OpAsmParser &parser,
+                                       SmallVectorImpl<OpAsmParser::UnresolvedOperand> &tile_dims,
+                                       ArrayAttr &tile_shape) {
+  if (parser.parseLSquare()) return failure();
+  
+  SmallVector<int64_t> shape;
+  int expectedD = -1;
+  
+  auto parseList = [&]() -> ParseResult {
+      if (parser.parseLSquare()) return failure();
+      int count = 0;
+      if (succeeded(parser.parseOptionalRSquare())) {
+          // empty
+      } else {
+          do {
+              OpAsmParser::UnresolvedOperand operand;
+              if (parser.parseOperand(operand)) return failure();
+              tile_dims.push_back(operand);
+              count++;
+          } while (succeeded(parser.parseOptionalComma()));
+          if (parser.parseRSquare()) return failure();
+      }
+      if (expectedD == -1) expectedD = count;
+      else if (expectedD != count) return parser.emitError(parser.getCurrentLocation(), "all tile groups must have the same size");
+      shape.push_back(count);
+      return success();
+  };
+
+  if (succeeded(parser.parseOptionalRSquare())) {
+      // empty outer list
+  } else {
+      do {
+          if (parseList()) return failure();
+      } while (succeeded(parser.parseOptionalComma()));
+      if (parser.parseRSquare()) return failure();
+  }
+  
+  tile_shape = parser.getBuilder().getI64ArrayAttr(shape);
+  return success();
+}
+
+static void printNestedTileDims(OpAsmPrinter &printer, Operation *op,
+                                OperandRange tile_dims,
+                                ArrayAttr tile_shape) {
+  printer << "[";
+  auto shape = extractI64Array(tile_shape);
+  int offset = 0;
+  for (size_t i = 0; i < shape.size(); ++i) {
+      int count = shape[i];
+      printer << "[";
+      for (int j = 0; j < count; ++j) {
+          printer.printOperand(tile_dims[offset + j]);
+          if (j < count - 1) printer << ", ";
+      }
+      printer << "]";
+      offset += count;
+      if (i < shape.size() - 1) printer << ", ";
+  }
+  printer << "]";
+}
+
 #define GET_OP_CLASSES
 #include "Lego/LegoOps.cpp.inc"
-#include "Lego/LegoUtils.h"
 #include <numeric>
 
 // ============================================================================
@@ -50,7 +113,7 @@ static ParseResult parseGenPRegion(OpAsmParser &parser, Region &region) {
 
 LogicalResult RegPOp::verify() {
   auto perm = extractI64Array(getPerm());
-  auto dims = extractI64Array(getDims());
+  auto dims = getDims();
 
   if (perm.size() != dims.size()) {
     return emitOpError("Permutation rank " + std::to_string(perm.size()) +
@@ -58,8 +121,11 @@ LogicalResult RegPOp::verify() {
                        std::to_string(dims.size()));
   }
 
-  for (int64_t d : dims) {
-      if (d <= 0) return emitOpError("Dimension " + std::to_string(d) + " must be strictly positive");
+  for (Value v : dims) {
+      APInt d;
+      if (matchPattern(v, m_ConstantInt(&d)) && d.getSExtValue() <= 0) {
+          return emitOpError("Dimension " + std::to_string(d.getSExtValue()) + " must be strictly positive");
+      }
   }
 
   // Verify perm is a valid permutation of 0..size-1
@@ -80,17 +146,30 @@ LogicalResult RegPOp::verify() {
 // ============================================================================
 
 LogicalResult TileByOp::verify() {
-  auto info = extractNestedTileDims(getTileDims());
-  if (!info.valid) {
-    return emitOpError("Invalid tile dimensions structure. Expected nested list [[...], ...]");
+  auto tileShapeOpt = getTileShape();
+  auto tileShapeAttr = getTileShape();
+  auto tileShape = extractI64Array(tileShapeAttr);
+  
+  if (tileShape.empty()) return success();
+  
+  int64_t q = tileShape.size();
+  int64_t d = tileShape[0];
+  
+  auto tileDims = getTileDims();
+  int64_t totalExpected = 0;
+  for (int64_t s : tileShape) {
+      if (s != d) return emitOpError("Irregular tile grouping not perfectly rectangular in dimensions");
+      totalExpected += s;
   }
+  
+  if ((int64_t)tileDims.size() != totalExpected) return emitOpError("Mismatch between tile_shape and tile_dims count");
 
-  for (auto d : info.flatDims) {
-      if (d <= 0) return emitOpError("Tile dimension " + std::to_string(d) + " must be strictly positive");
+  for (Value v : tileDims) {
+      APInt val;
+      if (matchPattern(v, m_ConstantInt(&val)) && val.getSExtValue() <= 0) {
+          return emitOpError("Tile dimension " + std::to_string(val.getSExtValue()) + " must be strictly positive");
+      }
   }
-
-  int64_t d = info.d;
-  int64_t q = info.q; // Unused for check, but part of structure
 
   // Get input (d, q) from OrderBy or other layout
   auto [inputD, inputQ] = getLayoutDQ(getInput());
@@ -102,17 +181,32 @@ LogicalResult TileByOp::verify() {
       }
 
       // Verify global product of dimensions (volume preservation)
+      bool allConstant = true;
       int64_t tileProduct = 1;
-      for (auto attr : getTileDims()) {
-          auto tileGroup = extractI64Array(cast<ArrayAttr>(attr));
-          for (auto x : tileGroup) tileProduct *= x;
+      for (Value v : tileDims) {
+          APInt val;
+          if (matchPattern(v, m_ConstantInt(&val))) {
+              tileProduct *= val.getSExtValue();
+          } else {
+              allConstant = false;
+              break;
+          }
       }
 
-      int64_t inputProduct = 1;
       auto inputDims = getLayoutInputDims(getInput());
-      for (auto x : inputDims) inputProduct *= x;
+      bool inputConstant = true;
+      int64_t inputProduct = 1;
+      for (Value v : inputDims) {
+          APInt val;
+          if (matchPattern(v, m_ConstantInt(&val))) {
+              inputProduct *= val.getSExtValue();
+          } else {
+              inputConstant = false;
+              break;
+          }
+      }
 
-      if (tileProduct != inputProduct) {
+      if (allConstant && inputConstant && tileProduct != inputProduct) {
            return emitOpError("Total product of tile dims (" + std::to_string(tileProduct) + 
                               ") does not match total product of input dims (" + 
                               std::to_string(inputProduct) + ")");
@@ -127,9 +221,10 @@ LogicalResult TileByOp::verify() {
 // ============================================================================
 
 LogicalResult RowOp::verify() {
-    auto dims = extractI64Array(getDims());
-    for (int64_t d : dims) {
-        if (d <= 0) return emitOpError("Dimension " + std::to_string(d) + " must be strictly positive");
+    for (Value v : getDims()) {
+        APInt d;
+        if (matchPattern(v, m_ConstantInt(&d)) && d.getSExtValue() <= 0)
+            return emitOpError("Dimension " + std::to_string(d.getSExtValue()) + " must be strictly positive");
     }
     return success();
 }
@@ -139,9 +234,10 @@ LogicalResult RowOp::verify() {
 // ============================================================================
 
 LogicalResult ColOp::verify() {
-    auto dims = extractI64Array(getDims());
-    for (int64_t d : dims) {
-        if (d <= 0) return emitOpError("Dimension " + std::to_string(d) + " must be strictly positive");
+    for (Value v : getDims()) {
+        APInt d;
+        if (matchPattern(v, m_ConstantInt(&d)) && d.getSExtValue() <= 0)
+            return emitOpError("Dimension " + std::to_string(d.getSExtValue()) + " must be strictly positive");
     }
     return success();
 }
@@ -166,11 +262,18 @@ LogicalResult CastViewOp::verify() {
     }
 
     int64_t layoutVolume = 1;
-    for (int64_t d : layoutDims) {
-        layoutVolume *= d;
+    bool allConstant = true;
+    for (Value v : layoutDims) {
+        APInt d;
+        if (matchPattern(v, m_ConstantInt(&d))) {
+            layoutVolume *= d.getSExtValue();
+        } else {
+            allConstant = false;
+            break;
+        }
     }
 
-    if (memrefElements != layoutVolume) {
+    if (allConstant && memrefElements != layoutVolume) {
         return emitOpError("MemRef total number of elements (" + std::to_string(memrefElements) +
                            ") does not match layout volume (" + std::to_string(layoutVolume) + ")");
     }
@@ -285,8 +388,16 @@ struct SimplifyLinearGenP : public OpRewritePattern<GenPOp> {
 
   LogicalResult matchAndRewrite(GenPOp op,
                                 PatternRewriter &rewriter) const override {
-    auto dims = extractI64Array(op.getDims());
-    int rank = dims.size();
+    auto dimsVals = op.getDims();
+    int rank = dimsVals.size();
+    
+    SmallVector<int64_t> dims;
+    dims.reserve(rank);
+    for (Value v : dimsVals) {
+        APInt d;
+        if (!matchPattern(v, m_ConstantInt(&d))) return failure();
+        dims.push_back(d.getSExtValue());
+    }
     
     Block &block = op.getBody().front();
     Operation *term = block.getTerminator();
@@ -322,7 +433,7 @@ struct SimplifyLinearGenP : public OpRewritePattern<GenPOp> {
 
     rewriter.replaceOpWithNewOp<RegPOp>(op, op.getType(),
                                        rewriter.getI64ArrayAttr(perm),
-                                       rewriter.getI64ArrayAttr(dims));
+                                       dimsVals);
     return success();
   }
 };

@@ -22,9 +22,10 @@ func.func @apply_inverse_identity(%layout: !lego.layout, %i: index, %j: index) -
 
 // CHECK-LABEL: @simplify_gen_p_identity
 func.func @simplify_gen_p_identity() -> !lego.layout {
-  // CHECK: %[[REG:.*]] = lego.reg_p perm [0] dims [16]
+  // CHECK: %[[REG:.*]] = lego.reg_p perm [0] dims[%{{.*}}]
   // CHECK: return %[[REG]]
-  %layout = lego.gen_p [16]
+  %c16 = arith.constant 16 : index
+  %layout = lego.gen_p [%c16]
     apply (%i: index) {
       lego.yield %i : index
     }
@@ -37,9 +38,11 @@ func.func @simplify_gen_p_identity() -> !lego.layout {
 // CHECK-LABEL: @simplify_gen_p_strided
 func.func @simplify_gen_p_strided() -> !lego.layout {
   // dims [4, 8]. flat = j * 4 + i  => perm [1, 0]
-  // CHECK: %[[REG:.*]] = lego.reg_p perm [1, 0] dims [4, 8]
+  // CHECK: %[[REG:.*]] = lego.reg_p perm [1, 0] dims[%{{.*}}, %{{.*}}]
   // CHECK: return %[[REG]]
-  %layout = lego.gen_p [4, 8]
+  %cc4 = arith.constant 4 : index
+  %cc8 = arith.constant 8 : index
+  %layout = lego.gen_p [%cc4, %cc8]
     apply (%i: index, %j: index) {
       %c4 = arith.constant 4 : index
       %m = arith.muli %j, %c4 : index

@@ -38,7 +38,7 @@ SmallVector<Value> applyInverseLayout(OpBuilder &b, Location loc, Value layout,
 // ============================================================================
 
 Value flattenIndex(OpBuilder &b, Location loc, ValueRange indices,
-                   ArrayRef<int64_t> dims) {
+                   ValueRange dims) {
   Value flat = getConstantIndex(b, loc, 0);
   Value multiplier = getConstantIndex(b, loc, 1);
 
@@ -49,7 +49,7 @@ Value flattenIndex(OpBuilder &b, Location loc, ValueRange indices,
     flat = arith::AddIOp::create(b, loc, flat, term);
 
     if (k > 0) {
-      Value dim = getConstantIndex(b, loc, dims[k]);
+      Value dim = dims[k];
       multiplier = arith::MulIOp::create(b, loc, multiplier, dim);
     }
   }
@@ -57,16 +57,16 @@ Value flattenIndex(OpBuilder &b, Location loc, ValueRange indices,
 }
 
 SmallVector<Value> unflattenIndex(OpBuilder &b, Location loc, Value flatIndex,
-                                  ArrayRef<int64_t> dims) {
+                                  ValueRange dims) {
   SmallVector<Value> indices;
   int rank = dims.size();
   Value current = flatIndex;
 
   for (int k = 0; k < rank; ++k) {
-    int64_t stride = 1;
-    for (int j = k + 1; j < rank; ++j)
-      stride *= dims[j];
-    Value strideVal = getConstantIndex(b, loc, stride);
+    Value strideVal = getConstantIndex(b, loc, 1);
+    for (int j = k + 1; j < rank; ++j) {
+      strideVal = arith::MulIOp::create(b, loc, strideVal, dims[j]);
+    }
     Value idx = arith::DivUIOp::create(b, loc, current, strideVal);
     indices.push_back(idx);
     current = arith::RemUIOp::create(b, loc, current, strideVal);
@@ -79,10 +79,10 @@ SmallVector<Value> unflattenIndex(OpBuilder &b, Location loc, Value flatIndex,
 
 Value applyRegP(OpBuilder &b, Location loc, RegPOp op, ValueRange indices) {
   auto perm = extractI64Array(op.getPerm());
-  auto dims = extractI64Array(op.getDims());
+  auto dims = op.getDims();
 
   auto permIndices = sigmaValues(indices, perm);
-  auto permDims = sigma<int64_t>(dims, perm);
+  auto permDims = sigmaValues(dims, perm);
 
   return flattenIndex(b, loc, permIndices, permDims);
 }
@@ -90,9 +90,9 @@ Value applyRegP(OpBuilder &b, Location loc, RegPOp op, ValueRange indices) {
 SmallVector<Value> applyInverseRegP(OpBuilder &b, Location loc, RegPOp op,
                                     Value flatIndex) {
   auto perm = extractI64Array(op.getPerm());
-  auto dims = extractI64Array(op.getDims());
+  auto dims = op.getDims();
 
-  auto permDims = sigma<int64_t>(dims, perm);
+  auto permDims = sigmaValues(dims, perm);
   auto permIndices = unflattenIndex(b, loc, flatIndex, permDims);
   auto invPerm = inversePermutation(perm);
   return sigmaValues(permIndices, invPerm);
@@ -155,7 +155,7 @@ Value applyOrderBy(OpBuilder &b, Location loc, OrderByOp op,
   int offset = 0;
 
   for (Value perm : op.getPerms()) {
-    SmallVector<int64_t> pDims = getLayoutInputDims(perm);
+    SmallVector<Value> pDims = getLayoutInputDims(perm);
     if (pDims.empty())
       return nullptr;
 
@@ -170,10 +170,9 @@ Value applyOrderBy(OpBuilder &b, Location loc, OrderByOp op,
     if (!innerFlat)
       return nullptr;
 
-    int64_t size = 1;
+    Value sizeVal = getConstantIndex(b, loc, 1);
     for (auto d : pDims)
-      size *= d;
-    Value sizeVal = getConstantIndex(b, loc, size);
+      sizeVal = arith::MulIOp::create(b, loc, sizeVal, d);
 
     Value flatMul = arith::MulIOp::create(b, loc, flatIndex, sizeVal);
     flatIndex = arith::AddIOp::create(b, loc, flatMul, innerFlat);
@@ -189,11 +188,10 @@ SmallVector<Value> applyInverseOrderBy(OpBuilder &b, Location loc,
 
   for (auto it = permsVec.rbegin(); it != permsVec.rend(); ++it) {
     Value perm = *it;
-    SmallVector<int64_t> pDims = getLayoutInputDims(perm);
-    int64_t size = 1;
+    SmallVector<Value> pDims = getLayoutInputDims(perm);
+    Value sizeVal = getConstantIndex(b, loc, 1);
     for (auto d : pDims)
-      size *= d;
-    Value sizeVal = getConstantIndex(b, loc, size);
+      sizeVal = arith::MulIOp::create(b, loc, sizeVal, d);
 
     Value innerFlat = arith::RemUIOp::create(b, loc, flatIndex, sizeVal);
     flatIndex = arith::DivUIOp::create(b, loc, flatIndex, sizeVal);
@@ -215,7 +213,7 @@ SmallVector<Value> applyInverseOrderBy(OpBuilder &b, Location loc,
 
 Value applyGroupBy(OpBuilder &b, Location loc, GroupByOp op,
                    ValueRange indices) {
-  auto groupDims = extractI64Array(op.getGroupDims());
+  auto groupDims = op.getGroupDims();
   Value current = flattenIndex(b, loc, indices, groupDims);
 
   // Iterate objects in REVERSE (matching Python)
@@ -224,7 +222,7 @@ Value applyGroupBy(OpBuilder &b, Location loc, GroupByOp op,
 
   for (auto it = objectsVec.rbegin(); it != objectsVec.rend(); ++it) {
     Value obj = *it;
-    SmallVector<int64_t> objDims = getLayoutInputDims(obj);
+    SmallVector<Value> objDims = getLayoutInputDims(obj);
     if (objDims.empty())
       return nullptr;
     SmallVector<Value> objIndices = unflattenIndex(b, loc, current, objDims);
@@ -239,12 +237,12 @@ Value applyGroupBy(OpBuilder &b, Location loc, GroupByOp op,
 
 SmallVector<Value> applyInverseGroupBy(OpBuilder &b, Location loc,
                                        GroupByOp op, Value flatIndex) {
-  auto groupDims = extractI64Array(op.getGroupDims());
+  auto groupDims = op.getGroupDims();
   Value current = flatIndex;
 
   // Iterate objects FORWARD (matching Python)
   for (Value obj : op.getObjects()) {
-    SmallVector<int64_t> objDims = getLayoutInputDims(obj);
+    SmallVector<Value> objDims = getLayoutInputDims(obj);
     if (objDims.empty())
       return {};
     SmallVector<Value> idxFromObj = applyInverseLayout(b, loc, obj, current);

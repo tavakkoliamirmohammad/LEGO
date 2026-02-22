@@ -59,10 +59,10 @@ def GenPOp : Lego_Op<"gen_p", [Pure]> {
       } : !lego.layout
     ```
   }];
-  let arguments = (ins I64ArrayAttr:$dims);
+  let arguments = (ins Variadic<Index>:$dims);
   let regions = (region SizedRegion<1>:$body, AnyRegion:$inv_body);
   let results = (outs Lego_LayoutType:$result);
-  let assemblyFormat = "$dims `apply` custom<GenPRegion>($body) `inv` custom<GenPRegion>($inv_body) attr-dict `:` type($result)";
+  let assemblyFormat = "`[` $dims `]` `apply` custom<GenPRegion>($body) `inv` custom<GenPRegion>($inv_body) attr-dict `:` type($result)";
   let hasCanonicalizer = 1;
 }
 
@@ -72,9 +72,9 @@ def RegPOp : Lego_Op<"reg_p", [Pure]> {
     Creates a layout block defined by a permutation vector.
     Equivalent to reordering the dimensions according to `perm`.
   }];
-  let arguments = (ins I64ArrayAttr:$perm, I64ArrayAttr:$dims);
+  let arguments = (ins I64ArrayAttr:$perm, Variadic<Index>:$dims);
   let results = (outs Lego_LayoutType:$result);
-  let assemblyFormat = "`perm` $perm `dims` $dims attr-dict `:` type($result)";
+  let assemblyFormat = "`perm` $perm `dims` `[` $dims `]` attr-dict `:` type($result)";
   let hasVerifier = 1;
 }
 
@@ -96,7 +96,7 @@ def OrderByOp : Lego_Op<"order_by", [Pure]> {
   let assemblyFormat = "`(` $perms `)` attr-dict `:` type($result)";
 }
 
-def GroupByOp : Lego_Op<"group_by", [Pure]> {
+def GroupByOp : Lego_Op<"group_by", [Pure, AttrSizedOperandSegments]> {
   let summary = "Groups dimensions and applies a sequence of layout objects";
   let description = [{
     Groups the input dimensions according to `group_dims` and then applies the
@@ -106,9 +106,9 @@ def GroupByOp : Lego_Op<"group_by", [Pure]> {
 
     Example: `lego.group_by [4, 5](%ob1, %ob2) : !lego.layout`
   }];
-  let arguments = (ins I64ArrayAttr:$group_dims, Variadic<Lego_LayoutType>:$objects);
+  let arguments = (ins Variadic<Index>:$group_dims, Variadic<Lego_LayoutType>:$objects);
   let results = (outs Lego_LayoutType:$result);
-  let assemblyFormat = "$group_dims `(` $objects `)` attr-dict `:` type($result)";
+  let assemblyFormat = "`[` $group_dims `]` `(` $objects `)` attr-dict `:` type($result)";
 }
 
 def TileByOp : Lego_Op<"tile_by", [Pure]> {
@@ -127,9 +127,9 @@ def TileByOp : Lego_Op<"tile_by", [Pure]> {
       %tb = lego.tile_by %ob tile_dims [[48, 48, 48], [8, 8, 8]] : !lego.layout
       ```
     }];
-    let arguments = (ins Lego_LayoutType:$input, ArrayAttr:$tile_dims);
+    let arguments = (ins Lego_LayoutType:$input, Variadic<Index>:$tile_dims, I64ArrayAttr:$tile_shape);
     let results = (outs Lego_LayoutType:$result);
-    let assemblyFormat = "$input `tile_dims` $tile_dims attr-dict `:` type($result)";
+    let assemblyFormat = "$input `tile_dims` custom<NestedTileDims>($tile_dims, $tile_shape) attr-dict `:` type($result)";
     let hasVerifier = 1;
 }
 
@@ -139,9 +139,9 @@ def RowOp : Lego_Op<"row", [Pure]> {
       Row(*dims) = RegP(dims, [0, 1, ..., d-1]).
       Sugar for RegP with identity permutation.
     }];
-    let arguments = (ins I64ArrayAttr:$dims);
+    let arguments = (ins Variadic<Index>:$dims);
     let results = (outs Lego_LayoutType:$result);
-    let assemblyFormat = "$dims attr-dict `:` type($result)";
+    let assemblyFormat = "`[` $dims `]` attr-dict `:` type($result)";
     let hasVerifier = 1;
 }
 
@@ -151,9 +151,9 @@ def ColOp : Lego_Op<"col", [Pure]> {
       Col(*dims) = RegP(dims, [d-1, d-2, ..., 0]).
       Sugar for RegP with reversed identity permutation.
     }];
-    let arguments = (ins I64ArrayAttr:$dims);
+    let arguments = (ins Variadic<Index>:$dims);
     let results = (outs Lego_LayoutType:$result);
-    let assemblyFormat = "$dims attr-dict `:` type($result)";
+    let assemblyFormat = "`[` $dims `]` attr-dict `:` type($result)";
     let hasVerifier = 1;
 }
 
