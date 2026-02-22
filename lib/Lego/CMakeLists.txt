@@ -1,4 +1,4 @@
-include_directories(${CMAKE_BINARY_DIR}/lego_mlir/include)
+include_directories(${CMAKE_BINARY_DIR}/include)
 
 add_mlir_dialect_library(MLIRLego
   LegoDialect.cpp

@@ -93,7 +93,7 @@ cd /path/to/lego
 From the root of the LEGO repository:
 
 ```bash
-./setup.sh
+./scripts/setup.sh
 ```
 
 This script creates a virtual environment and installs all required Python packages (including Triton and PyTorch) using the versions listed above.
@@ -121,7 +121,7 @@ From the root of the artifact repository, the experiments can be reproduced with
 ## Evaluation and Expected Results
 
 * Running `run_all_kernels.sh` will execute all benchmarks and produce the evaluation outputs.
-* The generated figures corresponding to the evaluation section will be located in the `./figures` folder in the root of the artifact directory.
+* The generated figures corresponding to the evaluation section will be located in the `./paper/figures` folder in the root of the artifact directory.
 * Approximate time requirements:
   * **Workflow preparation (installation, builds, environment):** ~2 hours
   * **Experiment execution:** ~1.5 hours

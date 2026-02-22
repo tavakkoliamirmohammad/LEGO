@@ -5,7 +5,7 @@ llvm_canonicalize_cmake_booleans(
 
 set(LEGO_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(LEGO_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/..)
-set(LEGO_TOOLS_DIR ${CMAKE_BINARY_DIR}/lego_mlir/tools/lego-opt)
+set(LEGO_TOOLS_DIR ${CMAKE_BINARY_DIR}/tools/lego-opt)
 
 configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in
