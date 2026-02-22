@@ -23,8 +23,7 @@ def LegoToArithPass : Pass<"lego-to-arith", "mlir::ModuleOp"> {
     "mlir::arith::ArithDialect",
     "mlir::affine::AffineDialect",
     "mlir::scf::SCFDialect",
-    "mlir::memref::MemRefDialect",
-    "mlir::math::MathDialect"
+    "mlir::memref::MemRefDialect"
   ];
 }
 
@@ -40,8 +39,7 @@ def LegoVerifyConsistencyPass : Pass<"lego-verify-consistency", "mlir::ModuleOp"
     "mlir::lego::LegoDialect",
     "mlir::arith::ArithDialect",
     "mlir::affine::AffineDialect",
-    "mlir::scf::SCFDialect",
-    "mlir::math::MathDialect"
+    "mlir::scf::SCFDialect"
   ];
 }
 

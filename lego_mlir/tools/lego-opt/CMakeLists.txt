@@ -14,8 +14,6 @@ set(LIBS
   MLIRArithDialect
   MLIRSCFDialect
   MLIRMemRefDialect
-  MLIRTensorDialect
-  MLIRLinalgDialect
   MLIRMathDialect
   MLIRArithTransforms
 )
