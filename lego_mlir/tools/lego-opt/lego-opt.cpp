@@ -17,7 +17,6 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Math/IR/Math.h"
-#include "mlir/Dialect/Transform/IR/TransformDialect.h"
 #include "mlir/Transforms/Passes.h"
 
 #include "Lego/LegoDialect.h"
@@ -46,7 +45,6 @@ int main(int argc, char **argv) {
   registry.insert<mlir::func::FuncDialect, mlir::arith::ArithDialect,
                   mlir::scf::SCFDialect, mlir::memref::MemRefDialect,
                   mlir::tensor::TensorDialect, mlir::linalg::LinalgDialect,
-                  mlir::transform::TransformDialect,
                   mlir::math::MathDialect>();
   registry.insert<mlir::lego::LegoDialect>();
   

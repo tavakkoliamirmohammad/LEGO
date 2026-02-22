@@ -2,8 +2,6 @@
 #define LEGO_OPS
 
 include "LegoDialect.td"
-include "mlir/Dialect/Transform/IR/TransformDialect.td"
-include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpBase.td"
 
@@ -185,32 +183,6 @@ def ApplyInverseOp : Lego_Op<"apply_inverse", [Pure]> {
   let hasCanonicalizer = 1;
 }
 
-//===----------------------------------------------------------------------===//
-// LEGO Transform Operations (Transform Dialect)
-//===----------------------------------------------------------------------===//
-
-def ApplyLayoutTransformOp : Op<Lego_Dialect, "lego.transform_loop",
-    [TransformOpInterface,
-     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = "Applies a LEGO layout to a target operation";
-  let description = [{
-    Applies the specified LEGO layout to the target operation.
-    The target operation must be compatible with the layout (e.g., a linalg.matmul).
-  }];
-
-  let arguments = (ins TransformHandleTypeInterface:$target,
-                       Lego_LayoutType:$layout);
-  let results = (outs TransformHandleTypeInterface:$transformed);
-
-  let assemblyFormat = "$target `,` $layout attr-dict `:` `(` type($target) `,` type($layout) `)` `->` type($transformed)";
-  
-  let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure apply(
-        ::mlir::transform::TransformRewriter &rewriter,
-        ::mlir::transform::TransformResults &results,
-        ::mlir::transform::TransformState &state);
-  }];
-}
 
 //===----------------------------------------------------------------------===//
 // View Abstraction Operations

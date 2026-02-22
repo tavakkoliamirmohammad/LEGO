@@ -6,7 +6,6 @@ set(LIBS
   MLIRSupport
   MLIRTransforms
   MLIRDialect
-  MLIRTransformDialect
   MLIROptLib
   # MLIRRegisterAllDialects
   # MLIRRegisterAllExtensions
