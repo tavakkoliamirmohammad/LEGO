@@ -132,6 +132,22 @@ cmake --build <build_dir> -j$(nproc) --target check-lego
 > [!TIP]
 > **Switching between modes**: To switch from Monolithic to Decoupled, simply re-run the `cmake` command with the `-DMLIR_DIR` flag and a different build directory (or clear the current build directory first). The build system will automatically prioritize `MLIR_DIR` if provided.
 
+## Adding New MLIR Dialects
+
+To use a new MLIR dialect (e.g., `Linalg`, `Affine`, `GPU`):
+
+1.  **Link the Dialect Library**: Add the library name (usually `MLIR<Name>Dialect`) to the `LINK_LIBS` section.
+
+2.  **Add Includes/Passes**: If you need transformations or headers, add the corresponding library (e.g., `MLIRLinalgTransforms`).
+
+3.  **Run Monolithic Build Once**: If the dialect was not part of your previous build, its library (e.g., `libMLIRLinalgDialect.a`) will be missing from your build folder. You must run a **Monolithic Build** once to compile the new dependency:
+    ```bash
+    cmake -S <project_root> -B <build_dir> -DLEGO_MONOLITHIC_LLVM=ON
+    cmake --build <build_dir> -j$(nproc) --target check-lego
+    ```
+
+4.  **Resume Decoupled Build**: Once the library is compiled, you can switch back to the faster Decoupled mode.
+
 ## Experiment Workflow
 
 From the root of the artifact repository, the experiments can be reproduced with the following steps:
