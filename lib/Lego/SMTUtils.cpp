@@ -117,7 +117,7 @@ bool runZ3(const std::string &smtLib) {
   if (pid == 0) {
       dup2(out_pipe[0], STDIN_FILENO); dup2(in_pipe[1], STDOUT_FILENO);
       close(out_pipe[0]); close(out_pipe[1]); close(in_pipe[0]); close(in_pipe[1]);
-      execlp("z3", "z3", "-in", nullptr);
+      execlp(LEGO_Z3_EXECUTABLE, "z3", "-in", nullptr);
       _exit(1);
   }
   close(out_pipe[0]); close(in_pipe[1]);

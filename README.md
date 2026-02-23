@@ -107,6 +107,14 @@ source venv/bin/activate
 pip install -e ./python
 ```
 
+### 6. Build the LEGO MLIR dialect
+
+To build the LEGO MLIR dialect and run the tests:
+
+```bash
+cmake -S <project_root> -B <build_dir> && cmake --build <build_dir> -j32 --target check-lego
+```
+
 ## Experiment Workflow
 
 From the root of the artifact repository, the experiments can be reproduced with the following steps:
