@@ -109,11 +109,28 @@ pip install -e ./python
 
 ### 6. Build the LEGO MLIR dialect
 
-To build the LEGO MLIR dialect and run the tests:
+The LEGO build system supports two modes. Both modes automatically detect and use fast linkers (`mold` or `lld`) and `ccache` for optimal performance.
+
+#### Option A: Monolithic Build (Recommended for first setup)
+This mode builds the LLVM/MLIR sub-project along with LEGO. It is slower (~5-10 mins) but ensures a consistent environment.
 
 ```bash
-cmake -S <project_root> -B <build_dir> && cmake --build <build_dir> -j32 --target check-lego
+cmake -S <project_root> -B <build_dir> -DLEGO_MONOLITHIC_LLVM=ON
+cmake --build <build_dir> -j$(nproc) --target check-lego
 ```
+
+#### Option B: Decoupled Build (Recommended for fast developer iteration)
+Once MLIR is built (either via Option A or separately), you can rebuild only the LEGO dialect in seconds by pointing to the existing build's CMake directory.
+
+```bash
+# If building LLVM separately: MLIR_DIR is llvm-project/build/lib/cmake/mlir
+
+cmake -S <project_root> -B <build_dir> -DMLIR_DIR=<build_dir>/lib/cmake/mlir -DLEGO_MONOLITHIC_LLVM=OFF
+cmake --build <build_dir> -j$(nproc) --target check-lego
+```
+
+> [!TIP]
+> **Switching between modes**: To switch from Monolithic to Decoupled, simply re-run the `cmake` command with the `-DMLIR_DIR` flag and a different build directory (or clear the current build directory first). The build system will automatically prioritize `MLIR_DIR` if provided.
 
 ## Experiment Workflow
 
