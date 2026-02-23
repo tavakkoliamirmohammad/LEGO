@@ -21,7 +21,7 @@ The project follows a standard LLVM/MLIR project structure:
 -   `lib/Lego/`: Implementation of the dialect and passes.
     -   `LegoOps.cpp`: C++ implementation of operation logic (verifiers, printers).
     -   `LegoToArith.cpp`: Implementations of the lowering pass to standard arithmetic.
-    -   `LegoDesugar.cpp`: Implementation of the desugaring pass (simplifying sugar ops).
+    -   `LegoNormalization.cpp`: Implementation of the normalization pass (simplifying sugar ops).
 -   `python/`: Python bindings for the dialect.
 -   `test/`: MLIR-based tests (`lit` tests).
 
@@ -83,7 +83,7 @@ Groups input dimensions before applying sub-layouts. This allows treating a bloc
 
 ### 3.3. Syntactic Sugar
 
-These operations provide convenient shorthands for common patterns but are internally rewritten to primitives during the `lego-desugar` pass.
+These operations provide convenient shorthands for common patterns but are internally rewritten to primitives during the `lego-normalization` pass.
 
 -   **`row`**: Creates a row-major layout.
     -   *Desugars to*: `RegP` with identity permutation `[0, 1, ..., N-1]`.
@@ -97,7 +97,7 @@ These operations provide convenient shorthands for common patterns but are inter
 The typical compilation flow for Lego MLIR is:
 
 1.  **Parsing/Construction**: User writes or generates Lego MLIR code (often via Python bindings).
-2.  **Desugaring (`lego-desugar`)**:
+2.  **Normalization (`lego-normalization`)**:
     -   Input: Mix of Primitives ("RegP") and Sugar ("TileBy", "Row").
     -   Action: Rewrites `TileBy`, `Row`, `Col` into explicit `GroupBy`, `OrderBy`, and `RegP` chains.
     -   Output: IR containing only `GroupBy`, `OrderBy`, `RegP`, `GenP`.

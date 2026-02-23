@@ -9,7 +9,7 @@ using namespace mlir::lego;
 void mlir::lego::registerLegoPipelines() {
   PassPipelineRegistration<>("lego-lower", "Lego e2e lowering pipeline",
     [](OpPassManager &pm) {
-      pm.addPass(createLegoDesugarPass());
+      pm.addPass(createLegoNormalizationPass());
       pm.addPass(createLegoToArithPass());
       pm.addPass(createCanonicalizerPass());
       pm.addPass(createCSEPass());

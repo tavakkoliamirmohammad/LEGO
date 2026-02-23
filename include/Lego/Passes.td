@@ -3,13 +3,13 @@
 
 include "mlir/Pass/PassBase.td"
 
-def LegoDesugarPass : Pass<"lego-desugar", "mlir::ModuleOp"> {
-  let summary = "Desugar LEGO dialect syntactic sugars (like TileBy)";
+def LegoNormalizationPass : Pass<"lego-normalization", "mlir::ModuleOp"> {
+  let summary = "Normalize LEGO dialect syntactic sugars (like TileBy)";
   let description = [{
     This pass simplifies LEGO dialect operations by rewriting syntactic sugar ops
     (e.g., TileBy) into their primitive components (GroupBy, OrderBy, RegP).
   }];
-  let constructor = "mlir::lego::createLegoDesugarPass()";
+  let constructor = "mlir::lego::createLegoNormalizationPass()";
   let dependentDialects = ["mlir::lego::LegoDialect"];
 }
 

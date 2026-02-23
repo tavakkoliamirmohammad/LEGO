@@ -1,5 +1,5 @@
 // RUN: lego-opt %s | FileCheck %s --check-prefix=PARSE
-// RUN: lego-opt --lego-desugar --lego-to-arith %s | FileCheck %s --check-prefix=LOWER
+// RUN: lego-opt --lego-normalization --lego-to-arith %s | FileCheck %s --check-prefix=LOWER
 
 // ============================================================================
 // GenP — General Permutation with user-defined apply + inv logic

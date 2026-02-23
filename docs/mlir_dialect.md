@@ -83,7 +83,7 @@ A high-level tiling operation that desugars into `lego.group_by` and `lego.order
 // Tiles the base layout into tiles of size [16, 16] with outer dims [8, 8]
 %tiled = lego.tile_by %base tile_dims [[16, 16], [8, 8]] : !lego.layout
 ```
-This operation is automatically desugared by the `LegoDesugarPass`.
+This operation is automatically normalized by the `LegoNormalizationPass`.
 
 ### Application Operations
 
@@ -106,7 +106,7 @@ Used within the transform dialect to apply a layout to a target operation (e.g.,
 
 ## Compilation Pipeline
 
-1.  **Desugaring (`LegoDesugarPass`)**:
+1.  **Normalization (`LegoNormalizationPass`)**:
     -   `lego.row` $\to$ `lego.reg_p` (identity perm)
     -   `lego.col` $\to$ `lego.reg_p` (reversed perm)
     -   `lego.tile_by` $\to$ Complex chain of `lego.group_by`, `lego.order_by`, and reshuffling `lego.reg_p` ops.
