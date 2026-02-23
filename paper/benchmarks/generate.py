@@ -32,13 +32,27 @@ def generate_triton():
     os.system(f'"{sys.executable}" grouped_gemm_sympy.py > ../../generated/triton/grouped_gemm/grouped_gemm.py')
     os.chdir(SCRIPT_DIR)
 
+import subprocess
+
 def generate_cuda():
     print("=== Generating CUDA Kernels ===")
     os.chdir(CUDA_DIR)
-    run_script("nw_sympy.py")
-    run_script("lud.py")
-    run_script("bricks_laplasian.py")
-    run_script("bricks_f3d.py")
+    
+    # Generate directly into the paper/generated/cuda folder
+    env = os.environ.copy()
+    
+    with open('../../generated/cuda/nw/needle_kernel.cu', 'w') as f:
+        subprocess.run([sys.executable, "nw_sympy.py"], env=env, stdout=f, check=True)
+        
+    with open('../../generated/cuda/lud/lud_kernel.cu', 'w') as f:
+        subprocess.run([sys.executable, "lud.py"], env=env, stdout=f, check=True)
+        
+    with open('../../generated/cuda/bricks-laplace/main.cu', 'w') as f:
+        subprocess.run([sys.executable, "bricks_laplasian.py"], env=env, stdout=f, check=True)
+        
+    with open('../../generated/cuda/bricks/main.cu', 'w') as f:
+        subprocess.run([sys.executable, "bricks_f3d.py"], env=env, stdout=f, check=True)
+    
     os.chdir(SCRIPT_DIR)
 
 def generate_mlir():

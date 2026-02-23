@@ -11,8 +11,7 @@ authors = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-    "sympy",
-    "jinja2"
+    "sympy"
 ]
 
 [project.optional-dependencies]

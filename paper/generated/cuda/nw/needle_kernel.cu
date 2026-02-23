@@ -260,3 +260,4 @@ needle_cuda_shared_2(  int* referrence,
   matrix_cuda[index + ty * cols] = temp[ty+1][tx+1];
 
 }
+

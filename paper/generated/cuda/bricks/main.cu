@@ -1,3 +1,4 @@
+
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -20,7 +21,7 @@
     #define SIZE 1   // default radius -> 7x7x7 window
 #endif
 
-__global__ void laplacian_naive(float *in, float *out, float *c) {
+__global__ void f3d_naive(float *in, float *out, float *c) {
     const int radius = SIZE;
 
     unsigned i = threadIdx.x;
@@ -39,26 +40,31 @@ __global__ void laplacian_naive(float *in, float *out, float *c) {
     const int gz = bz * Bz + k;
 
     // --- Boundary condition check (skip threads whose stencil would go OOB) ---
-    if (gx < radius || gx >= {{ N }} - radius ||
-        gy < radius || gy >= {{ N }} - radius ||
-        gz < radius || gz >= {{ N }} - radius) {
+    if (gx < radius || gx >= 384 - radius ||
+        gy < radius || gy >= 384 - radius ||
+        gz < radius || gz >= 384 - radius) {
         return;   // or write a clamped/ghost value here if you prefer
     }
 
-    float base = in[{{ normal_out_idx }}] * c[0];
+    float base = in[1179648*bx + 3072*by + 8*bz + 147456*i + 384*j + k] * c[73*radius];
 
     #pragma unroll
-    for (int a = 1; a <= radius; a++) {
-         base += c[a] * (
-            in[{{ normal_in0_idx }}] + in[{{ normal_in1_idx }}] + in[{{ normal_in2_idx }}] +
-            in[{{ normal_in3_idx }}] + in[{{ normal_in4_idx }}] + in[{{ normal_in5_idx }}]);
+    for (int i_diff = -radius; i_diff <= radius; i_diff++) {
+        #pragma unroll
+        for (int j_diff = -radius; j_diff <= radius; j_diff++) {
+            #pragma unroll
+            for (int k_diff = -radius; k_diff <= radius; k_diff++) {
+                base += in[1179648*bx + 3072*by + 8*bz + 147456*i + 147456*i_diff + 384*j + 384*j_diff + k + k_diff] *
+                        c[64*i_diff + 8*j_diff + k_diff + 73*radius];
+            }
+        }
     }
 
-    out[{{ normal_out_idx }}] = base;
+    out[1179648*bx + 3072*by + 8*bz + 147456*i + 384*j + k] = base;
 }
 
 
-__global__ void laplacian_bricks(float *in, float *out, float *c) {
+__global__ void f3d_bricks(float *in, float *out, float *c) {
     const int radius = SIZE;
 
     unsigned i = threadIdx.x;
@@ -77,22 +83,27 @@ __global__ void laplacian_bricks(float *in, float *out, float *c) {
     const int gz = bz * Bz + k;
 
     // --- Boundary condition check (skip threads whose stencil would go OOB) ---
-    if (gx < radius || gx >= {{ N }} - radius ||
-        gy < radius || gy >= {{ N }} - radius ||
-        gz < radius || gz >= {{ N }} - radius) {
+    if (gx < radius || gx >= 384 - radius ||
+        gy < radius || gy >= 384 - radius ||
+        gz < radius || gz >= 384 - radius) {
         return;   // or write a clamped/ghost value here if you prefer
     }
 
-    float base = in[{{ bricks_out_idx }}] * c[0];
+    float base = in[1179648*bx + 24576*by + 512*bz + 64*i + 8*j + k] * c[73*radius];
 
     #pragma unroll
-    for (int a = 1; a <= radius; a++) {
-         base += c[a] * (
-            in[{{ bricks_in0_idx }}] + in[{{ bricks_in1_idx }}] + in[{{ bricks_in2_idx }}] +
-            in[{{ bricks_in3_idx }}] + in[{{ bricks_in4_idx }}] + in[{{ bricks_in5_idx }}]);
+    for (int i_diff = -radius; i_diff <= radius; i_diff++) {
+        #pragma unroll
+        for (int j_diff = -radius; j_diff <= radius; j_diff++) {
+            #pragma unroll
+            for (int k_diff = -radius; k_diff <= radius; k_diff++) {
+                base += in[1179648*bx + 24576*by + 512*bz + 64*i + 64*i_diff + 8*j + 8*j_diff + k + k_diff] *
+                        c[64*i_diff + 8*j_diff + k_diff + 73*radius];
+            }
+        }
     }
 
-    out[{{ bricks_out_idx }}] = base;
+    out[1179648*bx + 24576*by + 512*bz + 64*i + 8*j + k] = base;
 }
 
 // ---------------------------
@@ -109,22 +120,22 @@ static inline dim3 ceilDiv3D(int nx, int ny, int nz, dim3 block) {
 // ---------------------------
 int main(int argc, char** argv) {
     // Problem size (can override via CLI)
-    int NX = {{ N }}, NY = {{ N }}, NZ = {{ N }};
+    int NX = 384, NY = 384, NZ = 384;
 
-    const size_t N = static_cast<size_t>(NX) * NY * NZ;
-    const size_t bytes = N * sizeof(float);
+    const size_t n_size = static_cast<size_t>(NX) * NY * NZ;
+    const size_t bytes = n_size * sizeof(float);
 
     printf("Dims: NX=%d NY=%d NZ=%d (total elements=%zu) | radius=%d | c is 8x8x8\n",
-           NX, NY, NZ, N, SIZE);
+           NX, NY, NZ, n_size, SIZE);
 
     // Host allocations
-    std::vector<float> h_in(N), h_out(N, 0.0f), h_out2(N, 0.0f);
+    std::vector<float> h_in(n_size), h_out(n_size, 0.0f), h_out2(n_size, 0.0f);
     std::vector<float> h_c(8*8*8, 0.0f);
 
     // Initialize input with randoms and c with something deterministic
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    for (size_t t = 0; t < N; ++t) h_in[t] = dist(rng);
+    for (size_t t = 0; t < n_size; ++t) h_in[t] = dist(rng);
 
     // Fill c[0..6] along each dim meaningfully; leave the last slice as zero padding.
     // Ex: simple separable-like mask where center is bigger
@@ -156,14 +167,14 @@ int main(int argc, char** argv) {
     dim3 block(8, 8, 8);
     dim3 grid = ceilDiv3D(NX, NY, NZ, block);
 
-    const int WARPMUP = 25;
     // Warm-up
+    const int WARPMUP = 25;
     for (int r = 0; r < WARPMUP; ++r) {
-        laplacian_naive<<<grid, block>>>(d_in, d_out, d_c);
+        f3d_naive<<<grid, block>>>(d_in, d_out, d_c);
     }
     CHECK_CUDA(cudaGetLastError());
     for (int r = 0; r < WARPMUP; ++r) {
-        laplacian_bricks<<<grid, block>>>(d_in, d_out2, d_c);
+        f3d_bricks<<<grid, block>>>(d_in, d_out2, d_c);
     }
     CHECK_CUDA(cudaGetLastError());
     CHECK_CUDA(cudaDeviceSynchronize());
@@ -179,7 +190,7 @@ int main(int argc, char** argv) {
     // Time f3d_naive
     CHECK_CUDA(cudaEventRecord(start));
     for (int r = 0; r < REPS; ++r) {
-        laplacian_naive<<<grid, block>>>(d_in, d_out, d_c);
+        f3d_naive<<<grid, block>>>(d_in, d_out, d_c);
     }
     CHECK_CUDA(cudaEventRecord(stop));
     CHECK_CUDA(cudaEventSynchronize(stop));
@@ -189,7 +200,7 @@ int main(int argc, char** argv) {
     // Time f3d_bricks
     CHECK_CUDA(cudaEventRecord(start2));
     for (int r = 0; r < REPS; ++r) {
-        laplacian_bricks<<<grid, block>>>(d_in, d_out2, d_c);
+        f3d_bricks<<<grid, block>>>(d_in, d_out2, d_c);
     }
     CHECK_CUDA(cudaEventRecord(stop2));
     CHECK_CUDA(cudaEventSynchronize(stop2));
@@ -198,8 +209,8 @@ int main(int argc, char** argv) {
 
     // Report
     printf("Timing over %d repetitions:\n", REPS);
-    printf("  laplacian_naive : %.3f ms total (%.3f ms / launch)\n", ms_naive, ms_naive / REPS);
-    printf("  laplacian_bricks: %.3f ms total (%.3f ms / launch)\n", ms_bricks, ms_bricks / REPS);
+    printf("  f3d_naive : %.3f ms total (%.3f ms / launch)\n", ms_naive, ms_naive / REPS);
+    printf("  f3d_bricks: %.3f ms total (%.3f ms / launch)\n", ms_bricks, ms_bricks / REPS);
 
     // Cleanup
     CHECK_CUDA(cudaEventDestroy(start));
@@ -213,3 +224,4 @@ int main(int argc, char** argv) {
 
     return 0;
 }
+
