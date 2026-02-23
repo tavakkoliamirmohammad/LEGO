@@ -1,6 +1,6 @@
 // RUN: lego-opt -lego-verify-consistency %s 2>&1 | FileCheck %s
 
-// CHECK: warning: inv region yields constant zero, but apply region is non-constant or non-zero. Potential inconsistency.
+// CHECK: error: Inconsistent GenP: apply and inv regions are not bijections.
 func.func @inconsistent_genp(%i: index, %j: index) -> index {
   %c4 = arith.constant 4 : index
   %layout = lego.gen_p [%c4, %c4] apply (%a: index, %b: index) {
@@ -14,7 +14,7 @@ func.func @inconsistent_genp(%i: index, %j: index) -> index {
   return %f : index
 }
 
-// CHECK-NOT: warning
+// CHECK-NOT: error
 func.func @consistent_genp(%i: index, %j: index) -> (index, index) {
   %cc4 = arith.constant 4 : index
   %cc8 = arith.constant 8 : index
