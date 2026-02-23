@@ -9,6 +9,7 @@ add_mlir_dialect_library(MLIRLego
   LegoArithSimplification.cpp
   LegoGenerateBoundsChecks.cpp
   LegoExternalSMTVerifier.cpp
+  SMTUtils.cpp
   Passes.cpp
 
   DEPENDS
