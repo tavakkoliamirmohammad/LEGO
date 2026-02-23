@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
   mlir::arith::registerArithPasses();
   // Register LEGO passes
   mlir::lego::registerLegoToArithPass();
-  mlir::lego::registerLegoDesugarPass();
+  mlir::lego::registerLegoNormalizationPass();
   mlir::lego::registerLegoVerifyConsistencyPass();
   mlir::lego::registerLegoArithSimplificationPass();
   mlir::lego::registerLegoGenerateBoundsChecksPass();

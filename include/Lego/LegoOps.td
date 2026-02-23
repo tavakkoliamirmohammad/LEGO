@@ -247,7 +247,7 @@ def AssumeBoundsOp : Lego_Op<"assume_bounds", [AttrSizedOperandSegments]> {
   let description = [{
     A sugar operation that asserts the value is bounded by optional lower and/or upper bounds.
     Lower bounded (inclusive) and upper bounded (exclusive).
-    Lowered to `lego.assume` and `arith.cmpi` during desugaring.
+    Lowered to `lego.assume` and `arith.cmpi` during normalization.
   }];
   let arguments = (ins Index:$value, Optional<Index>:$lb, Optional<Index>:$ub);
   let assemblyFormat = "$value (`lb` `:` $lb^)? (`ub` `:` $ub^)? attr-dict";

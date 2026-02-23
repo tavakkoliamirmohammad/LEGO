@@ -1,7 +1,7 @@
-// RUN: lego-opt %s -lego-desugar | FileCheck %s
+// RUN: lego-opt %s -lego-normalization | FileCheck %s
 
-// CHECK-LABEL: func @test_row_desugar
-func.func @test_row_desugar() -> !lego.layout {
+// CHECK-LABEL: func @test_row_normalization
+func.func @test_row_normalization() -> !lego.layout {
   // Row(10) -> RegP([10], [0])
   %c10 = arith.constant 10 : index
   %0 = lego.row [%c10] : !lego.layout
@@ -10,8 +10,8 @@ func.func @test_row_desugar() -> !lego.layout {
 // CHECK: %[[REGP:.*]] = lego.reg_p perm [0] dims[%{{.*}}]
 // CHECK: return %[[REGP]]
 
-// CHECK-LABEL: func @test_col_desugar
-func.func @test_col_desugar() -> !lego.layout {
+// CHECK-LABEL: func @test_col_normalization
+func.func @test_col_normalization() -> !lego.layout {
   // Col(10, 20) -> RegP([10, 20], [1, 0])
   %c10 = arith.constant 10 : index
   %c20 = arith.constant 20 : index

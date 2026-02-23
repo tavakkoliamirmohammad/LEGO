@@ -40,7 +40,7 @@ add_definitions(-DLEGO_Z3_EXECUTABLE="${Z3_BIN_PATH}")
 add_mlir_dialect_library(MLIRLego
   LegoDialect.cpp
   LegoOps.cpp
-  LegoDesugar.cpp
+  LegoNormalization.cpp
   LegoToArith.cpp
   LegoVerifyGenpConsistency.cpp
   LegoArithSimplification.cpp

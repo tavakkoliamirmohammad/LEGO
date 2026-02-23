@@ -1,4 +1,4 @@
-#define GEN_PASS_DEF_LEGODESUGARPASS
+#define GEN_PASS_DEF_LEGONORMALIZATIONPASS
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -190,10 +190,10 @@ struct AssumeBoundsOpRewrite : public OpRewritePattern<AssumeBoundsOp> {
 // Pass Definition
 // ============================================================================
 
-struct LegoDesugarPassImpl
-    : public mlir::lego::impl::LegoDesugarPassBase<LegoDesugarPassImpl> {
-  using mlir::lego::impl::LegoDesugarPassBase<
-      LegoDesugarPassImpl>::LegoDesugarPassBase;
+struct LegoNormalizationPassImpl
+    : public mlir::lego::impl::LegoNormalizationPassBase<LegoNormalizationPassImpl> {
+  using mlir::lego::impl::LegoNormalizationPassBase<
+      LegoNormalizationPassImpl>::LegoNormalizationPassBase;
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -213,8 +213,8 @@ struct LegoDesugarPassImpl
 
 namespace mlir {
 namespace lego {
-std::unique_ptr<Pass> createLegoDesugarPass() {
-  return std::make_unique<LegoDesugarPassImpl>();
+std::unique_ptr<Pass> createLegoNormalizationPass() {
+  return std::make_unique<LegoNormalizationPassImpl>();
 }
 } // namespace lego
 } // namespace mlir

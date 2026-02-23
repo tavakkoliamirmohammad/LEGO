@@ -1,4 +1,4 @@
-// RUN: lego-opt --lego-desugar --lego-to-arith %s | FileCheck %s
+// RUN: lego-opt --lego-normalization --lego-to-arith %s | FileCheck %s
 
 // ============================================================================
 // Row

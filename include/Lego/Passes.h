@@ -14,7 +14,7 @@ namespace mlir {
 namespace lego {
 
 std::unique_ptr<Pass> createLegoToArithPass();
-std::unique_ptr<Pass> createLegoDesugarPass();
+std::unique_ptr<Pass> createLegoNormalizationPass();
 std::unique_ptr<Pass> createLegoVerifyConsistencyPass();
 std::unique_ptr<Pass> createLegoArithSimplificationPass();
 std::unique_ptr<Pass> createLegoGenerateBoundsChecksPass();
@@ -23,7 +23,7 @@ std::unique_ptr<Pass> createLegoExternalSMTVerifierPass();
 void registerLegoPipelines();
 
 #define GEN_PASS_DECL_LEGOTOARITHPASS
-#define GEN_PASS_DECL_LEGODESUGARPASS
+#define GEN_PASS_DECL_LEGONORMALIZATIONPASS
 #define GEN_PASS_DECL_LEGOVERIFYCONSISTENCYPASS
 #define GEN_PASS_DECL_LEGOARITHSIMPLIFICATIONPASS
 #define GEN_PASS_DECL_LEGOGENERATEBOUNDSCHECKSPASS
