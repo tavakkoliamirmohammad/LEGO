@@ -9,3 +9,4 @@ test.*
 build
 third_party/**
 .agents
+*.egg-info/

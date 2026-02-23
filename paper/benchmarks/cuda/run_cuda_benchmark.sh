@@ -1,4 +1,3 @@
-export PYTHONPATH=../../../python:$PYTHONPATH
 cd "$(dirname "$0")"
 cd nw
 

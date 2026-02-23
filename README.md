@@ -98,6 +98,15 @@ From the root of the LEGO repository:
 
 This script creates a virtual environment and installs all required Python packages (including Triton and PyTorch) using the versions listed above.
 
+### 5. Build and install the LEGO compiler
+
+Activate the virtual environment and install the LEGO Python package in editable mode:
+
+```bash
+source venv/bin/activate
+pip install -e ./python
+```
+
 ## Experiment Workflow
 
 From the root of the artifact repository, the experiments can be reproduced with the following steps:
