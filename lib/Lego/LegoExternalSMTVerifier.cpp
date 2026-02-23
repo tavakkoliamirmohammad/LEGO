@@ -34,26 +34,7 @@ struct SMTBuilder {
     : builder(b), state(s) {}
 
   std::string getSSAName(Value v) {
-    std::string s;
-    llvm::raw_string_ostream os(s);
-    v.printAsOperand(os, state);
-    
-    // Sanitize the name for SMT-LIB
-    std::string sanitized;
-    for (char c : s) {
-      if (isalnum(c)) {
-        sanitized += c;
-      } else if (c == '%') {
-        // Skip prefix
-      } else {
-        sanitized += '_';
-      }
-    }
-    
-    if (sanitized.empty() || sanitized.find("UNKNOWN") != std::string::npos) {
-      return "v" + std::to_string(nextId++);
-    }
-    return sanitized;
+    return "v" + std::to_string(nextId++);
   }
 
   Value getOrCreate(Value v) {
@@ -311,14 +292,7 @@ private:
     close(out_pipe[0]);
     close(in_pipe[1]);
 
-    // Send SMT-LIB to Z3. 
-    // The SMT-LIB export usually ends with (check-sat)\n(reset).
-    // We want to insert (get-model) between them.
     std::string modifiedLib = smtLib;
-    size_t pos = modifiedLib.find("(check-sat)");
-    if (pos != std::string::npos) {
-        modifiedLib.insert(pos + 11, "\n(get-model)");
-    }
     
     write(out_pipe[1], modifiedLib.c_str(), modifiedLib.size());
     close(out_pipe[1]); // EOF to Z3
@@ -334,9 +308,7 @@ private:
     waitpid(pid, nullptr, 0);
 
     // Z3 output handling:
-    // If we see "sat", the subsequent output is the model.
     if (result.find("sat") != std::string::npos && result.find("unsat") == std::string::npos) {
-        llvm::errs() << "--- Z3 Counter-example ---\n" << result << "\n--------------------------\n";
         return true;
     }
     return false;
