@@ -261,8 +261,8 @@ __device__ __host__ inline
 void invOpt(int ii, int jj, int tid, int& ty, int& i_, int& tx, int& j_) {
   i_  = ii;
   j_  = jj;
-  ty = tid % T;
-  tx = ((tid)/(T));
+  ty = ((tid)/(T));
+  tx = tid % T;
 }
 
 

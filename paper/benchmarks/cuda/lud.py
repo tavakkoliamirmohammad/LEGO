@@ -9,7 +9,7 @@ constraints = [le_constraint(ii, R), le_constraint(
     jj, R), le_constraint(tid, T * T), le_constraint(0, tid)]
 
 l = OrderBy(Row(R * T, R * T)).GroupBy([(R, R), (T, T)], constraints)
-i, j, tidx, tidy = l.inv(expr)
+i, j, tidy, tidx = l.inv(expr)
 
 c_printer = LEGOCCodePrinter()
 def _p(expr):
