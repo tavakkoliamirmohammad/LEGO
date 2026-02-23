@@ -1,4 +1,4 @@
-#define GEN_PASS_DEF_LEGOVERIFYCONSISTENCYPASS
+#define GEN_PASS_DEF_LEGOVERIFYGENPCONSISTENCYPASS
 #include "Lego/LegoOps.h"
 #include "Lego/Passes.h"
 #include "Lego/LegoUtils.h"
@@ -21,8 +21,8 @@ using namespace mlir::lego;
 
 namespace {
 
-struct LegoVerifyConsistencyPassImpl
-    : public mlir::lego::impl::LegoVerifyConsistencyPassBase<LegoVerifyConsistencyPassImpl> {
+struct LegoVerifyGenpConsistencyPassImpl
+    : public mlir::lego::impl::LegoVerifyGenpConsistencyPassBase<LegoVerifyGenpConsistencyPassImpl> {
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<smt::SMTDialect>();
   }
@@ -112,8 +112,8 @@ private:
 
 namespace mlir {
 namespace lego {
-std::unique_ptr<Pass> createLegoVerifyConsistencyPass() {
-  return std::make_unique<LegoVerifyConsistencyPassImpl>();
+std::unique_ptr<Pass> createLegoVerifyGenpConsistencyPass() {
+  return std::make_unique<LegoVerifyGenpConsistencyPassImpl>();
 }
 } // namespace lego
 } // namespace mlir

@@ -43,7 +43,7 @@ Allows strictly user-defined logic for layouts that cannot be expressed as simpl
 -   **Regions**:
     -   `apply`: Takes N indices, returns 1 flat index.
     -   `inv`: Takes 1 flat index, returns N indices.
--   **Verification**: The `lego-verify-consistency` pass checks if `apply` and `inv` are mathematically consistent.
+-   **Verification**: The `lego-verify-genp-consistency` pass checks if `apply` and `inv` are mathematically consistent.
 
 **Example**:
 ```mlir

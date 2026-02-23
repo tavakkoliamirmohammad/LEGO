@@ -27,14 +27,14 @@ def LegoToArithPass : Pass<"lego-to-arith", "mlir::ModuleOp"> {
   ];
 }
 
-def LegoVerifyConsistencyPass : Pass<"lego-verify-consistency", "mlir::ModuleOp"> {
+def LegoVerifyGenpConsistencyPass : Pass<"lego-verify-genp-consistency", "mlir::ModuleOp"> {
   let summary = "Verify the consistency between apply and inv regions in gen_p";
   let description = [{
     This pass analyzes lego.gen_p operations to ensure that the 'apply' and 'inv'
     regions are truly inverses of each other. It performs symbolic composition
     and simplification to detect inconsistencies.
   }];
-  let constructor = "mlir::lego::createLegoVerifyConsistencyPass()";
+  let constructor = "mlir::lego::createLegoVerifyGenpConsistencyPass()";
   let dependentDialects = [
     "mlir::lego::LegoDialect",
     "mlir::arith::ArithDialect",
