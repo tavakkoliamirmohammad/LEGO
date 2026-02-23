@@ -45,13 +45,28 @@ def jit(fn=None, **kwargs):
     def decorator(fn):
         # Unwrap through Triton decorator layers (Autotuner -> JITFunction -> function)
         original_fn = fn
+        
+        # Check if we were called with just a function, or from get_kernel_source
+        return_source = kwargs.get('return_source', False)
+        
         wrappers = []  # Track wrappers to re-apply later
         while hasattr(original_fn, 'fn'):
             wrappers.append(original_fn)
             original_fn = original_fn.fn
             
+        source_fn = original_fn
+        while hasattr(source_fn, 'src_fn'):
+            source_fn = source_fn.src_fn
+            
         # Get source code from the original unwrapped function
-        source = textwrap.dedent(inspect.getsource(original_fn))
+        try:
+            source = textwrap.dedent(inspect.getsource(source_fn))
+        except TypeError:
+            # Triton might wrap it such that getsource fails. Try to get original source if saved
+            if hasattr(original_fn, 'src'):
+                source = original_fn.src
+            else:
+                raise
         
         # Parse into AST
         tree = ast.parse(source)
@@ -298,6 +313,13 @@ def jit(fn=None, **kwargs):
             print(new_source)
             print("=== End Generated Kernel ===")
         
+        if return_source:
+            # If the user just wants the generated Triton code, return it as a string
+            # Clean up the file if not explicitly asked to save
+            if not _save:
+                os.remove(temp_file)
+            return new_source
+            
         # Compile and execute
         code_obj = compile(tree, filename=temp_file, mode='exec')
         namespace = original_fn.__globals__.copy()
@@ -334,3 +356,10 @@ def jit(fn=None, **kwargs):
     if fn is not None:
         return decorator(fn)
     return decorator
+
+def get_kernel_source(fn):
+    """
+    Utility function to retrieve the raw generated Triton source 
+    code for a @lego.jit decorated function without compiling it.
+    """
+    return jit(fn, return_source=True)

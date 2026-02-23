@@ -5,13 +5,13 @@ original
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
 ./needle 32768 10
 WG size of kernel = 64 
-Execution time: 64.231712
+Execution time: 64.487152
 
 antidiag
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
 ./needle 32768 10
 WG size of kernel = 64 
-Execution time: 31.274342
+Execution time: 43.160851
 
 
 =====================================
@@ -21,13 +21,13 @@ original
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
 ./needle 16384 10
 WG size of kernel = 64 
-Execution time: 19.695091
+Execution time: 19.752569
 
 antidiag
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
 ./needle 16384 10
 WG size of kernel = 64 
-Execution time: 12.367600
+Execution time: 13.487820
 
 
 =====================================
@@ -37,13 +37,13 @@ original
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
 ./needle 8192 10
 WG size of kernel = 64 
-Execution time: 8.209180
+Execution time: 6.506290
 
 antidiag
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
 ./needle 8192 10
 WG size of kernel = 64 
-Execution time: 5.990470
+Execution time: 4.774190
 
 
 =====================================
@@ -53,13 +53,13 @@ original
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
 ./needle 4096 10
 WG size of kernel = 64 
-Execution time: 4.020090
+Execution time: 3.108750
 
 antidiag
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
 ./needle 4096 10
 WG size of kernel = 64 
-Execution time: 3.029040
+Execution time: 2.222560
 
 
 =====================================
@@ -69,13 +69,13 @@ original
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
 ./needle 2048 10
 WG size of kernel = 64 
-Execution time: 2.124750
+Execution time: 1.701270
 
 antidiag
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
 ./needle 2048 10
 WG size of kernel = 64 
-Execution time: 1.601070
+Execution time: 1.153590
 
 
 =====================================
@@ -85,12 +85,12 @@ original
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=0 -o needle needle.cu
 ./needle 1024 10
 WG size of kernel = 64 
-Execution time: 1.035800
+Execution time: 0.772200
 
 antidiag
 nvcc -O3 -DRD_WG_SIZE_0_0=64 -DOPTIM=2 -o needle needle.cu
 ./needle 1024 10
 WG size of kernel = 64 
-Execution time: 0.754870
+Execution time: 0.584000
 
 

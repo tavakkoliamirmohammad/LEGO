@@ -1,3 +1,4 @@
+
 #include <cuda.h>
 #include <stdio.h>
 
@@ -257,12 +258,13 @@ lud_internal_reg_tiled(float *m, int matrix_dim, int offset)
 
 template<int T, int R>
 __device__ __host__ inline
-void invOpt(int ii, int jj, int tid, int& ty, int& i, int& tx, int& j) {
-  i  = {{ i }};
-  j  = {{ j }};
-  ty = {{ tidx }};
-  tx = {{ tidy}};
+void invOpt(int ii, int jj, int tid, int& ty, int& i_, int& tx, int& j_) {
+  i_  = ii;
+  j_  = jj;
+  ty = ((tid)/(T));
+  tx = tid % T;
 }
+
 
 /**
  * We aim to perform thread coarsening by expressing a layout
@@ -387,4 +389,5 @@ void lud_cuda(float *m, int matrix_dim)
   }
   lud_diagonal<<<1,BLOCK_SIZE>>>(m, matrix_dim, i);
 }
+
 

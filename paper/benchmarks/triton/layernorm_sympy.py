@@ -1,69 +1,90 @@
-
 import torch
 import triton
 import triton.language as tl
+import lego
+from lego.lego import *
+from sympy import Max, Min
 
-@triton.jit
-def _lego_layer_norm_fwd_fused(X, Y, W, B, Mean, Rstd, M, N, eps, BLOCK_SIZE_N: tl.constexpr):
+def _lego_layer_norm_fwd_fused(
+    X, Y, W, B, Mean, Rstd,
+    M, N, eps,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    L_XY = OrderBy(Row(M, N)).TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
+    L_M = OrderBy(Row(M)).TileBy([M])
+    
     pid = tl.program_id(0)
     range_n = tl.arange(0, BLOCK_SIZE_N)
     _mean = tl.zeros([BLOCK_SIZE_N], dtype=tl.float32)
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        offset_x = BLOCK_SIZE_N * k + N * pid + tl.arange(0, BLOCK_SIZE_N)
-        cols = BLOCK_SIZE_N * k + tl.arange(0, BLOCK_SIZE_N)
-        a = tl.load(X + offset_x, mask=cols < N, other=0.0).to(tl.float32)
+        offset_x = L_XY[pid, k, 0, :]
+        cols = L_XY[0, k, 0, :]
+        a = tl.load(X + offset_x, mask=cols < N, other=0.).to(tl.float32)
         _mean += a
     mean = tl.sum(_mean) / N
+    
     _var = tl.zeros([BLOCK_SIZE_N], dtype=tl.float32)
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        offset_x = BLOCK_SIZE_N * k + N * pid + tl.arange(0, BLOCK_SIZE_N)
-        cols = BLOCK_SIZE_N * k + tl.arange(0, BLOCK_SIZE_N)
-        x = tl.load(X + offset_x, mask=cols < N, other=0.0).to(tl.float32)
-        x = tl.where(cols < N, x - mean, 0.0)
+        offset_x = L_XY[pid, k, 0, :]
+        cols = L_XY[0, k, 0, :]
+        x = tl.load(X + offset_x, mask=cols < N, other=0.).to(tl.float32)
+        x = tl.where(cols < N, x - mean, 0.)
         _var += x * x
     var = tl.sum(_var) / N
     rstd = 1 / tl.sqrt(var + eps)
-    tl.store(Mean + pid, mean)
-    tl.store(Rstd + pid, rstd)
+    
+    tl.store(Mean + L_M[pid], mean)
+    tl.store(Rstd + L_M[pid], rstd)
+    
     for k in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        cols = BLOCK_SIZE_N * k + tl.arange(0, BLOCK_SIZE_N)
+        cols = L_XY[0, k, 0, :]
         mask = cols < N
         w = tl.load(W + cols, mask=mask)
         b = tl.load(B + cols, mask=mask)
-        offset_x = BLOCK_SIZE_N * k + N * pid + tl.arange(0, BLOCK_SIZE_N)
-        x = tl.load(X + offset_x, mask=mask, other=0.0).to(tl.float32)
-        x_hat = rstd * (-mean + x)
-        y = b + w * x_hat
+        offset_x = L_XY[pid, k, 0, :]
+        x = tl.load(X + offset_x, mask=mask, other=0.).to(tl.float32)
+        x_hat = (x - mean) * rstd
+        y = x_hat * w + b
         tl.store(Y + offset_x, y, mask=mask)
 
-@triton.jit
 def _lego_layer_norm_bwd_dx_fused(DX, DY, DW, DB, X, W, Mean, Rstd, Lock, stride, M, N, GROUP_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
     pid = tl.program_id(0)
     range_n = tl.arange(0, BLOCK_SIZE_N)
     mask = range_n < N
     lock_id = pid % GROUP_SIZE_M
     Lock_ptr = Lock + lock_id
-    Count = Lock_ptr + GROUP_SIZE_M
-    offset_dwdb = N * lock_id + tl.arange(0, BLOCK_SIZE_N)
+    Count = Lock_ptr + GROUP_SIZE_M   
+    
+    L_XY = OrderBy(Row(M, N)).TileBy([M, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
+    L_M = OrderBy(Row(M)).TileBy([M])
+    L_W = OrderBy(Row(1, N)).TileBy([1, N / BLOCK_SIZE_N], [1, BLOCK_SIZE_N])
+    W_BWD_L = OrderBy(Row(BLOCK_SIZE_N)).TileBy([BLOCK_SIZE_N])
+    
+    offset_dwdb = L_XY[lock_id, 0, 0, :]
     DW_ptrs = DW + offset_dwdb
     DB_ptrs = DB + offset_dwdb
-    offset_x = N * pid + tl.arange(0, BLOCK_SIZE_N)
+    
+    offset_x = L_XY[pid, 0, 0, :]
     x = tl.load(X + offset_x, mask=mask, other=0).to(tl.float32)
     dy = tl.load(DY + offset_x, mask=mask, other=0).to(tl.float32)
-    offset_w = tl.arange(0, BLOCK_SIZE_N)
+    
+    offset_w = W_BWD_L[:]
     w = tl.load(W + offset_w, mask=mask).to(tl.float32)
-    mean = tl.load(Mean + pid)
-    rstd = tl.load(Rstd + pid)
-    xhat = rstd * (-mean + x)
-    wdy = dy * w
-    xhat = tl.where(mask, xhat, 0.0)
-    wdy = tl.where(mask, wdy, 0.0)
+    
+    mean = tl.load(Mean + L_M[pid])
+    rstd = tl.load(Rstd + L_M[pid])
+    
+    xhat = (x - mean) * rstd
+    wdy = w * dy
+    xhat = tl.where(mask, xhat, 0.)
+    wdy = tl.where(mask, wdy, 0.)
     c1 = tl.sum(xhat * wdy) / N
     c2 = tl.sum(wdy) / N
-    dx = rstd * (-c1 * xhat - c2 + wdy)
+    dx = (wdy - (xhat * c1 + c2)) * rstd
+    
     tl.store(DX + offset_x, dx, mask=mask)
     partial_dw = (dy * xhat).to(w.dtype)
-    partial_db = dy.to(w.dtype)
+    partial_db = (dy).to(w.dtype)
     while tl.atomic_cas(Lock_ptr, 0, 1) == 1:
         pass
     count = tl.load(Count)
@@ -75,6 +96,20 @@ def _lego_layer_norm_bwd_dx_fused(DX, DY, DW, DB, X, W, Mean, Rstd, Lock, stride
     tl.store(DW_ptrs, partial_dw, mask=mask)
     tl.store(DB_ptrs, partial_db, mask=mask)
     tl.atomic_xchg(Lock_ptr, 0)
+
+kernel_source_fwd = lego.get_kernel_source(_lego_layer_norm_fwd_fused)
+kernel_source_bwd = lego.get_kernel_source(_lego_layer_norm_bwd_dx_fused)
+
+template = f"""
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+{kernel_source_fwd}
+
+@triton.jit
+{kernel_source_bwd}
 
 @triton.jit
 def _layer_norm_bwd_dwdb(DW, DB, FINAL_DW, FINAL_DB, M, N, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
@@ -163,7 +198,7 @@ def test_lego_layer_norm(M, N, dtype, eps=1e-5, device='cuda'):
     assert torch.allclose(dx_tri, dx_ref, atol=2e-2, rtol=1e-2)
     assert torch.allclose(db_tri, db_ref, atol=2e-2, rtol=1e-2)
     assert torch.allclose(dw_tri, dw_ref, atol=2e-2, rtol=1e-2)
-    print(f"✅ LayerNorm match for M={M}, N={N}")
+    print(f"✅ LayerNorm match for M={{M}}, N={{N}}")
 
 @triton.testing.perf_report([
     triton.testing.Benchmark(
@@ -175,7 +210,7 @@ def test_lego_layer_norm(M, N, dtype, eps=1e-5, device='cuda'):
         styles=[('blue', '-'), ('orange', '-')],
         ylabel='GB/s',
         plot_name='layer-norm-forward',
-        args={'M': 4096, 'dtype': torch.float16, 'mode': 'forward'},
+        args={{'M': 4096, 'dtype': torch.float16, 'mode': 'forward'}},
     ),
     triton.testing.Benchmark(
         x_names=['N'],
@@ -186,7 +221,7 @@ def test_lego_layer_norm(M, N, dtype, eps=1e-5, device='cuda'):
         styles=[('blue', '-'), ('orange', '-')],
         ylabel='GB/s',
         plot_name='layer-norm-backward',
-        args={'M': 4096, 'dtype': torch.float16, 'mode': 'backward'},
+        args={{'M': 4096, 'dtype': torch.float16, 'mode': 'backward'}},
     )
 ])
 def benchmark(M, N, dtype, provider, mode, eps=1e-5, device='cuda'):
@@ -214,4 +249,5 @@ def benchmark(M, N, dtype, provider, mode, eps=1e-5, device='cuda'):
 if __name__ == "__main__":
     test_lego_layer_norm(1151, 8192, torch.float16)
     benchmark.run(print_data=True, show_plots=False)
-
+"""
+print(template)

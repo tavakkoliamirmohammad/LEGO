@@ -1,20 +1,28 @@
-export PYTHONPATH=../../../python:$PYTHONPATH
-cd "$(dirname "$0")"
-cd nw
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+BASE_DIR="$SCRIPT_DIR/../.."
 
 echo "Running NW"
-bash run.sh > ../../../results/cuda/nw.txt
+cd $BASE_DIR/generated/cuda/nw
+bash run.sh > $BASE_DIR/results/cuda/nw.txt
+cd -
 
-cd ..
 echo "Running LUD"
-bash run_lud_cuda.sh  > ../../results/cuda/lud.txt
+cd $BASE_DIR/generated/cuda/lud
+bash run.sh > $BASE_DIR/results/cuda/lud.txt
+cd -
 
-echo "Running Bricks"
-bash gen_bricks_f3d.bash  > ../../results/cuda/bricks-f3d.txt
-bash gen_bricks_laplace.bash  > ../../results/cuda/bricks-laplace.txt
+echo "Running Bricks f3d"
+cd $BASE_DIR/generated/cuda/bricks
+bash run.sh > $BASE_DIR/results/cuda/bricks-f3d.txt
+cd -
+
+echo "Running Bricks laplace"
+cd $BASE_DIR/generated/cuda/bricks-laplace
+bash run.sh > $BASE_DIR/results/cuda/bricks-laplace.txt
+cd -
 
 
-cd ../../plots
+cd $SCRIPT_DIR/../plots
 echo "Plotting NW"
 python3 cuda_nw.py
 echo "Plotting LUD"
@@ -22,4 +30,4 @@ python3 lud.py
 echo "Plotting Bricks"
 python3 bricks.py
 
-cd ../../../
+cd $SCRIPT_DIR

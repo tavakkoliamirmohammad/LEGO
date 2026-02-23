@@ -1,4 +1,3 @@
-export PYTHONPATH=../../python:$PYTHONPATH
 cd "$(dirname "$0")"
 echo "Run MLIR Benchmarks"
 bash mlir/run_mlir_benchmark.sh
