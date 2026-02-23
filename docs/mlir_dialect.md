@@ -130,7 +130,7 @@ The LEGO dialect provides several canonicalization patterns to simplify layout e
 
 The dialect includes a dedicated verification pass to ensure layout consistency:
 
-- **Consistency Check (`lego-verify-consistency`)**: Analyzes `lego.gen_p` operations to verify that the `apply` and `inv` regions are mathematically consistent (i.e., they define an actual inverse mapping). This pass uses symbolic evaluation to detect potential bugs in manually defined layouts.
+- **Consistency Check (`lego-verify-genp-consistency`)**: Analyzes `lego.gen_p` operations to verify that the `apply` and `inv` regions are mathematically consistent (i.e., they define an actual inverse mapping). This pass uses symbolic evaluation to detect potential bugs in manually defined layouts.
 
 ## Semantics
 

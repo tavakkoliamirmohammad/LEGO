@@ -1,4 +1,4 @@
-// RUN: lego-opt -lego-verify-consistency %s 2>&1 | FileCheck %s
+// RUN: lego-opt -lego-verify-genp-consistency %s 2>&1 | FileCheck %s
 
 // CHECK: error: Inconsistent GenP: apply and inv regions are not bijections.
 func.func @inconsistent_genp(%i: index, %j: index) -> index {
