@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lego"
 version = "0.1.0"
-description = "LEGO: A library for compiling MLIR/Triton kernels via Layout Expressions"
+description = "LEGO: A Layout Expression Language for Code Generation of Hierarchical Mapping"
 authors = [
-    { name = "LEGO Authors" }
+    { name = "Amir Mohammad Tavakkoli" }
 ]
 requires-python = ">=3.8"
 dependencies = [
