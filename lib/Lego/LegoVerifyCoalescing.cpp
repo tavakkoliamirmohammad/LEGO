@@ -84,40 +84,49 @@ private:
         Type(b.getType<smt::IntType>()),
         b.getStringAttr(baseThreadVar));
 
+    // Get the layout and check it's a gen_p
+    GenPOp genP = dyn_cast_or_null<GenPOp>(apply.getLayout().getDefiningOp());
+    if (!genP || genP.getBody().empty()) {
+      // Cannot verify non-gen_p layouts yet
+      return success();
+    }
+
     // Compute addresses for all 32 threads
     SmallVector<Value> addresses;
     SmallVector<std::string> addrVarNames;
 
     for (int t = 0; t < WARP_SIZE; ++t) {
-      // Thread ID = base_thread + t
+      // We'll create a fresh builder context for each thread
+      DenseMap<Value, Value> threadValMap;
+
+      // Map the base thread parameter to (baseThread + t)
       Value tConst = smt::IntConstantOp::create(
           b, apply.getLoc(), b.getI64IntegerAttr(t));
       Value threadId = smt::IntAddOp::create(
           b, apply.getLoc(), ValueRange{baseThread, tConst});
 
-      // Map thread ID to indices
-      // Assumption: First dimension is threaded, rest are 0
-      SmallVector<Value> indices;
-      for (size_t i = 0; i < numIndices; ++i) {
-        if (i == 0) {
-          indices.push_back(threadId);
-        } else {
-          indices.push_back(smt::IntConstantOp::create(
-              b, apply.getLoc(), b.getI64IntegerAttr(0)));
-        }
+      // Map function arguments to thread-specific values
+      auto parentFunc = apply->getParentOfType<func::FuncOp>();
+      if (parentFunc && parentFunc.getNumArguments() > 0) {
+        // Assume first argument is the thread ID parameter
+        threadValMap[parentFunc.getArgument(0)] = threadId;
       }
 
-      // Build the layout apply region to compute flat index
-      GenPOp genP = dyn_cast_or_null<GenPOp>(apply.getLayout().getDefiningOp());
-      if (!genP || genP.getBody().empty()) {
-        // Cannot verify non-gen_p layouts yet
-        return success();
+      // Build index values for this thread using a helper
+      SMTBuilder threadBuilder(b, state, nextId);
+      threadBuilder.valMap = threadValMap;
+
+      SmallVector<Value> concreteIndices;
+      for (Value idx : apply.getIndices()) {
+        Value smtIdx = threadBuilder.getOrCreate(idx);
+        concreteIndices.push_back(smtIdx);
       }
 
+      // Compute flat index using the layout's apply region
       SmallVector<Value> flatResults;
-      builder.buildRegion(genP.getBody(), indices, flatResults);
+      threadBuilder.buildRegion(genP.getBody(), concreteIndices, flatResults);
       if (flatResults.size() != 1) {
-        return success(); // Skip if unexpected
+        return success();
       }
 
       addresses.push_back(flatResults[0]);
@@ -137,6 +146,16 @@ private:
       Value notUnitStride = smt::DistinctOp::create(
           b, apply.getLoc(), ValueRange{diff, one});
       nonSequential.push_back(notUnitStride);
+    }
+
+    // Declare named variables for addresses (BEFORE exporting!)
+    for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
+      Value namedAddr = smt::DeclareFunOp::create(
+          b, apply.getLoc(),
+          Type(b.getType<smt::IntType>()),
+          b.getStringAttr("addr_" + std::to_string(t)));
+      Value eq = smt::EqOp::create(b, apply.getLoc(), namedAddr, addresses[t]);
+      smt::AssertOp::create(b, apply.getLoc(), eq);
     }
 
     Value anyNonSequential = smt::OrOp::create(b, apply.getLoc(), nonSequential);
@@ -159,16 +178,42 @@ private:
     }
 
     SmallVector<std::string> varNames = {baseThreadVar};
-    smtLib += generateGetValueCommands(varNames);
+
+    // Add named variables for a sample of addresses to show the pattern
+    SmallVector<std::string> allVars = varNames;
+    // Show first 8 addresses to demonstrate the non-coalesced pattern
+    for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
+      allVars.push_back("addr_" + std::to_string(t));
+    }
+
+    // Remove the (reset) command that clears solver state before get-value
+    size_t resetPos = smtLib.rfind("(reset)");
+    if (resetPos != std::string::npos) {
+      smtLib.erase(resetPos, 8); // Remove "(reset)\n"
+    }
+
+    smtLib += generateGetValueCommands(allVars);
 
     SMTResult result = runZ3WithModel(smtLib);
 
     if (result.isSat) {
       std::string warnMsg = "Layout may produce non-coalesced memory accesses (unit stride not guaranteed)";
       if (result.model.count(baseThreadVar)) {
-        warnMsg += "\n  Counter-example base thread: " +
+        warnMsg += "\n  Counter-example starting at thread: " +
                    std::to_string(result.model[baseThreadVar]);
       }
+
+      // Show sample of addresses to illustrate the problem
+      warnMsg += "\n  Sample addresses (first 8 threads):";
+      for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
+        std::string addrVar = "addr_" + std::to_string(t);
+        if (result.model.count(addrVar)) {
+          warnMsg += "\n    Thread " + std::to_string(t) + ": " +
+                     std::to_string(result.model[addrVar]);
+        }
+      }
+      warnMsg += "\n  (For coalescing, addresses should be consecutive: 0, 1, 2, 3, ...)";
+
       apply.emitWarning(warnMsg);
       return failure();
     } else if (result.isUnsat) {

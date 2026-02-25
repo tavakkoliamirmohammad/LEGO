@@ -1,4 +1,4 @@
-// RUN: lego-opt -lego-verify-bank-conflicts %s -split-input-file
+// RUN: lego-opt -lego-verify-bank-conflicts %s -split-input-file -verify-diagnostics
 
 // Test 1: Conflict-free layout - row-major with 32 columns (should pass)
 func.func @test_conflict_free_row_major(%base_tid: index) {
@@ -49,11 +49,11 @@ func.func @test_conflict_column_major(%base_tid: index) {
     lego.yield %i_out, %j_out : index, index
   } : !lego.layout
 
-  // Warp accesses: (tid, 0) - consecutive rows, same column
-  // All addresses differ by 32*4=128 bytes, map to same bank
+  // Warp accesses: (0, tid) - same row across columns
+  // Addresses: tid * 32, map to same bank every 32 elements
+  %i = arith.constant 0 : index
   %c0_1 = arith.constant 0 : index
-  %i = arith.addi %base_tid, %c0_1 : index
-  %j = arith.constant 0 : index
+  %j = arith.addi %base_tid, %c0_1 : index
   // expected-warning@+1 {{Layout may cause shared memory bank conflicts}}
   %addr = lego.apply %layout(%i, %j) : !lego.layout
 
@@ -191,18 +191,22 @@ func.func @test_transpose_conflicts(%base_tid: index) {
 
 // -----
 
-// Test 7: Broadcast pattern (all threads access same location - worst case)
-func.func @test_broadcast_conflict(%tid: index) {
+// Test 7: Worst-case bank conflict (all threads access different addresses in same bank)
+func.func @test_worst_case_conflict(%tid: index) {
   %c32 = arith.constant 32 : index
+  %c64 = arith.constant 64 : index
 
-  // All threads read the same address
-  %layout = lego.gen_p [%c32, %c32] apply (%i: index, %j: index) {
-    // Always return 0 (broadcast)
-    %zero = arith.constant 0 : index
-    lego.yield %zero : index
+  // Layout where all threads map to bank 0 but different addresses
+  // flat = tid * 32 (addresses 0, 32, 64, 96, ... all map to bank 0)
+  %layout = lego.gen_p [%c64, %c32] apply (%i: index, %j: index) {
+    %c32_apply = arith.constant 32 : index
+    %flat = arith.muli %i, %c32_apply : index
+    lego.yield %flat : index
   } inv (%flat: index) {
+    %c32_inv = arith.constant 32 : index
+    %i_out = arith.divui %flat, %c32_inv : index
     %zero = arith.constant 0 : index
-    lego.yield %zero, %zero : index, index
+    lego.yield %i_out, %zero : index, index
   } : !lego.layout
 
   %c0_5 = arith.constant 0 : index

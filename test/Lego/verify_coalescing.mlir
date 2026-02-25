@@ -1,4 +1,4 @@
-// RUN: lego-opt -lego-verify-coalescing %s -split-input-file
+// RUN: lego-opt -lego-verify-coalescing %s -split-input-file -verify-diagnostics
 
 // Test 1: Row-major layout with consecutive thread indexing (should pass - coalesced)
 func.func @test_row_major_coalesced(%base_tid: index) {
@@ -49,10 +49,10 @@ func.func @test_col_major_not_coalesced(%base_tid: index) {
     lego.yield %i_out, %j_out : index, index
   } : !lego.layout
 
-  // Threads access consecutive i indices
+  // Threads access consecutive j indices (stride-32 access)
+  %i = arith.constant 0 : index
   %c0_1 = arith.constant 0 : index
-  %i = arith.addi %base_tid, %c0_1 : index
-  %j = arith.constant 0 : index
+  %j = arith.addi %base_tid, %c0_1 : index
   // expected-warning@+1 {{Layout may produce non-coalesced memory accesses}}
   %addr = lego.apply %layout(%i, %j) : !lego.layout
 

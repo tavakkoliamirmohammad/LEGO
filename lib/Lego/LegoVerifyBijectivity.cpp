@@ -134,6 +134,23 @@ private:
       inequalities.push_back(neq);
     }
 
+    // Declare named variables for output in SMT (BEFORE exporting!)
+    // This allows us to extract concrete values from Z3
+    for (size_t i = 0; i < numDims; ++i) {
+      Value namedInvResult = smt::DeclareFunOp::create(
+          b, genP.getLoc(),
+          Type(b.getType<smt::IntType>()),
+          b.getStringAttr("inv_result_" + std::to_string(i)));
+      Value eq = smt::EqOp::create(b, genP.getLoc(), namedInvResult, invResults[i]);
+      smt::AssertOp::create(b, genP.getLoc(), eq);
+    }
+    Value namedFlat = smt::DeclareFunOp::create(
+        b, genP.getLoc(),
+        Type(b.getType<smt::IntType>()),
+        b.getStringAttr("flat_idx"));
+    Value eqFlat = smt::EqOp::create(b, genP.getLoc(), namedFlat, flatIdx);
+    smt::AssertOp::create(b, genP.getLoc(), eqFlat);
+
     Value anyDifferent = inequalities.size() == 1 ? inequalities[0]
                         : smt::OrOp::create(b, genP.getLoc(), inequalities);
     smt::AssertOp::create(b, genP.getLoc(), anyDifferent);
@@ -155,18 +172,54 @@ private:
     }
 
     // Add get-value commands to extract counter-example
-    smtLib += generateGetValueCommands(varNames);
+    // Request values for: inputs, flat index, and inverse results
+    SmallVector<std::string> allVars = varNames;
+    allVars.push_back("flat_idx");
+    for (size_t i = 0; i < numDims; ++i) {
+      allVars.push_back("inv_result_" + std::to_string(i));
+    }
+
+    // Remove the (reset) command that clears solver state before get-value
+    size_t resetPos = smtLib.rfind("(reset)");
+    if (resetPos != std::string::npos) {
+      smtLib.erase(resetPos, 8); // Remove "(reset)\n"
+    }
+
+    smtLib += generateGetValueCommands(allVars);
+
+    // Debug: Print SMT-LIB query (temporary)
+    // llvm::errs() << "=== SMT-LIB QUERY (inv∘apply) ===\n" << smtLib << "\n=== END QUERY ===\n";
 
     SMTResult result = runZ3WithModel(smtLib);
 
     if (result.isSat) {
       std::string errorMsg = "Layout is not bijective: inv(apply(x)) ≠ x\n  Counter-example:";
+
+      // Show input values
+      errorMsg += "\n    Input indices:";
       for (size_t i = 0; i < varNames.size(); ++i) {
         if (result.model.count(varNames[i])) {
-          errorMsg += "\n    " + varNames[i] + " = " +
+          errorMsg += "\n      [" + std::to_string(i) + "] = " +
                      std::to_string(result.model[varNames[i]]);
         }
       }
+
+      // Show flat index computed by apply
+      if (result.model.count("flat_idx")) {
+        errorMsg += "\n    Flat index (apply result): " +
+                   std::to_string(result.model["flat_idx"]);
+      }
+
+      // Show what inverse computed
+      errorMsg += "\n    Inverse result (should equal input):";
+      for (size_t i = 0; i < numDims; ++i) {
+        std::string invVar = "inv_result_" + std::to_string(i);
+        if (result.model.count(invVar)) {
+          errorMsg += "\n      [" + std::to_string(i) + "] = " +
+                     std::to_string(result.model[invVar]);
+        }
+      }
+
       genP.emitError(errorMsg);
       return failure();
     } else if (result.isUnsat) {
@@ -241,6 +294,22 @@ private:
     }
     Value flatOutput = applyResults[0];
 
+    // Declare named variables for tracking (BEFORE exporting!)
+    for (size_t i = 0; i < invResults.size(); ++i) {
+      Value namedInvIdx = smt::DeclareFunOp::create(
+          b, genP.getLoc(),
+          Type(b.getType<smt::IntType>()),
+          b.getStringAttr("inv_indices_" + std::to_string(i)));
+      Value eq = smt::EqOp::create(b, genP.getLoc(), namedInvIdx, invResults[i]);
+      smt::AssertOp::create(b, genP.getLoc(), eq);
+    }
+    Value namedFlatOut = smt::DeclareFunOp::create(
+        b, genP.getLoc(),
+        Type(b.getType<smt::IntType>()),
+        b.getStringAttr("flat_output"));
+    Value eqOut = smt::EqOp::create(b, genP.getLoc(), namedFlatOut, flatOutput);
+    smt::AssertOp::create(b, genP.getLoc(), eqOut);
+
     // Assert that flat_output ≠ flat_input
     Value neq = smt::DistinctOp::create(
         b, genP.getLoc(),
@@ -264,16 +333,49 @@ private:
     }
 
     SmallVector<std::string> varNames = {flatVarName};
-    smtLib += generateGetValueCommands(varNames);
+
+    // Add named variables for the intermediate results
+    SmallVector<std::string> allVars = varNames;
+    for (size_t i = 0; i < invResults.size(); ++i) {
+      allVars.push_back("inv_indices_" + std::to_string(i));
+    }
+    allVars.push_back("flat_output");
+
+    // Remove the (reset) command that clears solver state before get-value
+    size_t resetPos = smtLib.rfind("(reset)");
+    if (resetPos != std::string::npos) {
+      smtLib.erase(resetPos, 8); // Remove "(reset)\n"
+    }
+
+    smtLib += generateGetValueCommands(allVars);
 
     SMTResult result = runZ3WithModel(smtLib);
 
     if (result.isSat) {
       std::string errorMsg = "Layout is not bijective: apply(inv(y)) ≠ y\n  Counter-example:";
+
+      // Show input flat index
       if (result.model.count(flatVarName)) {
-        errorMsg += "\n    " + flatVarName + " = " +
+        errorMsg += "\n    Input flat index: " +
                    std::to_string(result.model[flatVarName]);
       }
+
+      // Show what inverse computed
+      errorMsg += "\n    Inverse result (indices):";
+      for (size_t i = 0; i < invResults.size(); ++i) {
+        std::string invVar = "inv_indices_" + std::to_string(i);
+        if (result.model.count(invVar)) {
+          errorMsg += "\n      [" + std::to_string(i) + "] = " +
+                     std::to_string(result.model[invVar]);
+        }
+      }
+
+      // Show what apply computed (should equal input)
+      if (result.model.count("flat_output")) {
+        errorMsg += "\n    Apply result (should equal input): " +
+                   std::to_string(result.model["flat_output"]);
+      }
+
       genP.emitError(errorMsg);
       return failure();
     } else if (result.isUnsat) {

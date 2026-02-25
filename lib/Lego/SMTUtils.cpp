@@ -157,6 +157,9 @@ SMTResult runZ3WithModel(const std::string &smtLib) {
 
   result.rawOutput = output;
 
+  // Debug: Print raw Z3 output (temporary)
+  // fprintf(stderr, "=== Z3 RAW OUTPUT ===\n%s\n=== END Z3 OUTPUT ===\n", output.c_str());
+
   // Parse the result
   if (output.find("unsat") != std::string::npos) {
     result.isUnsat = true;
@@ -164,40 +167,69 @@ SMTResult runZ3WithModel(const std::string &smtLib) {
              output.find("unsat") == std::string::npos) {
     result.isSat = true;
 
-    // Parse model from output if it contains variable assignments
-    // Format: ((<var> <value>) ...)
-    size_t pos = 0;
-    while ((pos = output.find("(v", pos)) != std::string::npos) {
-      size_t end = output.find(")", pos);
-      if (end == std::string::npos) break;
+    // Parse model from output
+    // Z3 returns: sat\n((var1 val1)\n (var2 val2)\n ...)
+    // Find the start of get-value response
+    size_t valueStart = output.find("((");
+    if (valueStart != std::string::npos) {
+      size_t valueEnd = output.find("))", valueStart);
+      if (valueEnd != std::string::npos) {
+        std::string valuesBlock = output.substr(valueStart + 1, valueEnd - valueStart - 1);
 
-      std::string assignment = output.substr(pos + 1, end - pos - 1);
-      size_t spacePos = assignment.find(" ");
-      if (spacePos != std::string::npos) {
-        std::string varName = assignment.substr(0, spacePos);
-        std::string valueStr = assignment.substr(spacePos + 1);
+        // Parse each (varname value) pair
+        size_t pos = 0;
+        while (pos < valuesBlock.length()) {
+          // Find next '('
+          pos = valuesBlock.find('(', pos);
+          if (pos == std::string::npos) break;
+          pos++; // Skip '('
 
-        // Remove leading/trailing whitespace and parse value
-        valueStr.erase(0, valueStr.find_first_not_of(" \t\n\r"));
-        valueStr.erase(valueStr.find_last_not_of(" \t\n\r") + 1);
+          // Find matching ')'
+          size_t endParen = valuesBlock.find(')', pos);
+          if (endParen == std::string::npos) break;
 
-        // Handle negative numbers
-        bool isNegative = false;
-        if (valueStr[0] == '(' && valueStr.substr(0, 2) == "(-") {
-          isNegative = true;
-          valueStr = valueStr.substr(3, valueStr.length() - 4);
-        }
+          std::string pair = valuesBlock.substr(pos, endParen - pos);
 
-        // Parse value - skip if it fails
-        char* endPtr = nullptr;
-        errno = 0;
-        long long value = std::strtoll(valueStr.c_str(), &endPtr, 10);
-        if (errno == 0 && endPtr != valueStr.c_str()) {
-          if (isNegative) value = -value;
-          result.model[varName] = value;
+          // Split by space to get varname and value
+          size_t spacePos = pair.find(' ');
+          if (spacePos != std::string::npos) {
+            std::string varName = pair.substr(0, spacePos);
+            std::string valueStr = pair.substr(spacePos + 1);
+
+            // Trim whitespace
+            varName.erase(0, varName.find_first_not_of(" \t\n\r"));
+            varName.erase(varName.find_last_not_of(" \t\n\r") + 1);
+            valueStr.erase(0, valueStr.find_first_not_of(" \t\n\r"));
+            valueStr.erase(valueStr.find_last_not_of(" \t\n\r") + 1);
+
+            // Handle negative numbers: (- 5)
+            bool isNegative = false;
+            if (valueStr.length() >= 2 && valueStr.substr(0, 2) == "(-") {
+              isNegative = true;
+              // Extract number from "(- number)"
+              size_t numStart = valueStr.find(' ', 2);
+              if (numStart != std::string::npos) {
+                valueStr = valueStr.substr(numStart + 1);
+                if (valueStr.back() == ')') {
+                  valueStr.pop_back();
+                }
+              }
+            }
+
+            // Parse integer value
+            char* endPtr = nullptr;
+            errno = 0;
+            long long value = std::strtoll(valueStr.c_str(), &endPtr, 10);
+            if (errno == 0 && endPtr != valueStr.c_str() && !varName.empty()) {
+              if (isNegative) value = -value;
+              result.model[varName] = value;
+              // fprintf(stderr, "  Parsed: %s = %lld\n", varName.c_str(), value);
+            }
+          }
+
+          pos = endParen + 1;
         }
       }
-      pos = end + 1;
     }
   } else {
     result.isUnknown = true;

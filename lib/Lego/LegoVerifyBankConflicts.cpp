@@ -71,7 +71,6 @@ private:
     size_t numIndices = apply.getIndices().size();
     constexpr int WARP_SIZE = 32;
     constexpr int NUM_BANKS = 32;
-    constexpr int ELEM_SIZE = 4; // 4 bytes = 32 bits
 
     // Base thread variable
     std::string baseThreadVar = "base_thread";
@@ -80,34 +79,59 @@ private:
         Type(b.getType<smt::IntType>()),
         b.getStringAttr(baseThreadVar));
 
+    // Get the layout and check it's a gen_p
+    GenPOp genP = dyn_cast_or_null<GenPOp>(apply.getLayout().getDefiningOp());
+    if (!genP || genP.getBody().empty()) {
+      // Skip non-gen_p layouts
+      return success();
+    }
+
+    // Build a function that computes the address for a given thread ID
+    // The apply operation's indices are expressions in terms of the function arguments
+    // We need to translate those index expressions into SMT
+
+    // First, translate each index argument into SMT, treating BlockArguments as symbolic
+    SmallVector<Value> symbolicIndices;
+    for (Value idx : apply.getIndices()) {
+      Value smtIdx = builder.getOrCreate(idx);
+      symbolicIndices.push_back(smtIdx);
+    }
+
     // Compute addresses for all threads in the warp
     SmallVector<Value> addresses;
     for (int t = 0; t < WARP_SIZE; ++t) {
+      // For each thread, substitute thread ID into the index expressions
+      // This requires building the index computation with thread = t
+
+      // We'll create a fresh builder context for each thread
+      DenseMap<Value, Value> threadValMap;
+
+      // Map the base thread parameter to (baseThread + t)
       Value tConst = smt::IntConstantOp::create(
           b, apply.getLoc(), b.getI64IntegerAttr(t));
       Value threadId = smt::IntAddOp::create(
           b, apply.getLoc(), ValueRange{baseThread, tConst});
 
-      // Map thread to indices (assume first dim is threaded)
-      SmallVector<Value> indices;
-      for (size_t i = 0; i < numIndices; ++i) {
-        if (i == 0) {
-          indices.push_back(threadId);
-        } else {
-          indices.push_back(smt::IntConstantOp::create(
-              b, apply.getLoc(), b.getI64IntegerAttr(0)));
-        }
+      // Map function arguments to thread-specific values
+      auto parentFunc = apply->getParentOfType<func::FuncOp>();
+      if (parentFunc && parentFunc.getNumArguments() > 0) {
+        // Assume first argument is the thread ID parameter
+        threadValMap[parentFunc.getArgument(0)] = threadId;
       }
 
-      // Get the layout and compute flat index
-      GenPOp genP = dyn_cast_or_null<GenPOp>(apply.getLayout().getDefiningOp());
-      if (!genP || genP.getBody().empty()) {
-        // Skip non-gen_p layouts
-        return success();
+      // Build index values for this thread using a helper
+      SMTBuilder threadBuilder(b, state, nextId);
+      threadBuilder.valMap = threadValMap;
+
+      SmallVector<Value> concreteIndices;
+      for (Value idx : apply.getIndices()) {
+        Value smtIdx = threadBuilder.getOrCreate(idx);
+        concreteIndices.push_back(smtIdx);
       }
 
+      // Compute flat index using the layout's apply region
       SmallVector<Value> flatResults;
-      builder.buildRegion(genP.getBody(), indices, flatResults);
+      threadBuilder.buildRegion(genP.getBody(), concreteIndices, flatResults);
       if (flatResults.size() != 1) {
         return success();
       }
@@ -116,11 +140,10 @@ private:
     }
 
     // Check for bank conflicts
-    // For each pair (i, j) where i < j, check if they access the same bank
-    // Bank = (address / ELEM_SIZE) % NUM_BANKS
+    // The layout generates element indices (not byte addresses)
+    // For 4-byte elements: Bank = element_index % NUM_BANKS
+    // Conflicts occur when multiple threads access different addresses in the same bank
 
-    Value elemSize = smt::IntConstantOp::create(
-        b, apply.getLoc(), b.getI64IntegerAttr(ELEM_SIZE));
     Value numBanks = smt::IntConstantOp::create(
         b, apply.getLoc(), b.getI64IntegerAttr(NUM_BANKS));
 
@@ -129,17 +152,13 @@ private:
 
     for (int i = 0; i < WARP_SIZE; ++i) {
       for (int j = i + 1; j < WARP_SIZE; ++j) {
-        // bank_i = (addr_i / ELEM_SIZE) % NUM_BANKS
-        Value wordIdx_i = smt::IntDivOp::create(
-            b, apply.getLoc(), addresses[i], elemSize);
+        // bank_i = addr_i % NUM_BANKS
         Value bank_i = smt::IntModOp::create(
-            b, apply.getLoc(), wordIdx_i, numBanks);
+            b, apply.getLoc(), addresses[i], numBanks);
 
-        // bank_j = (addr_j / ELEM_SIZE) % NUM_BANKS
-        Value wordIdx_j = smt::IntDivOp::create(
-            b, apply.getLoc(), addresses[j], elemSize);
+        // bank_j = addr_j % NUM_BANKS
         Value bank_j = smt::IntModOp::create(
-            b, apply.getLoc(), wordIdx_j, numBanks);
+            b, apply.getLoc(), addresses[j], numBanks);
 
         // Check if same bank AND different addresses
         Value sameBank = smt::EqOp::create(
@@ -151,6 +170,26 @@ private:
 
         conflicts.push_back(conflict);
       }
+    }
+
+    // Declare named variables for addresses and banks (BEFORE exporting!)
+    for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
+      // Address
+      Value namedAddr = smt::DeclareFunOp::create(
+          b, apply.getLoc(),
+          Type(b.getType<smt::IntType>()),
+          b.getStringAttr("addr_" + std::to_string(t)));
+      Value eqAddr = smt::EqOp::create(b, apply.getLoc(), namedAddr, addresses[t]);
+      smt::AssertOp::create(b, apply.getLoc(), eqAddr);
+
+      // Bank number (element_index % 32)
+      Value bank = smt::IntModOp::create(b, apply.getLoc(), addresses[t], numBanks);
+      Value namedBank = smt::DeclareFunOp::create(
+          b, apply.getLoc(),
+          Type(b.getType<smt::IntType>()),
+          b.getStringAttr("bank_" + std::to_string(t)));
+      Value eqBank = smt::EqOp::create(b, apply.getLoc(), namedBank, bank);
+      smt::AssertOp::create(b, apply.getLoc(), eqBank);
     }
 
     // Assert that at least one conflict exists
@@ -174,16 +213,45 @@ private:
     }
 
     SmallVector<std::string> varNames = {baseThreadVar};
-    smtLib += generateGetValueCommands(varNames);
+
+    // Add named variables for a sample of addresses and banks
+    SmallVector<std::string> allVars = varNames;
+    // Show first 8 addresses and their bank assignments
+    for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
+      allVars.push_back("addr_" + std::to_string(t));
+      allVars.push_back("bank_" + std::to_string(t));
+    }
+
+    // Remove the (reset) command that clears solver state before get-value
+    size_t resetPos = smtLib.rfind("(reset)");
+    if (resetPos != std::string::npos) {
+      smtLib.erase(resetPos, 8); // Remove "(reset)\n"
+    }
+
+    smtLib += generateGetValueCommands(allVars);
 
     SMTResult result = runZ3WithModel(smtLib);
 
     if (result.isSat) {
       std::string warnMsg = "Layout may cause shared memory bank conflicts";
       if (result.model.count(baseThreadVar)) {
-        warnMsg += "\n  Counter-example base thread: " +
+        warnMsg += "\n  Counter-example starting at thread: " +
                    std::to_string(result.model[baseThreadVar]);
       }
+
+      // Show sample of addresses and banks to illustrate conflicts
+      warnMsg += "\n  Sample memory access pattern (first 8 threads):";
+      for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
+        std::string addrVar = "addr_" + std::to_string(t);
+        std::string bankVar = "bank_" + std::to_string(t);
+        if (result.model.count(addrVar) && result.model.count(bankVar)) {
+          warnMsg += "\n    Thread " + std::to_string(t) +
+                     ": addr=" + std::to_string(result.model[addrVar]) +
+                     ", bank=" + std::to_string(result.model[bankVar]);
+        }
+      }
+      warnMsg += "\n  (Conflict occurs when multiple threads access different addresses in the same bank)";
+
       apply.emitWarning(warnMsg);
       return failure();
     } else if (result.isUnsat) {
