@@ -69,4 +69,35 @@ def LegoExternalSMTVerifierPass : Pass<"lego-external-smt-verifier", "mlir::Modu
   let constructor = "mlir::lego::createLegoExternalSMTVerifierPass()";
 }
 
+def LegoVerifyBijectivityPass : Pass<"lego-verify-bijectivity", "mlir::ModuleOp"> {
+  let summary = "Verify that layouts are bijective";
+  let description = [{
+    This pass verifies that for each gen_p layout, the apply and inv regions
+    are true inverses: ∀x. inv(apply(x)) = x and ∀y. apply(inv(y)) = y.
+    Uses Z3 to check these properties formally.
+  }];
+  let constructor = "mlir::lego::createLegoVerifyBijectivityPass()";
+}
+
+def LegoVerifyCoalescingPass : Pass<"lego-verify-coalescing", "mlir::ModuleOp"> {
+  let summary = "Verify that layouts produce coalesced memory access patterns";
+  let description = [{
+    This pass verifies that for a warp of 32 consecutive threads, the layout
+    transformation produces memory addresses within a 128-byte cache line
+    (coalesced access). Uses Z3 to verify the property.
+  }];
+  let constructor = "mlir::lego::createLegoVerifyCoalescingPass()";
+}
+
+def LegoVerifyBankConflictsPass : Pass<"lego-verify-bank-conflicts", "mlir::ModuleOp"> {
+  let summary = "Verify freedom from shared memory bank conflicts";
+  let description = [{
+    This pass verifies that for a warp of 32 threads accessing shared memory,
+    no two threads access different addresses in the same bank.
+    Banks are determined by: bank = (address / 4) % 32.
+    Uses Z3 to verify conflict-freedom.
+  }];
+  let constructor = "mlir::lego::createLegoVerifyBankConflictsPass()";
+}
+
 #endif // LEGO_PASSES_TD

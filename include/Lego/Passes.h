@@ -19,6 +19,9 @@ std::unique_ptr<Pass> createLegoVerifyGenpConsistencyPass();
 std::unique_ptr<Pass> createLegoArithSimplificationPass();
 std::unique_ptr<Pass> createLegoGenerateBoundsChecksPass();
 std::unique_ptr<Pass> createLegoExternalSMTVerifierPass();
+std::unique_ptr<Pass> createLegoVerifyBijectivityPass();
+std::unique_ptr<Pass> createLegoVerifyCoalescingPass();
+std::unique_ptr<Pass> createLegoVerifyBankConflictsPass();
 
 void registerLegoPipelines();
 
@@ -28,6 +31,9 @@ void registerLegoPipelines();
 #define GEN_PASS_DECL_LEGOARITHSIMPLIFICATIONPASS
 #define GEN_PASS_DECL_LEGOGENERATEBOUNDSCHECKSPASS
 #define GEN_PASS_DECL_LEGOEXTERNALSMTVERIFIERPASS
+#define GEN_PASS_DECL_LEGOVERIFYBIJECTIVITYPASS
+#define GEN_PASS_DECL_LEGOVERIFYCOALESCINGPASS
+#define GEN_PASS_DECL_LEGOVERIFYBANKCONFLICTSPASS
 #define GEN_PASS_REGISTRATION
 #include "Lego/Passes.h.inc"
 

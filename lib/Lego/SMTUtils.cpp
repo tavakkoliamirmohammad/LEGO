@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
 
 namespace mlir {
 namespace lego {
@@ -110,23 +111,111 @@ void SMTBuilder::buildRegion(Region &region, ValueRange args, SmallVectorImpl<Va
 }
 
 bool runZ3(const std::string &smtLib) {
+  SMTResult result = runZ3WithModel(smtLib);
+  return result.isSat;
+}
+
+SMTResult runZ3WithModel(const std::string &smtLib) {
+  SMTResult result;
+
   int out_pipe[2]; int in_pipe[2];
-  if (pipe(out_pipe) == -1 || pipe(in_pipe) == -1) return false;
-  pid_t pid = fork();
-  if (pid == -1) return false;
-  if (pid == 0) {
-      dup2(out_pipe[0], STDIN_FILENO); dup2(in_pipe[1], STDOUT_FILENO);
-      close(out_pipe[0]); close(out_pipe[1]); close(in_pipe[0]); close(in_pipe[1]);
-      execlp(LEGO_Z3_EXECUTABLE, "z3", "-in", nullptr);
-      _exit(1);
+  if (pipe(out_pipe) == -1 || pipe(in_pipe) == -1) {
+    result.isUnknown = true;
+    return result;
   }
-  close(out_pipe[0]); close(in_pipe[1]);
+
+  pid_t pid = fork();
+  if (pid == -1) {
+    result.isUnknown = true;
+    return result;
+  }
+
+  if (pid == 0) {
+    dup2(out_pipe[0], STDIN_FILENO);
+    dup2(in_pipe[1], STDOUT_FILENO);
+    dup2(in_pipe[1], STDERR_FILENO);  // Capture stderr too
+    close(out_pipe[0]); close(out_pipe[1]);
+    close(in_pipe[0]); close(in_pipe[1]);
+    execlp(LEGO_Z3_EXECUTABLE, "z3", "-in", nullptr);
+    _exit(1);
+  }
+
+  close(out_pipe[0]);
+  close(in_pipe[1]);
+
   write(out_pipe[1], smtLib.c_str(), smtLib.size());
   close(out_pipe[1]);
-  std::string result; char buffer[4096]; ssize_t n;
-  while ((n = read(in_pipe[0], buffer, sizeof(buffer))) > 0) result.append(buffer, n);
-  close(in_pipe[0]); waitpid(pid, nullptr, 0);
-  return result.find("sat") != std::string::npos && result.find("unsat") == std::string::npos;
+
+  std::string output;
+  char buffer[4096];
+  ssize_t n;
+  while ((n = read(in_pipe[0], buffer, sizeof(buffer))) > 0) {
+    output.append(buffer, n);
+  }
+  close(in_pipe[0]);
+  waitpid(pid, nullptr, 0);
+
+  result.rawOutput = output;
+
+  // Parse the result
+  if (output.find("unsat") != std::string::npos) {
+    result.isUnsat = true;
+  } else if (output.find("sat") != std::string::npos &&
+             output.find("unsat") == std::string::npos) {
+    result.isSat = true;
+
+    // Parse model from output if it contains variable assignments
+    // Format: ((<var> <value>) ...)
+    size_t pos = 0;
+    while ((pos = output.find("(v", pos)) != std::string::npos) {
+      size_t end = output.find(")", pos);
+      if (end == std::string::npos) break;
+
+      std::string assignment = output.substr(pos + 1, end - pos - 1);
+      size_t spacePos = assignment.find(" ");
+      if (spacePos != std::string::npos) {
+        std::string varName = assignment.substr(0, spacePos);
+        std::string valueStr = assignment.substr(spacePos + 1);
+
+        // Remove leading/trailing whitespace and parse value
+        valueStr.erase(0, valueStr.find_first_not_of(" \t\n\r"));
+        valueStr.erase(valueStr.find_last_not_of(" \t\n\r") + 1);
+
+        // Handle negative numbers
+        bool isNegative = false;
+        if (valueStr[0] == '(' && valueStr.substr(0, 2) == "(-") {
+          isNegative = true;
+          valueStr = valueStr.substr(3, valueStr.length() - 4);
+        }
+
+        // Parse value - skip if it fails
+        char* endPtr = nullptr;
+        errno = 0;
+        long long value = std::strtoll(valueStr.c_str(), &endPtr, 10);
+        if (errno == 0 && endPtr != valueStr.c_str()) {
+          if (isNegative) value = -value;
+          result.model[varName] = value;
+        }
+      }
+      pos = end + 1;
+    }
+  } else {
+    result.isUnknown = true;
+  }
+
+  return result;
+}
+
+std::string generateGetValueCommands(const SmallVector<std::string> &varNames) {
+  if (varNames.empty()) return "";
+
+  std::string commands = "(get-value (";
+  for (size_t i = 0; i < varNames.size(); ++i) {
+    if (i > 0) commands += " ";
+    commands += varNames[i];
+  }
+  commands += "))\n";
+  return commands;
 }
 
 } // namespace lego
