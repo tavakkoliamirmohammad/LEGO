@@ -12,6 +12,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/AsmState.h"
+#include "Lego/SMTUtils.h"
 
 using namespace mlir;
 using namespace mlir::lego;
@@ -62,18 +63,9 @@ struct LegoVerifyBijectivityPassImpl
 private:
   // Verify: inv(apply(x1, x2, ..., xn)) = (x1, x2, ..., xn)
   LogicalResult verifyInvApplyIdentity(GenPOp genP, AsmState &state, unsigned &nextId) {
-    MLIRContext *ctx = &getContext();
-    OwningOpRef<ModuleOp> smtModule = ModuleOp::create(genP.getLoc());
-    OpBuilder b(smtModule->getBodyRegion());
-
-    auto solver = smt::SolverOp::create(b, genP.getLoc(), TypeRange{}, ValueRange{});
-    if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
-
-    OpBuilder::InsertionGuard guard(b);
-    b.setInsertionPointToStart(&solver.getRegion().front());
-
-    smt::SetLogicOp::create(b, genP.getLoc(), "QF_NIA");
-    SMTBuilder builder(b, state, nextId);
+    SMTSolverContext smtCtx(genP.getLoc(), state, nextId);
+    OpBuilder &b = *smtCtx.b;
+    SMTBuilder &builder = *smtCtx.builder;
 
     // Create symbolic variables for input indices
     SmallVector<Value> inputIndices;
@@ -155,23 +147,6 @@ private:
                         : smt::OrOp::create(b, genP.getLoc(), inequalities);
     smt::AssertOp::create(b, genP.getLoc(), anyDifferent);
 
-    auto checkOp = smt::CheckOp::create(b, genP.getLoc(), TypeRange{});
-    for (Region &r : checkOp->getRegions()) {
-      OpBuilder::InsertionGuard g(b);
-      b.setInsertionPointToStart(&r.emplaceBlock());
-      smt::YieldOp::create(b, genP.getLoc(), ValueRange{});
-    }
-    smt::YieldOp::create(b, genP.getLoc(), ValueRange{});
-
-    // Export to SMT-LIB and run Z3
-    std::string smtLib;
-    llvm::raw_string_ostream os(smtLib);
-    if (failed(smt::exportSMTLIB(*smtModule, os))) {
-      genP.emitError("Failed to export SMT-LIB for bijectivity check");
-      return failure();
-    }
-
-    // Add get-value commands to extract counter-example
     // Request values for: inputs, flat index, and inverse results
     SmallVector<std::string> allVars = varNames;
     allVars.push_back("flat_idx");
@@ -179,18 +154,7 @@ private:
       allVars.push_back("inv_result_" + std::to_string(i));
     }
 
-    // Remove the (reset) command that clears solver state before get-value
-    size_t resetPos = smtLib.rfind("(reset)");
-    if (resetPos != std::string::npos) {
-      smtLib.erase(resetPos, 8); // Remove "(reset)\n"
-    }
-
-    smtLib += generateGetValueCommands(allVars);
-
-    // Debug: Print SMT-LIB query (temporary)
-    // llvm::errs() << "=== SMT-LIB QUERY (inv∘apply) ===\n" << smtLib << "\n=== END QUERY ===\n";
-
-    SMTResult result = runZ3WithModel(smtLib);
+    SMTResult result = smtCtx.checkSatisfiability(allVars);
 
     if (result.isSat) {
       std::string errorMsg = "Layout is not bijective: inv(apply(x)) ≠ x\n  Counter-example:";
@@ -233,18 +197,9 @@ private:
 
   // Verify: apply(inv(flat)) = flat
   LogicalResult verifyApplyInvIdentity(GenPOp genP, AsmState &state, unsigned &nextId) {
-    MLIRContext *ctx = &getContext();
-    OwningOpRef<ModuleOp> smtModule = ModuleOp::create(genP.getLoc());
-    OpBuilder b(smtModule->getBodyRegion());
-
-    auto solver = smt::SolverOp::create(b, genP.getLoc(), TypeRange{}, ValueRange{});
-    if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
-
-    OpBuilder::InsertionGuard guard(b);
-    b.setInsertionPointToStart(&solver.getRegion().front());
-
-    smt::SetLogicOp::create(b, genP.getLoc(), "QF_NIA");
-    SMTBuilder builder(b, state, nextId);
+    SMTSolverContext smtCtx(genP.getLoc(), state, nextId);
+    OpBuilder &b = *smtCtx.b;
+    SMTBuilder &builder = *smtCtx.builder;
 
     // Create symbolic variable for flat index
     std::string flatVarName = "flat_input";
@@ -316,22 +271,6 @@ private:
         ValueRange{flatOutput, flatInput});
     smt::AssertOp::create(b, genP.getLoc(), neq);
 
-    auto checkOp = smt::CheckOp::create(b, genP.getLoc(), TypeRange{});
-    for (Region &r : checkOp->getRegions()) {
-      OpBuilder::InsertionGuard g(b);
-      b.setInsertionPointToStart(&r.emplaceBlock());
-      smt::YieldOp::create(b, genP.getLoc(), ValueRange{});
-    }
-    smt::YieldOp::create(b, genP.getLoc(), ValueRange{});
-
-    // Export and run Z3
-    std::string smtLib;
-    llvm::raw_string_ostream os(smtLib);
-    if (failed(smt::exportSMTLIB(*smtModule, os))) {
-      genP.emitError("Failed to export SMT-LIB for bijectivity check");
-      return failure();
-    }
-
     SmallVector<std::string> varNames = {flatVarName};
 
     // Add named variables for the intermediate results
@@ -341,15 +280,7 @@ private:
     }
     allVars.push_back("flat_output");
 
-    // Remove the (reset) command that clears solver state before get-value
-    size_t resetPos = smtLib.rfind("(reset)");
-    if (resetPos != std::string::npos) {
-      smtLib.erase(resetPos, 8); // Remove "(reset)\n"
-    }
-
-    smtLib += generateGetValueCommands(allVars);
-
-    SMTResult result = runZ3WithModel(smtLib);
+    SMTResult result = smtCtx.checkSatisfiability(allVars);
 
     if (result.isSat) {
       std::string errorMsg = "Layout is not bijective: apply(inv(y)) ≠ y\n  Counter-example:";

@@ -27,22 +27,6 @@ def LegoToArithPass : Pass<"lego-to-arith", "mlir::ModuleOp"> {
   ];
 }
 
-def LegoVerifyGenpConsistencyPass : Pass<"lego-verify-genp-consistency", "mlir::ModuleOp"> {
-  let summary = "Verify the consistency between apply and inv regions in gen_p";
-  let description = [{
-    This pass analyzes lego.gen_p operations to ensure that the 'apply' and 'inv'
-    regions are truly inverses of each other. It performs symbolic composition
-    and simplification to detect inconsistencies.
-  }];
-  let constructor = "mlir::lego::createLegoVerifyGenpConsistencyPass()";
-  let dependentDialects = [
-    "mlir::lego::LegoDialect",
-    "mlir::arith::ArithDialect",
-    "mlir::affine::AffineDialect",
-    "mlir::scf::SCFDialect"
-  ];
-}
-
 def LegoArithSimplificationPass : Pass<"lego-arith-simplification", "mlir::ModuleOp"> {
   let summary = "Simplify arithmetic operations using LEGO-specific algebraic identities";
   let description = [{
@@ -82,11 +66,15 @@ def LegoVerifyBijectivityPass : Pass<"lego-verify-bijectivity", "mlir::ModuleOp"
 def LegoVerifyCoalescingPass : Pass<"lego-verify-coalescing", "mlir::ModuleOp"> {
   let summary = "Verify that layouts produce coalesced memory access patterns";
   let description = [{
-    This pass verifies that for a warp of 32 consecutive threads, the layout
+    This pass verifies that for a warp of threads, the layout
     transformation produces memory addresses within a 128-byte cache line
     (coalesced access). Uses Z3 to verify the property.
   }];
   let constructor = "mlir::lego::createLegoVerifyCoalescingPass()";
+  let options = [
+    Option<"warpSize", "warp-size", "int", "32",
+           "Number of threads in a warp">
+  ];
 }
 
 def LegoVerifyBankConflictsPass : Pass<"lego-verify-bank-conflicts", "mlir::ModuleOp"> {
@@ -103,8 +91,6 @@ def LegoVerifyBankConflictsPass : Pass<"lego-verify-bank-conflicts", "mlir::Modu
            "Number of threads in a warp">,
     Option<"numBanks", "num-banks", "int", "32",
            "Number of shared memory banks">,
-    Option<"baseThreadVar", "base-thread-var", "std::string", "\"base_thread\"",
-           "Name of the base thread variable expected in the layout">,
     Option<"elementSize", "element-size", "int", "4",
            "Size of each element in bytes (used to compute bank indices)">
   ];

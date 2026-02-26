@@ -1,6 +1,7 @@
 #include "Lego/SMTUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SMT/IR/SMTOps.h"
+#include "mlir/Target/SMTLIB/ExportSMTLIB.h"
 #include <sys/wait.h>
 #include <unistd.h>
 #include <cstdio>
@@ -108,6 +109,45 @@ void SMTBuilder::buildRegion(Region &region, ValueRange args, SmallVectorImpl<Va
       getOrCreate(res);
     }
   }
+}
+
+SMTSolverContext::SMTSolverContext(Location l, AsmState &state, unsigned &nextId) : loc(l) {
+  smtModule = ModuleOp::create(loc);
+  b = std::make_unique<OpBuilder>(smtModule->getBodyRegion());
+
+  auto solver = smt::SolverOp::create(*b, loc, TypeRange{}, ValueRange{});
+  if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
+
+  b->setInsertionPointToStart(&solver.getRegion().front());
+  smt::SetLogicOp::create(*b, loc, "QF_NIA");
+
+  builder = std::make_unique<SMTBuilder>(*b, state, nextId);
+}
+
+SMTResult SMTSolverContext::checkSatisfiability(const SmallVector<std::string> &varNamesToExtract) {
+  auto checkOp = smt::CheckOp::create(*b, loc, TypeRange{});
+  for (Region &r : checkOp->getRegions()) {
+    OpBuilder::InsertionGuard g(*b);
+    b->setInsertionPointToStart(&r.emplaceBlock());
+    smt::YieldOp::create(*b, loc, ValueRange{});
+  }
+  smt::YieldOp::create(*b, loc, ValueRange{});
+
+  std::string smtLib;
+  llvm::raw_string_ostream os(smtLib);
+  if (failed(mlir::smt::exportSMTLIB(*smtModule, os))) {
+    SMTResult failRes;
+    failRes.isUnknown = true;
+    return failRes;
+  }
+
+  size_t resetPos = smtLib.rfind("(reset)");
+  if (resetPos != std::string::npos) {
+    smtLib.erase(resetPos, 8); // Remove "(reset)\n"
+  }
+
+  smtLib += generateGetValueCommands(varNamesToExtract);
+  return runZ3WithModel(smtLib);
 }
 
 bool runZ3(const std::string &smtLib) {

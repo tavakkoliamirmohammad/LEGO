@@ -55,24 +55,15 @@ private:
   // Bank conflicts occur when bank(addr_i) = bank(addr_j) for i ≠ j
   // where bank(addr) = (addr * elementSize / 4) % numBanks
   LogicalResult verifyBankConflictFree(ApplyOp apply, AsmState &state, unsigned &nextId) {
-    MLIRContext *ctx = &getContext();
-    OwningOpRef<ModuleOp> smtModule = ModuleOp::create(apply.getLoc());
-    OpBuilder b(smtModule->getBodyRegion());
-
-    auto solver = smt::SolverOp::create(b, apply.getLoc(), TypeRange{}, ValueRange{});
-    if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
-
-    OpBuilder::InsertionGuard guard(b);
-    b.setInsertionPointToStart(&solver.getRegion().front());
-
-    smt::SetLogicOp::create(b, apply.getLoc(), "QF_NIA");
-    SMTBuilder builder(b, state, nextId);
+    SMTSolverContext smtCtx(apply.getLoc(), state, nextId);
+    OpBuilder &b = *smtCtx.b;
+    SMTBuilder &builder = *smtCtx.builder;
 
     size_t numIndices = apply.getIndices().size();
     int WARP_SIZE = warpSize.getValue();
     int NUM_BANKS = numBanks.getValue();
     int ELEMENT_SIZE = elementSize.getValue();
-    std::string baseThreadVarName = baseThreadVar.getValue();
+    std::string baseThreadVarName = "base_thread";
 
     // Base thread variable
     Value baseThread = smt::DeclareFunOp::create(
@@ -228,41 +219,14 @@ private:
     Value anyConflict = smt::OrOp::create(b, apply.getLoc(), conflicts);
     smt::AssertOp::create(b, apply.getLoc(), anyConflict);
 
-    auto checkOp = smt::CheckOp::create(b, apply.getLoc(), TypeRange{});
-    for (Region &r : checkOp->getRegions()) {
-      OpBuilder::InsertionGuard g(b);
-      b.setInsertionPointToStart(&r.emplaceBlock());
-      smt::YieldOp::create(b, apply.getLoc(), ValueRange{});
-    }
-    smt::YieldOp::create(b, apply.getLoc(), ValueRange{});
-
-    // Export and run Z3
-    std::string smtLib;
-    llvm::raw_string_ostream os(smtLib);
-    if (failed(smt::exportSMTLIB(*smtModule, os))) {
-      apply.emitWarning("Failed to export SMT-LIB for bank conflict check");
-      return success();
+    SmallVector<std::string> allVars;
+    allVars.push_back(baseThreadVarName);
+    for (int t = 0; t < WARP_SIZE; ++t) {
+        allVars.push_back("addr_" + std::to_string(t));
+        allVars.push_back("bank_" + std::to_string(t));
     }
 
-    SmallVector<std::string> varNames = {baseThreadVarName};
-
-    // Add named variables for a sample of addresses and banks
-    SmallVector<std::string> allVars = varNames;
-    // Show first 8 addresses and their bank assignments
-    for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
-      allVars.push_back("addr_" + std::to_string(t));
-      allVars.push_back("bank_" + std::to_string(t));
-    }
-
-    // Remove the (reset) command that clears solver state before get-value
-    size_t resetPos = smtLib.rfind("(reset)");
-    if (resetPos != std::string::npos) {
-      smtLib.erase(resetPos, 8); // Remove "(reset)\n"
-    }
-
-    smtLib += generateGetValueCommands(allVars);
-
-    SMTResult result = runZ3WithModel(smtLib);
+    SMTResult result = smtCtx.checkSatisfiability(allVars);
 
     if (result.isSat) {
       std::string warnMsg = "Layout may cause shared memory bank conflicts";

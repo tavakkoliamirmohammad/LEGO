@@ -53,20 +53,11 @@ struct LegoVerifyCoalescingPassImpl
   }
 
 private:
-  // Verify that a warp of 32 threads produces coalesced accesses
+  // Verify that a warp of WARP_SIZE threads produces coalesced accesses
   LogicalResult verifyCoalescing(ApplyOp apply, AsmState &state, unsigned &nextId) {
-    MLIRContext *ctx = &getContext();
-    OwningOpRef<ModuleOp> smtModule = ModuleOp::create(apply.getLoc());
-    OpBuilder b(smtModule->getBodyRegion());
-
-    auto solver = smt::SolverOp::create(b, apply.getLoc(), TypeRange{}, ValueRange{});
-    if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
-
-    OpBuilder::InsertionGuard guard(b);
-    b.setInsertionPointToStart(&solver.getRegion().front());
-
-    smt::SetLogicOp::create(b, apply.getLoc(), "QF_NIA");
-    SMTBuilder builder(b, state, nextId);
+    SMTSolverContext smtCtx(apply.getLoc(), state, nextId);
+    OpBuilder &b = *smtCtx.b;
+    SMTBuilder &builder = *smtCtx.builder;
 
     // Model: For a 1D thread layout, threadIdx maps to layout indices
     // We'll verify the simple case: threadIdx → (threadIdx, 0) for 2D layouts
@@ -75,14 +66,14 @@ private:
     size_t numIndices = apply.getIndices().size();
 
     // Warp size
-    constexpr int WARP_SIZE = 32;
+    int WARP_SIZE = warpSize.getValue();
 
     // Create symbolic variables for the base thread ID
-    std::string baseThreadVar = "base_thread";
+    std::string baseThreadVarName = "base_thread";
     Value baseThread = smt::DeclareFunOp::create(
         b, apply.getLoc(),
         Type(b.getType<smt::IntType>()),
-        b.getStringAttr(baseThreadVar));
+        b.getStringAttr(baseThreadVarName));
 
     // Get the layout and check it's a gen_p
     GenPOp genP = dyn_cast_or_null<GenPOp>(apply.getLayout().getDefiningOp());
@@ -173,46 +164,19 @@ private:
     Value anyNonSequential = smt::OrOp::create(b, apply.getLoc(), nonSequential);
     smt::AssertOp::create(b, apply.getLoc(), anyNonSequential);
 
-    auto checkOp = smt::CheckOp::create(b, apply.getLoc(), TypeRange{});
-    for (Region &r : checkOp->getRegions()) {
-      OpBuilder::InsertionGuard g(b);
-      b.setInsertionPointToStart(&r.emplaceBlock());
-      smt::YieldOp::create(b, apply.getLoc(), ValueRange{});
-    }
-    smt::YieldOp::create(b, apply.getLoc(), ValueRange{});
-
-    // Export and run Z3
-    std::string smtLib;
-    llvm::raw_string_ostream os(smtLib);
-    if (failed(smt::exportSMTLIB(*smtModule, os))) {
-      apply.emitWarning("Failed to export SMT-LIB for coalescing check");
-      return success(); // Don't fail
+    SmallVector<std::string> allVars;
+    allVars.push_back("base_thread");
+    for (int t = 0; t < WARP_SIZE; ++t) {
+        allVars.push_back("addr_" + std::to_string(t));
     }
 
-    SmallVector<std::string> varNames = {baseThreadVar};
-
-    // Add named variables for a sample of addresses to show the pattern
-    SmallVector<std::string> allVars = varNames;
-    // Show first 8 addresses to demonstrate the non-coalesced pattern
-    for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
-      allVars.push_back("addr_" + std::to_string(t));
-    }
-
-    // Remove the (reset) command that clears solver state before get-value
-    size_t resetPos = smtLib.rfind("(reset)");
-    if (resetPos != std::string::npos) {
-      smtLib.erase(resetPos, 8); // Remove "(reset)\n"
-    }
-
-    smtLib += generateGetValueCommands(allVars);
-
-    SMTResult result = runZ3WithModel(smtLib);
+    SMTResult result = smtCtx.checkSatisfiability(allVars);
 
     if (result.isSat) {
       std::string warnMsg = "Layout may produce non-coalesced memory accesses (unit stride not guaranteed)";
-      if (result.model.count(baseThreadVar)) {
+      if (result.model.count(baseThreadVarName)) {
         warnMsg += "\n  Counter-example starting at thread: " +
-                   std::to_string(result.model[baseThreadVar]);
+                   std::to_string(result.model[baseThreadVarName]);
       }
 
       // Show sample of addresses to illustrate the problem

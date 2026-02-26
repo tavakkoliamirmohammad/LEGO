@@ -42,7 +42,6 @@ add_mlir_dialect_library(MLIRLego
   LegoOps.cpp
   LegoNormalization.cpp
   LegoToArith.cpp
-  LegoVerifyGenpConsistency.cpp
   LegoArithSimplification.cpp
   LegoGenerateBoundsChecks.cpp
   LegoExternalSMTVerifier.cpp

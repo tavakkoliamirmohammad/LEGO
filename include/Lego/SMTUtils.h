@@ -37,6 +37,20 @@ struct SMTResult {
   SMTResult() : isSat(false), isUnsat(false), isUnknown(false) {}
 };
 
+// Abstracted context for configuring and extracting SMT formulas
+struct SMTSolverContext {
+  OwningOpRef<ModuleOp> smtModule;
+  std::unique_ptr<OpBuilder> b;
+  std::unique_ptr<SMTBuilder> builder;
+  Location loc;
+
+  SMTSolverContext(Location loc, AsmState &state, unsigned &nextId);
+  ~SMTSolverContext() {}
+
+  // Finalizes the check commands, exports the SMT-LIB and tests solving
+  SMTResult checkSatisfiability(const SmallVector<std::string> &varNamesToExtract);
+};
+
 // Run Z3 and return detailed result
 SMTResult runZ3WithModel(const std::string &smtLib);
 
