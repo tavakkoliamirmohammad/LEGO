@@ -107,9 +107,21 @@ private:
 
       // Map function arguments to thread-specific values
       auto parentFunc = apply->getParentOfType<func::FuncOp>();
-      if (parentFunc && parentFunc.getNumArguments() > 0) {
-        // Assume first argument is the thread ID parameter
-        threadValMap[parentFunc.getArgument(0)] = threadId;
+      if (parentFunc) {
+        bool found = false;
+        
+        // Find the argument with the `lego.thread_id` attribute
+        for (BlockArgument arg : parentFunc.getArguments()) {
+          if (parentFunc.getArgAttr(arg.getArgNumber(), "lego.thread_id")) {
+            threadValMap[arg] = threadId;
+            found = true;
+            break;
+          }
+        }
+        
+        if (!found) {
+          apply.emitWarning("Could not find a block argument with 'lego.thread_id' attribute in parent function. Verification might not be accurate.");
+        }
       }
 
       // Build index values for this thread using a helper

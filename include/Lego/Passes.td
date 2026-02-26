@@ -92,12 +92,22 @@ def LegoVerifyCoalescingPass : Pass<"lego-verify-coalescing", "mlir::ModuleOp"> 
 def LegoVerifyBankConflictsPass : Pass<"lego-verify-bank-conflicts", "mlir::ModuleOp"> {
   let summary = "Verify freedom from shared memory bank conflicts";
   let description = [{
-    This pass verifies that for a warp of 32 threads accessing shared memory,
+    This pass verifies that for a warp of threads accessing shared memory,
     no two threads access different addresses in the same bank.
-    Banks are determined by: bank = (address / 4) % 32.
+    By default, verifies 32 threads, 32 banks, and 4-byte elements.
     Uses Z3 to verify conflict-freedom.
   }];
   let constructor = "mlir::lego::createLegoVerifyBankConflictsPass()";
+  let options = [
+    Option<"warpSize", "warp-size", "int", "32",
+           "Number of threads in a warp">,
+    Option<"numBanks", "num-banks", "int", "32",
+           "Number of shared memory banks">,
+    Option<"baseThreadVar", "base-thread-var", "std::string", "\"base_thread\"",
+           "Name of the base thread variable expected in the layout">,
+    Option<"elementSize", "element-size", "int", "4",
+           "Size of each element in bytes (used to compute bank indices)">
+  ];
 }
 
 #endif // LEGO_PASSES_TD

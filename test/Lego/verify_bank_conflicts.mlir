@@ -1,7 +1,7 @@
 // RUN: lego-opt -lego-verify-bank-conflicts %s -split-input-file -verify-diagnostics
 
 // Test 1: Conflict-free layout - row-major with 32 columns (should pass)
-func.func @test_conflict_free_row_major(%base_tid: index) {
+func.func @test_conflict_free_row_major(%base_tid: index {lego.thread_id}) {
   %c4 = arith.constant 4 : index
   %c32 = arith.constant 32 : index
 
@@ -31,7 +31,7 @@ func.func @test_conflict_free_row_major(%base_tid: index) {
 // -----
 
 // Test 2: Bank conflict - column-major with 32 rows (should warn)
-func.func @test_conflict_column_major(%base_tid: index) {
+func.func @test_conflict_column_major(%base_tid: index {lego.thread_id}) {
   %c32 = arith.constant 32 : index
   %c4 = arith.constant 4 : index
 
@@ -63,7 +63,7 @@ func.func @test_conflict_column_major(%base_tid: index) {
 // -----
 
 // Test 3: 2-way bank conflict (should warn)
-func.func @test_2way_conflict(%base_tid: index) {
+func.func @test_2way_conflict(%base_tid: index {lego.thread_id}) {
   %c16 = arith.constant 16 : index
   %c2 = arith.constant 2 : index
 
@@ -100,7 +100,7 @@ func.func @test_2way_conflict(%base_tid: index) {
 // -----
 
 // Test 4: Padded layout to avoid conflicts (should pass)
-func.func @test_padded_conflict_free(%base_tid: index) {
+func.func @test_padded_conflict_free(%base_tid: index {lego.thread_id}) {
   %c32 = arith.constant 32 : index
   %c33 = arith.constant 33 : index
 
@@ -130,7 +130,7 @@ func.func @test_padded_conflict_free(%base_tid: index) {
 // -----
 
 // Test 5: Strided access causing conflicts (should warn)
-func.func @test_strided_conflicts(%base_tid: index) {
+func.func @test_strided_conflicts(%base_tid: index {lego.thread_id}) {
   %c64 = arith.constant 64 : index
   %c32 = arith.constant 32 : index
 
@@ -161,7 +161,7 @@ func.func @test_strided_conflicts(%base_tid: index) {
 // -----
 
 // Test 6: Transpose pattern (likely has conflicts)
-func.func @test_transpose_conflicts(%base_tid: index) {
+func.func @test_transpose_conflicts(%base_tid: index {lego.thread_id}) {
   %c32 = arith.constant 32 : index
 
   // Square transpose pattern
@@ -192,7 +192,7 @@ func.func @test_transpose_conflicts(%base_tid: index) {
 // -----
 
 // Test 7: Worst-case bank conflict (all threads access different addresses in same bank)
-func.func @test_worst_case_conflict(%tid: index) {
+func.func @test_worst_case_conflict(%tid: index {lego.thread_id}) {
   %c32 = arith.constant 32 : index
   %c64 = arith.constant 64 : index
 
@@ -217,3 +217,5 @@ func.func @test_worst_case_conflict(%tid: index) {
 
   return
 }
+
+// -----

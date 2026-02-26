@@ -1,7 +1,7 @@
 // RUN: lego-opt -lego-verify-coalescing %s -split-input-file -verify-diagnostics
 
 // Test 1: Row-major layout with consecutive thread indexing (should pass - coalesced)
-func.func @test_row_major_coalesced(%base_tid: index) {
+func.func @test_row_major_coalesced(%base_tid: index {lego.thread_id}) {
   %c4 = arith.constant 4 : index
   %c32 = arith.constant 32 : index
 
@@ -31,7 +31,7 @@ func.func @test_row_major_coalesced(%base_tid: index) {
 // -----
 
 // Test 2: Column-major layout with consecutive thread indexing (should warn - NOT coalesced)
-func.func @test_col_major_not_coalesced(%base_tid: index) {
+func.func @test_col_major_not_coalesced(%base_tid: index {lego.thread_id}) {
   %c32 = arith.constant 32 : index
   %c4 = arith.constant 4 : index
 
@@ -62,7 +62,7 @@ func.func @test_col_major_not_coalesced(%base_tid: index) {
 // -----
 
 // Test 3: Strided access pattern (should warn)
-func.func @test_strided_not_coalesced(%base_tid: index) {
+func.func @test_strided_not_coalesced(%base_tid: index {lego.thread_id}) {
   %c32 = arith.constant 32 : index
   %c64 = arith.constant 64 : index
 
@@ -98,7 +98,7 @@ func.func @test_strided_not_coalesced(%base_tid: index) {
 // -----
 
 // Test 4: Identity layout (1D) - should pass
-func.func @test_identity_coalesced(%tid: index) {
+func.func @test_identity_coalesced(%tid: index {lego.thread_id}) {
   %c1024 = arith.constant 1024 : index
 
   // 1D identity: flat = i

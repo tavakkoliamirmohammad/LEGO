@@ -51,9 +51,9 @@ struct LegoVerifyBankConflictsPassImpl
   }
 
 private:
-  // Verify that a warp of 32 threads has no bank conflicts
+  // Verify that a warp of WARP_SIZE threads has no bank conflicts
   // Bank conflicts occur when bank(addr_i) = bank(addr_j) for i ≠ j
-  // where bank(addr) = (addr / 4) % 32 for 4-byte elements
+  // where bank(addr) = (addr * elementSize / 4) % numBanks
   LogicalResult verifyBankConflictFree(ApplyOp apply, AsmState &state, unsigned &nextId) {
     MLIRContext *ctx = &getContext();
     OwningOpRef<ModuleOp> smtModule = ModuleOp::create(apply.getLoc());
@@ -69,15 +69,16 @@ private:
     SMTBuilder builder(b, state, nextId);
 
     size_t numIndices = apply.getIndices().size();
-    constexpr int WARP_SIZE = 32;
-    constexpr int NUM_BANKS = 32;
+    int WARP_SIZE = warpSize.getValue();
+    int NUM_BANKS = numBanks.getValue();
+    int ELEMENT_SIZE = elementSize.getValue();
+    std::string baseThreadVarName = baseThreadVar.getValue();
 
     // Base thread variable
-    std::string baseThreadVar = "base_thread";
     Value baseThread = smt::DeclareFunOp::create(
         b, apply.getLoc(),
         Type(b.getType<smt::IntType>()),
-        b.getStringAttr(baseThreadVar));
+        b.getStringAttr(baseThreadVarName));
 
     // Get the layout and check it's a gen_p
     GenPOp genP = dyn_cast_or_null<GenPOp>(apply.getLayout().getDefiningOp());
@@ -114,9 +115,22 @@ private:
 
       // Map function arguments to thread-specific values
       auto parentFunc = apply->getParentOfType<func::FuncOp>();
-      if (parentFunc && parentFunc.getNumArguments() > 0) {
-        // Assume first argument is the thread ID parameter
-        threadValMap[parentFunc.getArgument(0)] = threadId;
+      if (parentFunc) {
+        bool found = false;
+        
+        // Find the argument with the `lego.thread_id` attribute
+        for (BlockArgument arg : parentFunc.getArguments()) {
+          if (parentFunc.getArgAttr(arg.getArgNumber(), "lego.thread_id")) {
+            threadValMap[arg] = threadId;
+            found = true;
+            break;
+          }
+        }
+        
+        if (!found) {
+          apply.emitWarning("Could not find a block argument with 'lego.thread_id' attribute in parent function. Verification might not be accurate.");
+          // We can optionally return success() here to abort check early
+        }
       }
 
       // Build index values for this thread using a helper
@@ -141,24 +155,38 @@ private:
 
     // Check for bank conflicts
     // The layout generates element indices (not byte addresses)
-    // For 4-byte elements: Bank = element_index % NUM_BANKS
+    // byte_address = element_index * ELEMENT_SIZE
+    // bank_word = byte_address / 4
+    // bank = bank_word % NUM_BANKS
     // Conflicts occur when multiple threads access different addresses in the same bank
 
-    Value numBanks = smt::IntConstantOp::create(
+    Value numBanksConst = smt::IntConstantOp::create(
         b, apply.getLoc(), b.getI64IntegerAttr(NUM_BANKS));
+    Value elementSizeConst = smt::IntConstantOp::create(
+        b, apply.getLoc(), b.getI64IntegerAttr(ELEMENT_SIZE));
+    Value fourConst = smt::IntConstantOp::create(
+        b, apply.getLoc(), b.getI64IntegerAttr(4));
 
     // We check if there EXISTS a conflict (SAT = conflict exists)
     SmallVector<Value> conflicts;
 
     for (int i = 0; i < WARP_SIZE; ++i) {
       for (int j = i + 1; j < WARP_SIZE; ++j) {
-        // bank_i = addr_i % NUM_BANKS
+        // bank_i = (addr_i * ELEMENT_SIZE / 4) % NUM_BANKS
+        Value byte_addr_i = smt::IntMulOp::create(
+            b, apply.getLoc(), ValueRange{addresses[i], elementSizeConst});
+        Value bank_word_i = smt::IntDivOp::create(
+            b, apply.getLoc(), byte_addr_i, fourConst);
         Value bank_i = smt::IntModOp::create(
-            b, apply.getLoc(), addresses[i], numBanks);
+            b, apply.getLoc(), bank_word_i, numBanksConst);
 
-        // bank_j = addr_j % NUM_BANKS
+        // bank_j = (addr_j * ELEMENT_SIZE / 4) % NUM_BANKS
+        Value byte_addr_j = smt::IntMulOp::create(
+            b, apply.getLoc(), ValueRange{addresses[j], elementSizeConst});
+        Value bank_word_j = smt::IntDivOp::create(
+            b, apply.getLoc(), byte_addr_j, fourConst);
         Value bank_j = smt::IntModOp::create(
-            b, apply.getLoc(), addresses[j], numBanks);
+            b, apply.getLoc(), bank_word_j, numBanksConst);
 
         // Check if same bank AND different addresses
         Value sameBank = smt::EqOp::create(
@@ -182,8 +210,12 @@ private:
       Value eqAddr = smt::EqOp::create(b, apply.getLoc(), namedAddr, addresses[t]);
       smt::AssertOp::create(b, apply.getLoc(), eqAddr);
 
-      // Bank number (element_index % 32)
-      Value bank = smt::IntModOp::create(b, apply.getLoc(), addresses[t], numBanks);
+      // Bank number
+      Value byte_addr_t = smt::IntMulOp::create(
+          b, apply.getLoc(), ValueRange{addresses[t], elementSizeConst});
+      Value bank_word_t = smt::IntDivOp::create(
+          b, apply.getLoc(), byte_addr_t, fourConst);
+      Value bank = smt::IntModOp::create(b, apply.getLoc(), bank_word_t, numBanksConst);
       Value namedBank = smt::DeclareFunOp::create(
           b, apply.getLoc(),
           Type(b.getType<smt::IntType>()),
@@ -212,7 +244,7 @@ private:
       return success();
     }
 
-    SmallVector<std::string> varNames = {baseThreadVar};
+    SmallVector<std::string> varNames = {baseThreadVarName};
 
     // Add named variables for a sample of addresses and banks
     SmallVector<std::string> allVars = varNames;
@@ -234,9 +266,9 @@ private:
 
     if (result.isSat) {
       std::string warnMsg = "Layout may cause shared memory bank conflicts";
-      if (result.model.count(baseThreadVar)) {
+      if (result.model.count(baseThreadVarName)) {
         warnMsg += "\n  Counter-example starting at thread: " +
-                   std::to_string(result.model[baseThreadVar]);
+                   std::to_string(result.model[baseThreadVarName]);
       }
 
       // Show sample of addresses and banks to illustrate conflicts
