@@ -53,18 +53,10 @@ struct LegoExternalSMTVerifierPassImpl
     AsmState state(module);
     unsigned nextId = 0;
     
-    MLIRContext *ctx = &getContext();
     for (auto apply : applies) {
-      OwningOpRef<ModuleOp> smtModule = ModuleOp::create(apply.getLoc());
-      OpBuilder b(smtModule->getBodyRegion());
-      auto solver = smt::SolverOp::create(b, apply.getLoc(), TypeRange{}, ValueRange{});
-      if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
-      
-      OpBuilder::InsertionGuard guard(b);
-      b.setInsertionPointToStart(&solver.getRegion().front());
-      
-      smt::SetLogicOp::create(b, apply.getLoc(), "QF_NIA");
-      SMTBuilder builder(b, state, nextId);
+      SMTSolverContext smtCtx(apply.getLoc(), state, nextId);
+      OpBuilder &b = *smtCtx.b;
+      SMTBuilder &builder = *smtCtx.builder;
 
       SmallVector<Value> dims = getLayoutInputDims(apply.getLayout());
       for (Value d : dims) builder.getOrCreate(d);
@@ -87,41 +79,16 @@ struct LegoExternalSMTVerifierPassImpl
       }
       Value finalOOB = oobExprs.size() == 1 ? oobExprs[0] : smt::OrOp::create(b, apply.getLoc(), oobExprs);
       smt::AssertOp::create(b, apply.getLoc(), finalOOB);
-      
-      auto checkOp = smt::CheckOp::create(b, apply.getLoc(), TypeRange{});
-      for (Region &r : checkOp->getRegions()) {
-          OpBuilder::InsertionGuard g(b);
-          b.setInsertionPointToStart(&r.emplaceBlock());
-          smt::YieldOp::create(b, apply.getLoc(), ValueRange{});
-      }
-      smt::YieldOp::create(b, apply.getLoc(), ValueRange{});
-
-      
-      std::string smtLib;
-      llvm::raw_string_ostream os(smtLib);
-      if (failed(smt::exportSMTLIB(*smtModule, os))) {
-          apply.emitError("Failed to export SMT-LIB");
-          signalPassFailure();
-          continue;
-      }
-
-
-      if (runZ3(smtLib)) {
+      SMTResult result = smtCtx.checkSatisfiability({});
+      if (result.isSat) {
           apply.emitError("Out-of-bounds access is possible (proven by Z3)");
       }
     }
 
     for (auto inv : invs) {
-      OwningOpRef<ModuleOp> smtModule = ModuleOp::create(inv.getLoc());
-      OpBuilder b(smtModule->getBodyRegion());
-      auto solver = smt::SolverOp::create(b, inv.getLoc(), TypeRange{}, ValueRange{});
-      if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
-      
-      OpBuilder::InsertionGuard guard(b);
-      b.setInsertionPointToStart(&solver.getRegion().front());
-      
-      smt::SetLogicOp::create(b, inv.getLoc(), "QF_NIA");
-      SMTBuilder builder(b, state, nextId);
+      SMTSolverContext smtCtx(inv.getLoc(), state, nextId);
+      OpBuilder &b = *smtCtx.b;
+      SMTBuilder &builder = *smtCtx.builder;
 
       SmallVector<Value> dims = getLayoutInputDims(inv.getLayout());
       for (Value d : dims) builder.getOrCreate(d);
@@ -146,24 +113,8 @@ struct LegoExternalSMTVerifierPassImpl
       Value oob = smt::OrOp::create(b, inv.getLoc(), ValueRange{ltZero, geVol});
       
       smt::AssertOp::create(b, inv.getLoc(), oob);
-      auto checkOp = smt::CheckOp::create(b, inv.getLoc(), TypeRange{});
-      for (Region &r : checkOp->getRegions()) {
-          OpBuilder::InsertionGuard g(b);
-          b.setInsertionPointToStart(&r.emplaceBlock());
-          smt::YieldOp::create(b, inv.getLoc(), ValueRange{});
-      }
-      smt::YieldOp::create(b, inv.getLoc(), ValueRange{});
-
-      std::string smtLib;
-      llvm::raw_string_ostream os(smtLib);
-      if (failed(smt::exportSMTLIB(*smtModule, os))) {
-          inv.emitError("Failed to export SMT-LIB");
-          signalPassFailure();
-          continue;
-      }
-
-
-      if (runZ3(smtLib)) {
+      SMTResult result = smtCtx.checkSatisfiability({});
+      if (result.isSat) {
           inv.emitError("Out-of-bounds flat index is possible (proven by Z3)");
       }
     }

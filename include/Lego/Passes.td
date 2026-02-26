@@ -27,22 +27,6 @@ def LegoToArithPass : Pass<"lego-to-arith", "mlir::ModuleOp"> {
   ];
 }
 
-def LegoVerifyGenpConsistencyPass : Pass<"lego-verify-genp-consistency", "mlir::ModuleOp"> {
-  let summary = "Verify the consistency between apply and inv regions in gen_p";
-  let description = [{
-    This pass analyzes lego.gen_p operations to ensure that the 'apply' and 'inv'
-    regions are truly inverses of each other. It performs symbolic composition
-    and simplification to detect inconsistencies.
-  }];
-  let constructor = "mlir::lego::createLegoVerifyGenpConsistencyPass()";
-  let dependentDialects = [
-    "mlir::lego::LegoDialect",
-    "mlir::arith::ArithDialect",
-    "mlir::affine::AffineDialect",
-    "mlir::scf::SCFDialect"
-  ];
-}
-
 def LegoArithSimplificationPass : Pass<"lego-arith-simplification", "mlir::ModuleOp"> {
   let summary = "Simplify arithmetic operations using LEGO-specific algebraic identities";
   let description = [{
@@ -67,6 +51,49 @@ def LegoExternalSMTVerifierPass : Pass<"lego-external-smt-verifier", "mlir::Modu
   let summary = "Verify layout bounds using an external SMT solver (Z3)";
   let description = "Extracts arithmetic slices for lego.assert_* ops and runs external z3.";
   let constructor = "mlir::lego::createLegoExternalSMTVerifierPass()";
+}
+
+def LegoVerifyBijectivityPass : Pass<"lego-verify-bijectivity", "mlir::ModuleOp"> {
+  let summary = "Verify that layouts are bijective";
+  let description = [{
+    This pass verifies that for each gen_p layout, the apply and inv regions
+    are true inverses: ∀x. inv(apply(x)) = x and ∀y. apply(inv(y)) = y.
+    Uses Z3 to check these properties formally.
+  }];
+  let constructor = "mlir::lego::createLegoVerifyBijectivityPass()";
+}
+
+def LegoVerifyCoalescingPass : Pass<"lego-verify-coalescing", "mlir::ModuleOp"> {
+  let summary = "Verify that layouts produce coalesced memory access patterns";
+  let description = [{
+    This pass verifies that for a warp of threads, the layout
+    transformation produces memory addresses within a 128-byte cache line
+    (coalesced access). Uses Z3 to verify the property.
+  }];
+  let constructor = "mlir::lego::createLegoVerifyCoalescingPass()";
+  let options = [
+    Option<"warpSize", "warp-size", "int", "32",
+           "Number of threads in a warp">
+  ];
+}
+
+def LegoVerifyBankConflictsPass : Pass<"lego-verify-bank-conflicts", "mlir::ModuleOp"> {
+  let summary = "Verify freedom from shared memory bank conflicts";
+  let description = [{
+    This pass verifies that for a warp of threads accessing shared memory,
+    no two threads access different addresses in the same bank.
+    By default, verifies 32 threads, 32 banks, and 4-byte elements.
+    Uses Z3 to verify conflict-freedom.
+  }];
+  let constructor = "mlir::lego::createLegoVerifyBankConflictsPass()";
+  let options = [
+    Option<"warpSize", "warp-size", "int", "32",
+           "Number of threads in a warp">,
+    Option<"numBanks", "num-banks", "int", "32",
+           "Number of shared memory banks">,
+    Option<"elementSize", "element-size", "int", "4",
+           "Size of each element in bytes (used to compute bank indices)">
+  ];
 }
 
 #endif // LEGO_PASSES_TD
