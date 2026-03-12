@@ -69,12 +69,16 @@ cmake -G Ninja ../llvm \
    -DCMAKE_BUILD_TYPE=Release \
    -DLLVM_ENABLE_PROJECTS="mlir" \
    -DLLVM_TARGETS_TO_BUILD="X86;NVPTX" \
-   -DMLIR_ENABLE_CUDA_RUNNER=ON \
+   -DLLVM_INCLUDE_EXAMPLES=OFF \
+   -DLLVM_INCLUDE_BENCHMARKS=OFF \
+   -DLLVM_ENABLE_BINDINGS=OFF \
    -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
-   -DPython3_EXECUTABLE="$(which python)" \
-   -DLLVM_BUILD_EXAMPLES=OFF
+   -DPython3_EXECUTABLE="$(which python)"
 ninja
 ```
+
+> [!NOTE]
+> The default LLVM targets are `X86` (CPU) and `NVPTX` (NVIDIA GPU). To build for different architectures, change `-DLLVM_TARGETS_TO_BUILD` (e.g. `"AArch64;AMDGPU"`).
 
 Then set the build folder environment variable (still inside `build`):
 
@@ -112,11 +116,17 @@ pip install -e ./python
 The LEGO build system supports two modes. Both modes automatically detect and use fast linkers (`mold` or `lld`) and `ccache` for optimal performance.
 
 #### Option A: Monolithic Build (Recommended for first setup)
-This mode builds the LLVM/MLIR sub-project along with LEGO. It is slower (~5-10 mins) but ensures a consistent environment.
+This mode builds a minimal LLVM/MLIR (only the `mlir` project, CPU/GPU targets, with Python bindings and tests enabled, no examples/benchmarks/docs) along with LEGO. The first build includes LLVM/MLIR compilation, but subsequent rebuilds are incremental.
 
 ```bash
 cmake -S <project_root> -B <build_dir> -DLEGO_MONOLITHIC_LLVM=ON
 cmake --build <build_dir> -j$(nproc) --target check-lego
+```
+
+To customize which LLVM backend targets are built, pass `-DLEGO_LLVM_TARGETS` (defaults to `"X86;NVPTX"`):
+
+```bash
+cmake -S <project_root> -B <build_dir> -DLEGO_MONOLITHIC_LLVM=ON -DLEGO_LLVM_TARGETS="X86;NVPTX;AArch64"
 ```
 
 #### Option B: Decoupled Build (Recommended for fast developer iteration)
