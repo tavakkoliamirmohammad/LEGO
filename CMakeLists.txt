@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(LEGO_MONOLITHIC_LLVM "Build LLVM/MLIR as part of the project" OFF)
 option(LEGO_ENABLE_CCACHE "Enable ccache for faster recompilation" ON)
 option(LEGO_BUILD_TESTS "Build LEGO tests" ON)
+set(LEGO_LLVM_TARGETS "X86;NVPTX" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AArch64)")
 
 # --- Python & Venv Support ---
 # Prioritize the local virtual environment
@@ -61,7 +62,17 @@ if(LEGO_MONOLITHIC_LLVM)
   endif()
 
   set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
-  set(LLVM_TARGETS_TO_BUILD "X86;NVPTX" CACHE STRING "" FORCE)
+  set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
+
+  # Minimal LLVM/MLIR build: disable components LEGO does not need
+  set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
+  set(LLVM_ENABLE_BINDINGS OFF CACHE BOOL "" FORCE)
+  set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "" FORCE)
+  if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+  endif()
+
   add_subdirectory("${LLVM_SUBMODULE_DIR}/llvm" "llvm-build" EXCLUDE_FROM_ALL)
 
   set(MLIR_DIR "${LLVM_SUBMODULE_DIR}/mlir")
