@@ -121,22 +121,6 @@ _LAYOUT_DESC_TYPES = (
 )
 
 
-def _layout_from_sympy(block):
-    """Convert a SymPy-based layout block to a lightweight descriptor."""
-    from .lego import RegP, OrderBy, GroupBy
-
-    if isinstance(block, RegP):
-        return RegPDesc(block.dims(), block._raw_perm)
-    elif isinstance(block, OrderBy):
-        return OrderByDesc([_layout_from_sympy(p) for p in block.perms])
-    elif isinstance(block, GroupBy):
-        return GroupByDesc(
-            block.dims(),
-            [_layout_from_sympy(o) for o in block.objects],
-        )
-    else:
-        raise TypeError(f"Cannot convert {type(block).__name__} to descriptor")
-
 
 def _dtype_to_mlir(dtype):
     """Map numpy/torch dtype to MLIR element type string."""
@@ -148,6 +132,20 @@ def _dtype_to_mlir(dtype):
         np.int16: "i16",
         np.int8: "i8",
     }
+    try:
+        import torch
+        dtype_map.update({
+            torch.float32: "f32",
+            torch.float64: "f64",
+            torch.float16: "f16",
+            torch.bfloat16: "bf16",
+            torch.int32: "i32",
+            torch.int64: "i64",
+            torch.int16: "i16",
+            torch.int8: "i8",
+        })
+    except ImportError:
+        pass
     if hasattr(dtype, 'numpy_dtype'):
         dtype = dtype.numpy_dtype
     if hasattr(dtype, 'type'):
@@ -192,7 +190,10 @@ class IRBuilder:
 
     def __init__(self, layout_desc, shape, dtype_str="f32"):
         if not isinstance(layout_desc, _LAYOUT_DESC_TYPES):
-            layout_desc = _layout_from_sympy(layout_desc)
+            raise TypeError(
+                f"Expected a layout descriptor, got {type(layout_desc).__name__}. "
+                f"Use RegPDesc, RowDesc, ColDesc, OrderByDesc, GroupByDesc, TileByDesc, or GenPDesc."
+            )
         self._layout = layout_desc
         self._shape = shape
         self._dtype_str = dtype_str
@@ -463,8 +464,10 @@ class LayoutCompiler:
         if isinstance(layout, _LAYOUT_DESC_TYPES):
             self._layout = layout
         else:
-            # Convert SymPy-based GroupBy to descriptor
-            self._layout = _layout_from_sympy(layout)
+            raise TypeError(
+                f"Expected a layout descriptor, got {type(layout).__name__}. "
+                f"Use RegPDesc, RowDesc, ColDesc, OrderByDesc, GroupByDesc, TileByDesc, or GenPDesc."
+            )
         self._shape = tuple(int(s) for s in shape)
         if isinstance(dtype, str):
             self._dtype = dtype

@@ -173,16 +173,10 @@ class TestIRBuilderIntegration:
 
     def test_ir_builder_produces_valid_mlir(self):
         """Test that IRBuilder generates valid MLIR text."""
-        try:
-            from lego.compiler import IRBuilder
-        except ImportError:
-            pytest.skip("MLIR Python bindings not available")
+        from lego.compiler import IRBuilder, RowDesc, OrderByDesc, GroupByDesc
 
-        from lego.lego import Row, OrderBy, GroupBy
-
-        # Build a simple row-major layout
-        L = OrderBy(Row(4, 8)).GroupBy([(4, 8)])
-        builder = IRBuilder(L, (4, 8), "f32")
+        layout = GroupByDesc((4, 8), [OrderByDesc([RowDesc((4, 8))])])
+        builder = IRBuilder(layout, (4, 8), "f32")
         ctx, module = builder.build_module()
         with ctx:
             mlir_text = str(module)
@@ -195,18 +189,13 @@ class TestIRBuilderIntegration:
 
     def test_ir_builder_col_major(self):
         """Test IRBuilder with column-major layout."""
-        try:
-            from lego.compiler import IRBuilder
-        except ImportError:
-            pytest.skip("MLIR Python bindings not available")
+        from lego.compiler import IRBuilder, ColDesc, OrderByDesc, GroupByDesc
 
-        from lego.lego import Col, OrderBy
-
-        L = OrderBy(Col(4, 8)).GroupBy([(4, 8)])
-        builder = IRBuilder(L, (4, 8), "f32")
+        layout = GroupByDesc((4, 8), [OrderByDesc([ColDesc((4, 8))])])
+        builder = IRBuilder(layout, (4, 8), "f32")
         ctx, module = builder.build_module()
         with ctx:
             mlir_text = str(module)
 
-        assert "lego.reg_p" in mlir_text
+        assert "lego.col" in mlir_text
         assert "transform" in mlir_text

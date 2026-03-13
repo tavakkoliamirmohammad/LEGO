@@ -7,6 +7,9 @@
 using namespace mlir;
 using namespace mlir::lego;
 
+namespace mlir {
+namespace lego {
+
 /// Populates the standard lego-lower pipeline (LEGO → Arith).
 static void buildLegoLowerPipeline(OpPassManager &pm) {
   pm.addPass(createLegoNormalizationPass());
@@ -20,8 +23,7 @@ static void buildLegoLowerPipeline(OpPassManager &pm) {
 }
 
 /// Populates the full lego-to-llvm pipeline (LEGO → Arith → LLVM).
-static void buildLegoToLLVMPipeline(OpPassManager &pm) {
-  // First run the standard LEGO lowering
+void buildLegoToLLVMPipeline(OpPassManager &pm) {
   buildLegoLowerPipeline(pm);
 
   // Lower to LLVM dialect
@@ -37,7 +39,7 @@ static void buildLegoToLLVMPipeline(OpPassManager &pm) {
   pm.addPass(createCSEPass());
 }
 
-void mlir::lego::registerLegoPipelines() {
+void registerLegoPipelines() {
   PassPipelineRegistration<>("lego-lower",
     "Lego e2e lowering pipeline (LEGO -> Arith)",
     buildLegoLowerPipeline);
@@ -46,3 +48,6 @@ void mlir::lego::registerLegoPipelines() {
     "Full LEGO lowering to LLVM dialect (LEGO -> Arith -> LLVM)",
     buildLegoToLLVMPipeline);
 }
+
+} // namespace lego
+} // namespace mlir

@@ -10,7 +10,6 @@
 #include "Lego/LegoOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -23,9 +22,6 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
-#include "mlir/Transforms/Passes.h"
-
-#include "mlir/Conversion/Passes.h"
 
 #include "llvm/Support/TargetSelect.h"
 
@@ -61,30 +57,9 @@ LegoJITEngine::create(const std::string &mlirText, std::string *errorMsg) {
     return nullptr;
   }
 
-  // Run the lego-to-llvm pipeline
+  // Run the lego-to-llvm pipeline (defined in Passes.cpp)
   PassManager pm(jit->ctx.get());
-
-  // LEGO lowering stages
-  pm.addPass(createLegoNormalizationPass());
-  pm.addPass(createLegoToArithPass());
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
-  pm.addPass(createLegoArithSimplificationPass());
-  pm.addPass(arith::createIntRangeOptimizationsPass());
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
-
-  // Standard MLIR → LLVM lowering
-  pm.addPass(createSCFToControlFlowPass());
-  pm.addPass(createArithToLLVMConversionPass());
-  pm.addPass(createFinalizeMemRefToLLVMConversionPass());
-  pm.addPass(createConvertFuncToLLVMPass());
-  pm.addPass(createConvertControlFlowToLLVMPass());
-  pm.addPass(createReconcileUnrealizedCastsPass());
-
-  // Clean up LLVM IR
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+  buildLegoToLLVMPipeline(pm);
 
   if (failed(pm.run(*jit->module))) {
     if (errorMsg)
