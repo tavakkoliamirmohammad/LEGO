@@ -1,30 +1,18 @@
+# MLIRLego transitively provides LLVM lowering, dialect, and JIT deps.
+# Only list libs that lego-opt needs directly beyond what MLIRLego provides.
 set(LIBS
   MLIRLego
-  MLIRIR
   MLIRParser
   MLIRPass
   MLIRSupport
   MLIRTransforms
-  MLIRDialect
   MLIROptLib
-  # MLIRRegisterAllDialects
-  # MLIRRegisterAllExtensions
-  # MLIRRegisterAllPasses
   MLIRFuncDialect
   MLIRArithDialect
   MLIRSCFDialect
   MLIRMemRefDialect
   MLIRMathDialect
   MLIRArithTransforms
-  # LLVM lowering pipeline deps
-  MLIRControlFlowDialect
-  MLIRLLVMDialect
-  MLIRArithToLLVM
-  MLIRControlFlowToLLVM
-  MLIRFuncToLLVM
-  MLIRMemRefToLLVM
-  MLIRReconcileUnrealizedCasts
-  MLIRSCFToControlFlow
 )
 
 add_llvm_executable(lego-opt lego-opt.cpp)
