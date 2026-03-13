@@ -96,31 +96,25 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
     auto tileDims = op.getTileDims();
     Location loc = op.getLoc();
 
-    // 2. Identify the chain of objects from input OrderBy
+    // 2. Identify the chain of OrderBy objects from input.
     //    Python: for o in self.chain: ...
-    Operation *inputDefOp = op.getInput().getDefiningOp();
+    //    Each chain element must be a FULL OrderBy (not individual perms),
+    //    so that every GroupBy object has product-of-dims == total elements.
     SmallVector<Value> chain;
-    if (auto orderByOp = dyn_cast<OrderByOp>(inputDefOp)) {
-      auto range = orderByOp.getPerms();
-      chain.append(range.begin(), range.end());
-    } else {
-      chain.push_back(op.getInput());
-    }
+    chain.push_back(op.getInput());
 
-
-    
     SmallVector<Value> groupByObjects;
     for (size_t i = 0; i < chain.size(); ++i) {
         Value obj = chain[i];
-        
-        // Compute shuffle params
+
+        // Compute shuffle params using the full OrderBy's {d, q}
         auto [d_obj, q_obj] = getLayoutDQ(obj);
         auto objDims = getLayoutInputDims(obj);
         auto sigma_o = getSigmaPerm(d_obj, q_obj);
         auto sigma_o_inv = inversePermutation(sigma_o);
         auto reshuffleDims = sigmaValues(ValueRange(objDims), sigma_o);
-        
-        // Create RegP
+
+        // Create RegP over ALL the OrderBy's dims
         auto regPOp = RegPOp::create(
             rewriter, loc, op.getType(), rewriter.getI64ArrayAttr(sigma_o_inv),
             reshuffleDims);
@@ -133,12 +127,13 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
         groupByObjects.push_back(orderByOp.getResult());
     }
     
-    // Final reshuffle
+    // Final reshuffle: RegP(σ(tile_dims), σ⁻¹) per the formula
     {
         auto sigma_dq = getSigmaPerm(d_tile, q_tile);
+        auto sigma_dq_inv = inversePermutation(sigma_dq);
         auto reshuffledTileDims = sigmaValues(tileDims, sigma_dq);
         auto regPOp = RegPOp::create(rewriter, loc, op.getType(),
-                                     rewriter.getI64ArrayAttr(sigma_dq),
+                                     rewriter.getI64ArrayAttr(sigma_dq_inv),
                                      reshuffledTileDims);
 
         auto orderByOp = OrderByOp::create(rewriter, loc, regPOp.getType(),

@@ -1,15 +1,12 @@
+# MLIRLego transitively provides LLVM lowering, dialect, and JIT deps.
+# Only list libs that lego-opt needs directly beyond what MLIRLego provides.
 set(LIBS
   MLIRLego
-  MLIRIR
   MLIRParser
   MLIRPass
   MLIRSupport
   MLIRTransforms
-  MLIRDialect
   MLIROptLib
-  # MLIRRegisterAllDialects
-  # MLIRRegisterAllExtensions
-  # MLIRRegisterAllPasses
   MLIRFuncDialect
   MLIRArithDialect
   MLIRSCFDialect

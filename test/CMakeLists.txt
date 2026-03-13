@@ -33,8 +33,27 @@ if(TARGET not)
   list(APPEND LEGO_TEST_DEPENDS not)
 endif()
 
+# Add Python binding target as a dependency when available
+if(TARGET LegoPythonModules)
+  list(APPEND LEGO_TEST_DEPENDS LegoPythonModules)
+endif()
+
 add_lit_testsuite(check-lego "Running the Lego regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS
   ${LEGO_TEST_DEPENDS}
   )
+
+# Python tests (pytest) — runs after LegoPythonModules is built
+if(TARGET LegoPythonModules)
+  add_custom_target(check-lego-python
+    COMMAND ${CMAKE_COMMAND} -E env
+      "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+      "${Python_EXECUTABLE}" -m pytest
+        "${CMAKE_SOURCE_DIR}/python/tests" -v
+    DEPENDS LegoPythonModules
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Running LEGO Python tests"
+    USES_TERMINAL
+  )
+endif()

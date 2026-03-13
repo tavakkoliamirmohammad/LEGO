@@ -283,7 +283,8 @@ class OrderBy(LayoutBlock):
             new_order_by.append(o)
             new_order_by.append(
                 OrderBy(RegP(sigma(o_dims, sigma_o), sigma_o_inv)))
-        return GroupBy([dims], new_order_by + [OrderBy(RegP(dims, sigma_dq))], user_constraints)
+        sigma_dq_inv = inverse_permutation(sigma_dq)
+        return GroupBy([dims], new_order_by + [OrderBy(RegP(sigma(dims, sigma_dq), sigma_dq_inv))], user_constraints)
 
     def apply(self, idx: Tuple[Symbol, ...]) -> Symbol:
         """
@@ -439,6 +440,25 @@ class GroupBy(LayoutBlock):
     def _get_input_constraints(self):
         return list(map(lambda x: sp.Gt(x, 0, evaluate=False), set().union(
             *(e.free_symbols for t in [self.dims()] + [x.dims() for x in self.objects] for e in t if isinstance(e, sp.Expr)))))
+
+    def transform(self, tensor):
+        """Apply layout transform to a PyTorch tensor or NumPy array.
+
+        Uses the MLIR Python bindings + JIT compilation path when available,
+        otherwise falls back to interpreted (SymPy) evaluation.
+        """
+        from .compiler import get_compiler
+        if not hasattr(self, '_compiled'):
+            self._compiled = get_compiler(self, tensor.shape)
+        return self._compiled.transform_numpy(tensor) if hasattr(tensor, 'ctypes') \
+            else self._compiled.transform_numpy(tensor)
+
+    def inverse_transform(self, tensor):
+        """Apply inverse layout transform."""
+        from .compiler import get_compiler
+        if not hasattr(self, '_compiled'):
+            self._compiled = get_compiler(self, tensor.shape)
+        return self._compiled.inverse_transform_numpy(tensor)
 
     def __getitem__(self, key):
         if not isinstance(key, tuple):

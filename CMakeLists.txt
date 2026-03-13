@@ -69,6 +69,7 @@ if(LEGO_MONOLITHIC_LLVM)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_BINDINGS OFF CACHE BOOL "" FORCE)
   set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "" FORCE)
+  set(LLVM_ENABLE_Z3_SOLVER OFF CACHE BOOL "" FORCE)
   if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
   endif()
@@ -119,6 +120,103 @@ include_directories(${CMAKE_BINARY_DIR}/include)
 add_subdirectory(include/Lego)
 add_subdirectory(lib/Lego)
 add_subdirectory(tools/lego-opt)
+
+# --- Python Bindings for LEGO Dialect ---
+# Requires MLIR_ENABLE_BINDINGS_PYTHON=ON in the LLVM build.
+if(MLIR_ENABLE_BINDINGS_PYTHON)
+  # nanobind must be found before AddMLIRPython macros are used
+  find_package(Python REQUIRED COMPONENTS Interpreter Development)
+  find_package(nanobind CONFIG QUIET)
+  if(NOT nanobind_FOUND)
+    execute_process(
+      COMMAND "${Python3_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
+      OUTPUT_VARIABLE nanobind_DIR OUTPUT_STRIP_TRAILING_WHITESPACE)
+    find_package(nanobind CONFIG REQUIRED)
+  endif()
+
+  include(AddMLIRPython)
+
+  # Declare top-level Python source group
+  declare_mlir_python_sources(LegoPythonSources)
+  declare_mlir_python_sources(LegoPythonSources.Dialects
+    ADD_TO_PARENT LegoPythonSources)
+
+  # Generate Python op bindings from ODS
+  # LegoOps.td uses bare includes (e.g. "LegoDialect.td"), so add include/Lego
+  # to the directory include paths (used by tablegen() for -I flags).
+  include_directories(${CMAKE_SOURCE_DIR}/include/Lego)
+  declare_mlir_dialect_python_bindings(
+    ADD_TO_PARENT LegoPythonSources.Dialects
+    ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/python"
+    TD_FILE lego/dialects/LegoOps.td
+    SOURCES lego/dialects/lego_dialect.py
+    DIALECT_NAME lego)
+
+  # Build the nanobind extension for dialect registration
+  declare_mlir_python_extension(LegoPythonSources.Extension
+    MODULE_NAME _legoDialects
+    ADD_TO_PARENT LegoPythonSources
+    SOURCES python/cpp/LegoDialectPybind.cpp
+    EMBED_CAPI_LINK_LIBS MLIRLegoCAPI)
+
+  # Override the global MLIR_BINDINGS_PYTHON_NB_DOMAIN so that the buggy
+  # ${MLIR_BINDINGS_PYTHON_NB_DOMAIN} (without ARG_ prefix) reference in
+  # AddMLIRPython.cmake:add_mlir_python_extension also resolves to "lego".
+  set(MLIR_BINDINGS_PYTHON_NB_DOMAIN "lego")
+
+  # Sources shared between the CAPI library and the module assembly step.
+  set(_lego_python_sources
+    # Core MLIR Python package (mlir.ir, mlir._mlir_libs, etc.)
+    MLIRPythonSources.Core
+    # Standard dialects used by the LEGO compiler
+    MLIRPythonSources.Dialects.builtin
+    MLIRPythonSources.Dialects.arith
+    MLIRPythonSources.Dialects.func
+    MLIRPythonSources.Dialects.scf
+    MLIRPythonSources.Dialects.memref
+    # MLIR JIT execution engine (mlir.execution_engine.ExecutionEngine)
+    MLIRPythonSources.ExecutionEngine
+    # LEGO dialect Python bindings
+    LegoPythonSources
+  )
+
+  # Create a unified CAPI shared library.  Embeds all EMBED_CAPI_LINK_LIBS
+  # collected from the declared sources plus explicit per-dialect CAPI libs
+  # needed for dialect registration via load_all_available_dialects().
+  add_mlir_python_common_capi_library(LegoPythonCAPI
+    INSTALL_COMPONENT LegoPythonModules
+    INSTALL_DESTINATION "python_packages/lego/mlir/_mlir_libs"
+    OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python_packages/lego/mlir/_mlir_libs"
+    RELATIVE_INSTALL_ROOT "../../../.."
+    DECLARED_SOURCES
+      ${_lego_python_sources}
+    EMBED_LIBS
+      MLIRCAPITransforms
+  )
+
+  # Assemble final Python package.
+  add_mlir_python_modules(LegoPythonModules
+    ROOT_PREFIX "${CMAKE_BINARY_DIR}/python_packages/lego/mlir"
+    INSTALL_PREFIX "python_packages/lego/mlir"
+    DECLARED_SOURCES
+      ${_lego_python_sources}
+    COMMON_CAPI_LINK_LIBS
+      LegoPythonCAPI
+    MLIR_BINDINGS_PYTHON_NB_DOMAIN lego)
+
+  # Copy the generated _lego_ops_gen.py into the source tree so that
+  # ``from lego.dialects.lego_dialect import RowOp, ...`` works at runtime.
+  # The source-tree lego/dialects/ already has an _ods_common.py shim that
+  # re-exports from mlir.dialects._ods_common.
+  add_custom_command(
+    TARGET LegoPythonModules POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_BINARY_DIR}/lego/dialects/_lego_ops_gen.py"
+      "${CMAKE_SOURCE_DIR}/python/lego/dialects/_lego_ops_gen.py"
+    COMMENT "Copying _lego_ops_gen.py to source tree for lego.dialects import")
+endif()
+
+# --- Tests (after Python bindings so check-lego-python can depend on LegoPythonModules) ---
 if(LEGO_BUILD_TESTS)
   add_subdirectory(test)
 endif()

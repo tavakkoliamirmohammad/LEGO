@@ -11,7 +11,9 @@
 #include "Lego/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -24,6 +26,9 @@
 // Needed for registerArithPasses
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 
+// Needed for lego-to-llvm pipeline conversion passes
+#include "mlir/Conversion/Passes.h"
+
 int main(int argc, char **argv) {
   // mlir::registerAllPasses();
   // Register minimal passes
@@ -32,6 +37,13 @@ int main(int argc, char **argv) {
   mlir::registerSymbolDCEPass();
   // Register Arith passes (needed for int-range-optimizations)
   mlir::arith::registerArithPasses();
+  // Register conversion passes (needed for lego-to-llvm pipeline)
+  mlir::registerArithToLLVMConversionPass();
+  mlir::registerConvertControlFlowToLLVMPass();
+  mlir::registerConvertFuncToLLVMPass();
+  mlir::registerFinalizeMemRefToLLVMConversionPass();
+  mlir::registerReconcileUnrealizedCastsPass();
+  mlir::registerSCFToControlFlowPass();
   // Register LEGO passes
   mlir::lego::registerLegoToArithPass();
   mlir::lego::registerLegoNormalizationPass();
@@ -49,9 +61,8 @@ int main(int argc, char **argv) {
                   mlir::scf::SCFDialect, mlir::memref::MemRefDialect,
                   mlir::math::MathDialect>();
   registry.insert<mlir::lego::LegoDialect, mlir::smt::SMTDialect>();
-  
-  // Register the transform dialect extension if needed, 
-  // currently we just register the dialect which includes the ops.
+  // Dialects needed for lego-to-llvm pipeline
+  registry.insert<mlir::cf::ControlFlowDialect, mlir::LLVM::LLVMDialect>();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "LEGO Magic Optimizer Driver", registry));
