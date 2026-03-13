@@ -16,14 +16,13 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lego.lego import Row, Col, OrderBy, GroupBy, RegP, get_sigma_perm
 from lego.compiler import (
     LayoutCompiler, RegPDesc, RowDesc, ColDesc, OrderByDesc,
     GroupByDesc, TileByDesc,
 )
 from lego.tensor_api import (
     LegoLayout, RowMajor, ColMajor, Tiled,
-    row, col, order_by, tile_by, group_by,
+    row, col, reg_p, order_by, tile_by, group_by,
 )
 
 
@@ -51,9 +50,7 @@ class TestLayoutCompiler:
     def test_round_trip_regp(self):
         """RegP with reversed permutation: transform + inverse == identity."""
         shape = (4, 8)
-        perm = [1, 0]
-        L = OrderBy(RegP(shape, perm)).GroupBy([shape])
-        layout = LegoLayout(L, shape)
+        layout = LegoLayout(group_by(shape, order_by(reg_p(shape, [1, 0]))))
 
         result = layout.create_tensor(np.float32)
         back = layout.inverse_transform(result)
@@ -64,8 +61,7 @@ class TestLayoutCompiler:
     def test_3d_layout(self):
         """Test with a 3D shape."""
         shape = (2, 3, 4)
-        L = OrderBy(Row(*shape)).GroupBy([shape])
-        layout = LegoLayout(L, shape)
+        layout = LegoLayout(group_by(shape, order_by(row(*shape))))
 
         result = layout.create_tensor(np.float32)
         expected = np.arange(24, dtype=np.float32).reshape(shape)
@@ -111,11 +107,11 @@ class TestConvenienceConstructors:
         assert layout._shape == (8, 8)
 
     def test_custom_import(self):
-        """Custom wraps a GroupBy object."""
+        """Custom wraps a descriptor layout."""
         from lego.tensor_api import Custom
         shape = (4, 8)
-        L = OrderBy(Row(*shape)).GroupBy([shape])
-        layout = Custom(L, shape)
+        desc = group_by(shape, order_by(row(*shape)))
+        layout = Custom(desc, shape)
         assert layout._shape == shape
 
     def test_tiled_rank_mismatch(self):

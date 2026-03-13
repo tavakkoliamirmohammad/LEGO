@@ -251,10 +251,7 @@ class IRBuilder:
             layout_dims = self._layout.dims
             print(layout_dims)
 
-            dim_vals = []
-            for s in layout_dims:
-                c = arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(s)))
-                dim_vals.append(c.result)
+            dim_vals = [_index_const(s) for s in layout_dims]
 
             # Build the identity (row-major) layout for delinearization
             identity_group = self._make_identity_layout(layout_dims, dim_vals, idx_ty)
@@ -263,10 +260,10 @@ class IRBuilder:
             layout_val = self._emit_layout(self._layout, dim_vals, idx_ty)
 
             # Loop: scf.for %i = 0 to %n step 1
-            c0 = arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, 0))
-            c1 = arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, 1))
+            c0 = _index_const(0)
+            c1 = _index_const(1)
 
-            loop = scf_dialect.ForOp(c0.result, n, c1.result)
+            loop = scf_dialect.ForOp(c0, n, c1)
             with InsertionPoint(loop.body):
                 iv = loop.induction_variable
 
@@ -329,12 +326,7 @@ class IRBuilder:
         """Emit lego.group_by with its object layouts."""
         obj_vals = []
         for obj in group_by.objects:
-            obj_dim_vals = []
-            for d in obj.dims:
-                c = arith_dialect.ConstantOp(
-                    idx_ty, IntegerAttr.get(idx_ty, int(d))
-                )
-                obj_dim_vals.append(c.result)
+            obj_dim_vals = [_index_const(d) for d in obj.dims]
             obj_val = self._emit_layout(obj, obj_dim_vals, idx_ty)
             obj_vals.append(obj_val)
 
@@ -343,17 +335,11 @@ class IRBuilder:
     def _emit_tile_by(self, tile_by, idx_ty):
         """Emit lego.tile_by with its input layout and tile dimensions."""
         # Emit input layout (e.g. OrderByDesc) with its own dims
-        input_dim_vals = [
-            arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(d))).result
-            for d in tile_by.input.dims
-        ]
+        input_dim_vals = [_index_const(d) for d in tile_by.input.dims]
         input_val = self._emit_layout(tile_by.input, input_dim_vals, idx_ty)
 
         # Emit tile dim constants
-        tile_dim_vals = [
-            arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(d))).result
-            for d in tile_by.dims
-        ]
+        tile_dim_vals = [_index_const(d) for d in tile_by.dims]
         return _emit_tile_by(input_val, tile_dim_vals, tile_by.tile_shape)
 
 
@@ -365,6 +351,12 @@ def _lego_layout_type():
     """Get the !lego.layout type from the current context."""
     from mlir.ir import Type
     return Type.parse("!lego.layout")
+
+
+def _index_const(val):
+    """Emit an arith.constant with an index value. Returns the SSA result."""
+    idx_ty = IndexType.get()
+    return arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(val))).result
 
 
 def _emit_reg_p(perm, dim_vals):

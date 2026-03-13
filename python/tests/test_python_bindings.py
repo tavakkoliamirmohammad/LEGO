@@ -15,6 +15,20 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
+def _index_const(val):
+    """Emit an arith.constant with an index value."""
+    from mlir.ir import IndexType, IntegerAttr
+    from mlir.dialects import arith
+    idx_ty = IndexType.get()
+    return arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(val))).result
+
+
+def _layout_ty():
+    """Get the !lego.layout type."""
+    from mlir.ir import Type
+    return Type.parse("!lego.layout")
+
+
 class TestDialectRegistration:
     """Test that the LEGO dialect can be registered with MLIR Python bindings."""
 
@@ -37,9 +51,8 @@ class TestDialectRegistration:
 
     def test_parse_lego_type(self, mlir_ctx):
         """Test parsing !lego.layout type."""
-        from mlir.ir import Type
         with mlir_ctx:
-            ty = Type.parse("!lego.layout")
+            ty = _layout_ty()
             assert "lego.layout" in str(ty)
 
     def test_parse_lego_view_type(self, mlir_ctx):
@@ -56,12 +69,7 @@ class TestOpConstruction:
     @pytest.fixture
     def setup(self):
         try:
-            from mlir.ir import (
-                Context, Location, Module, InsertionPoint,
-                IndexType, IntegerType, IntegerAttr, ArrayAttr,
-                FunctionType, Operation, Type,
-            )
-            from mlir.dialects import func, arith
+            from mlir.ir import Context
             from lego.dialects.lego_dialect import register
         except ImportError:
             pytest.skip("MLIR Python bindings not available")
@@ -72,35 +80,23 @@ class TestOpConstruction:
 
     def test_build_row_op(self, setup):
         """Test building a lego.row op."""
-        from mlir.ir import (
-            Location, Module, InsertionPoint, IndexType,
-            IntegerAttr, Operation, Type,
-        )
-        from mlir.dialects import arith
+        from mlir.ir import Location, Module, InsertionPoint, FunctionType
+        from mlir.dialects import func
+        from lego.dialects.lego_dialect import RowOp
 
         ctx = setup
         with ctx, Location.unknown():
             module = Module.create()
-            idx_ty = IndexType.get()
-            layout_ty = Type.parse("!lego.layout")
+            layout_ty = _layout_ty()
 
             with InsertionPoint(module.body):
-                from mlir.ir import FunctionType
-                from mlir.dialects import func
-
                 func_ty = FunctionType.get([], [layout_ty])
                 f = func.FuncOp("test_row", func_ty)
                 entry = f.add_entry_block()
 
                 with InsertionPoint(entry):
-                    c4 = arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, 4))
-                    c8 = arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, 8))
-
-                    row = Operation.create(
-                        "lego.row",
-                        results=[layout_ty],
-                        operands=[c4.result, c8.result],
-                    )
+                    row = RowOp(result=layout_ty,
+                                dims=[_index_const(4), _index_const(8)])
                     func.ReturnOp([row.result])
 
             module_text = str(module)
@@ -110,41 +106,31 @@ class TestOpConstruction:
     def test_build_reg_p_op(self, setup):
         """Test building a lego.reg_p op."""
         from mlir.ir import (
-            Location, Module, InsertionPoint, IndexType,
-            IntegerType, IntegerAttr, ArrayAttr, Operation, Type,
+            Location, Module, InsertionPoint,
+            IntegerType, IntegerAttr, ArrayAttr, FunctionType,
         )
-        from mlir.dialects import arith
+        from mlir.dialects import func
+        from lego.dialects.lego_dialect import RegPOp
 
         ctx = setup
         with ctx, Location.unknown():
             module = Module.create()
-            idx_ty = IndexType.get()
             i64_ty = IntegerType.get_signless(64)
-            layout_ty = Type.parse("!lego.layout")
+            layout_ty = _layout_ty()
 
             with InsertionPoint(module.body):
-                from mlir.ir import FunctionType
-                from mlir.dialects import func
-
                 func_ty = FunctionType.get([], [layout_ty])
                 f = func.FuncOp("test_regp", func_ty)
                 entry = f.add_entry_block()
 
                 with InsertionPoint(entry):
-                    c4 = arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, 4))
-                    c8 = arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, 8))
-
                     perm = ArrayAttr.get([
                         IntegerAttr.get(i64_ty, 1),
                         IntegerAttr.get(i64_ty, 0),
                     ])
 
-                    regp = Operation.create(
-                        "lego.reg_p",
-                        results=[layout_ty],
-                        operands=[c4.result, c8.result],
-                        attributes={"perm": perm},
-                    )
+                    regp = RegPOp(result=layout_ty, perm=perm,
+                                  dims=[_index_const(4), _index_const(8)])
                     func.ReturnOp([regp.result])
 
             module_text = str(module)
@@ -154,16 +140,16 @@ class TestOpConstruction:
     def test_build_apply_op(self, setup):
         """Test building lego.apply op."""
         from mlir.ir import (
-            Location, Module, InsertionPoint, IndexType,
-            IntegerAttr, Operation, Type, FunctionType,
+            Location, Module, InsertionPoint, IndexType, FunctionType,
         )
-        from mlir.dialects import arith, func
+        from mlir.dialects import func
+        from lego.dialects.lego_dialect import RowOp, ApplyOp
 
         ctx = setup
         with ctx, Location.unknown():
             module = Module.create()
             idx_ty = IndexType.get()
-            layout_ty = Type.parse("!lego.layout")
+            layout_ty = _layout_ty()
 
             with InsertionPoint(module.body):
                 func_ty = FunctionType.get([idx_ty, idx_ty], [idx_ty])
@@ -172,19 +158,10 @@ class TestOpConstruction:
                 i, j = entry.arguments
 
                 with InsertionPoint(entry):
-                    c4 = arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, 4))
-                    c8 = arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, 8))
-
-                    row = Operation.create(
-                        "lego.row",
-                        results=[layout_ty],
-                        operands=[c4.result, c8.result],
-                    )
-                    apply_op = Operation.create(
-                        "lego.apply",
-                        results=[idx_ty],
-                        operands=[row.result, i, j],
-                    )
+                    row = RowOp(result=layout_ty,
+                                dims=[_index_const(4), _index_const(8)])
+                    apply_op = ApplyOp(flat_index=idx_ty, layout=row.result,
+                                       indices=[i, j])
                     func.ReturnOp([apply_op.result])
 
             module_text = str(module)

@@ -23,7 +23,7 @@ import time
 import numpy as np
 from .compiler import (
     RegPDesc, RowDesc, ColDesc, OrderByDesc, GroupByDesc, TileByDesc, GenPDesc,
-    _LAYOUT_DESC_TYPES, _layout_from_sympy,
+    _LAYOUT_DESC_TYPES,
     LayoutCompiler, _dtype_to_mlir,
 )
 
@@ -87,12 +87,14 @@ class LegoLayout:
     def __init__(self, layout, shape=None):
         """
         Args:
-            layout: Any layout descriptor (GroupByDesc, TileByDesc, etc.) or SymPy layout
+            layout: Any layout descriptor (GroupByDesc, TileByDesc, etc.)
             shape: Tuple of concrete dimension sizes (optional, inferred from layout.dims)
         """
         if not isinstance(layout, _LAYOUT_DESC_TYPES):
-            # Convert SymPy-based layout to descriptor
-            layout = _layout_from_sympy(layout)
+            raise TypeError(
+                f"Expected a layout descriptor type, got {type(layout).__name__}. "
+                f"Use row(), col(), order_by(), tile_by(), group_by() constructors."
+            )
         self._layout = layout
         if shape is None:
             shape = layout.dims
@@ -264,10 +266,10 @@ def Tiled(shape, tile_shape):
 
 
 def Custom(layout_obj, shape):
-    """Wrap an existing layout object (any descriptor type or SymPy layout).
+    """Wrap an existing layout descriptor.
 
     Args:
-        layout_obj: A layout descriptor or SymPy layout object
+        layout_obj: A layout descriptor
         shape: Tuple of dimension sizes
     """
     return LegoLayout(layout_obj, shape)
