@@ -1,3 +1,7 @@
+# PIC is required for all targets in this directory — they get linked into
+# nanobind shared modules for the Python bindings.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 include_directories(${CMAKE_BINARY_DIR}/include)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -50,6 +54,7 @@ add_mlir_dialect_library(MLIRLego
   LegoVerifyBankConflicts.cpp
   SMTUtils.cpp
   Passes.cpp
+  LegoJITEngine.cpp
 
   DEPENDS
   MLIRLegoDialectIncGen
@@ -61,4 +66,20 @@ add_mlir_dialect_library(MLIRLego
   MLIRSideEffectInterfaces
   MLIRSMT
   MLIRExportSMTLIB
+  # LLVM lowering pipeline deps
+  MLIRArithToLLVM
+  MLIRControlFlowToLLVM
+  MLIRFuncToLLVM
+  MLIRMemRefToLLVM
+  MLIRReconcileUnrealizedCasts
+  MLIRSCFToControlFlow
+  MLIRControlFlowDialect
+  MLIRLLVMDialect
+  # JIT engine deps
+  MLIRExecutionEngine
+  MLIRTargetLLVMIRExport
+  MLIRLLVMToLLVMIRTranslation
+  MLIRBuiltinToLLVMIRTranslation
 )
+
+add_subdirectory(CAPI)

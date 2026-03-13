@@ -16,6 +16,15 @@ set(LIBS
   MLIRMemRefDialect
   MLIRMathDialect
   MLIRArithTransforms
+  # LLVM lowering pipeline deps
+  MLIRControlFlowDialect
+  MLIRLLVMDialect
+  MLIRArithToLLVM
+  MLIRControlFlowToLLVM
+  MLIRFuncToLLVM
+  MLIRMemRefToLLVM
+  MLIRReconcileUnrealizedCasts
+  MLIRSCFToControlFlow
 )
 
 add_llvm_executable(lego-opt lego-opt.cpp)

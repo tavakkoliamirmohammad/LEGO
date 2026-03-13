@@ -209,6 +209,7 @@ class RegP(LayoutBlock):
                    index tuple and returns the permuted multi-dimensional index tuple.
         """
         self._dims = nd
+        self._raw_perm = list(perm)  # Store for MLIR serialization
         self.perm = lambda idx: sigma(idx, perm)
         self.perm_inv = lambda idx: sigma(idx, inverse_permutation(perm))
 
@@ -439,6 +440,25 @@ class GroupBy(LayoutBlock):
     def _get_input_constraints(self):
         return list(map(lambda x: sp.Gt(x, 0, evaluate=False), set().union(
             *(e.free_symbols for t in [self.dims()] + [x.dims() for x in self.objects] for e in t if isinstance(e, sp.Expr)))))
+
+    def transform(self, tensor):
+        """Apply layout transform to a PyTorch tensor or NumPy array.
+
+        Uses the MLIR Python bindings + JIT compilation path when available,
+        otherwise falls back to interpreted (SymPy) evaluation.
+        """
+        from .compiler import get_compiler
+        if not hasattr(self, '_compiled'):
+            self._compiled = get_compiler(self, tensor.shape)
+        return self._compiled.transform_numpy(tensor) if hasattr(tensor, 'ctypes') \
+            else self._compiled.transform_numpy(tensor)
+
+    def inverse_transform(self, tensor):
+        """Apply inverse layout transform."""
+        from .compiler import get_compiler
+        if not hasattr(self, '_compiled'):
+            self._compiled = get_compiler(self, tensor.shape)
+        return self._compiled.inverse_transform_numpy(tensor)
 
     def __getitem__(self, key):
         if not isinstance(key, tuple):
