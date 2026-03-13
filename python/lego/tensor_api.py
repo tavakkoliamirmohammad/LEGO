@@ -84,18 +84,46 @@ class LegoLayout:
     tensors, with automatic JIT compilation and caching.
     """
 
-    def __init__(self, layout, shape):
+    def __init__(self, layout, shape=None):
         """
         Args:
             layout: Any layout descriptor (GroupByDesc, TileByDesc, etc.) or SymPy layout
-            shape: Tuple of concrete dimension sizes
+            shape: Tuple of concrete dimension sizes (optional, inferred from layout.dims)
         """
         if not isinstance(layout, _LAYOUT_DESC_TYPES):
             # Convert SymPy-based layout to descriptor
             layout = _layout_from_sympy(layout)
         self._layout = layout
+        if shape is None:
+            shape = layout.dims
         self._shape = tuple(int(s) for s in shape)
+        self._numel = 1
+        for s in self._shape:
+            self._numel *= s
         self._cache = {}  # (shape, dtype_str) -> compiler
+
+    @property
+    def shape(self):
+        """The logical shape of the layout."""
+        return self._shape
+
+    @property
+    def numel(self):
+        """Total number of elements."""
+        return self._numel
+
+    def create_tensor(self, dtype):
+        """Create a tensor viewed through this layout.
+
+        Generates a flat identity range [0, 1, ..., numel-1], applies the
+        layout transform, and returns the result reshaped to the layout's
+        logical shape.
+
+        Args:
+            dtype: NumPy dtype (e.g. np.float32, "float32")
+        """
+        arr = np.arange(self._numel, dtype=dtype)
+        return self.transform(arr)
 
     def _get_compiler(self, tensor):
         """Get or create a compiler for the given tensor's dtype."""
@@ -117,20 +145,20 @@ class LegoLayout:
         """Apply the layout transformation to a tensor.
 
         Args:
-            tensor: NumPy array or PyTorch tensor
+            tensor: NumPy array or PyTorch tensor (any shape with matching element count)
 
         Returns:
-            Transformed tensor of the same type, shape, and dtype
+            Transformed tensor reshaped to the layout's logical shape
         """
         compiler = self._get_compiler(tensor)
 
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
             from .torch_ops import LegoTransformFunction
             if LegoTransformFunction is not None:
-                return LegoTransformFunction.apply(tensor, compiler)
+                return LegoTransformFunction.apply(tensor, compiler).reshape(self._shape)
 
         if isinstance(tensor, np.ndarray):
-            return compiler.transform_numpy(tensor)
+            return compiler.transform_numpy(tensor).reshape(self._shape)
 
         raise TypeError(f"Unsupported tensor type: {type(tensor)}")
 
@@ -141,17 +169,17 @@ class LegoLayout:
             tensor: Transformed NumPy array or PyTorch tensor
 
         Returns:
-            Original-layout tensor
+            Original-layout tensor reshaped to the layout's logical shape
         """
         compiler = self._get_compiler(tensor)
 
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
             from .torch_ops import LegoInverseTransformFunction
             if LegoInverseTransformFunction is not None:
-                return LegoInverseTransformFunction.apply(tensor, compiler)
+                return LegoInverseTransformFunction.apply(tensor, compiler).reshape(self._shape)
 
         if isinstance(tensor, np.ndarray):
-            return compiler.inverse_transform_numpy(tensor)
+            return compiler.inverse_transform_numpy(tensor).reshape(self._shape)
 
         raise TypeError(f"Unsupported tensor type: {type(tensor)}")
 

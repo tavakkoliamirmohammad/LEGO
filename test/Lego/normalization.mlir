@@ -58,13 +58,34 @@ func.func @test_tile_by_chain() -> !lego.layout {
 
 // CHECK: %[[R_REGP:.*]] = lego.reg_p perm [0] dims[%{{.*}}]
 // CHECK: %[[C_REGP:.*]] = lego.reg_p perm [0] dims[%{{.*}}]
-// CHECK: %[[RP1:.*]] = lego.reg_p perm [0] dims[%{{.*}}]
+// CHECK: %[[OB:.*]] = lego.order_by(%[[R_REGP]], %[[C_REGP]])
+// CHECK: %[[RP1:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
 // CHECK: %[[OB1:.*]] = lego.order_by(%[[RP1]])
-// CHECK: %[[RP2:.*]] = lego.reg_p perm [0] dims[%{{.*}}]
-// CHECK: %[[OB2:.*]] = lego.order_by(%[[RP2]])
 // CHECK: %[[RPF:.*]] = lego.reg_p perm [0, 1, 2, 3] dims[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}]
 // CHECK: %[[OBF:.*]] = lego.order_by(%[[RPF]])
-// CHECK: lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[R_REGP]], %[[OB1]], %[[C_REGP]], %[[OB2]], %[[OBF]])
+// CHECK: lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[OB]], %[[OB1]], %[[OBF]])
+
+// CHECK-LABEL: func @test_tile_by_d2_q3
+func.func @test_tile_by_d2_q3() -> !lego.layout {
+  // TileBy(Row(6, 6), [[2, 2], [3, 3], [1, 1]])
+  // d=2, q=3 → σ=[0,2,4,1,3,5], σ⁻¹=[0,3,1,4,2,5]
+  %c6 = arith.constant 6 : index
+  %0 = lego.row [%c6, %c6] : !lego.layout
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %c1 = arith.constant 1 : index
+  %1 = lego.tile_by %0 tile_dims [[%c2, %c2], [%c3, %c3], [%c1, %c1]] : !lego.layout
+  return %1 : !lego.layout
+}
+
+// Middle reshuffle for Row(6,6): d=2, q=1 → σ=[0,1] (identity)
+// CHECK: %[[ROW_REGP:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
+// CHECK: %[[RP_MID:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
+// CHECK: %[[OB_MID:.*]] = lego.order_by(%[[RP_MID]])
+// Final reshuffle: d=2, q=3 → σ⁻¹=[0, 3, 1, 4, 2, 5]
+// CHECK: %[[RPF:.*]] = lego.reg_p perm [0, 3, 1, 4, 2, 5] dims[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}]
+// CHECK: %[[OBF:.*]] = lego.order_by(%[[RPF]])
+// CHECK: lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[ROW_REGP]], %[[OB_MID]], %[[OBF]])
 
 // CHECK-LABEL: func.func @test_assume_bounds
 // CHECK-SAME: (%[[VAL:arg[0-9]+]]: index, %[[LB:arg[0-9]+]]: index, %[[UB:arg[0-9]+]]: index)

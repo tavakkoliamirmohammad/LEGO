@@ -445,10 +445,10 @@ func.func @tileby_1d_apply(%it: index, %ib: index) -> index {
 // CHECK-LABEL: func.func @tileby_1d_inv
 // CHECK-SAME:  (%[[F:.*]]: index)
 // CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
-// CHECK:       arith.remui %[[F]], %{{.*}} : index
-// CHECK:       %[[REM:.*]] = arith.remui %{{.*}} : index
-// CHECK:       %[[IT:.*]] = arith.divui %[[REM]], %[[C16]] : index
-// CHECK:       %[[IB:.*]] = arith.remui %[[REM]], %[[C16]] : index
+// CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
+// CHECK:       arith.remui %[[F]], %[[C64]] : index
+// CHECK:       arith.divui %{{.*}}, %[[C16]] : index
+// CHECK:       arith.remui %{{.*}}, %[[C16]] : index
 // CHECK:       return %{{.*}}, %{{.*}} : index, index
 func.func @tileby_1d_inv(%f: index) -> (index, index) {
   %c64 = arith.constant 64 : index

@@ -284,7 +284,8 @@ class OrderBy(LayoutBlock):
             new_order_by.append(o)
             new_order_by.append(
                 OrderBy(RegP(sigma(o_dims, sigma_o), sigma_o_inv)))
-        return GroupBy([dims], new_order_by + [OrderBy(RegP(dims, sigma_dq))], user_constraints)
+        sigma_dq_inv = inverse_permutation(sigma_dq)
+        return GroupBy([dims], new_order_by + [OrderBy(RegP(sigma(dims, sigma_dq), sigma_dq_inv))], user_constraints)
 
     def apply(self, idx: Tuple[Symbol, ...]) -> Symbol:
         """

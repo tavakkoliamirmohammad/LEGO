@@ -33,47 +33,43 @@ class TestLayoutCompiler:
     def test_row_major_identity(self):
         """Row-major transform should be identity (no data movement)."""
         shape = (4, 8)
-        L = OrderBy(Row(*shape)).GroupBy([shape])
-        compiler = LayoutCompiler(L, shape)
+        layout = RowMajor(shape)
+        result = layout.create_tensor(np.float32)
 
-        arr = np.arange(32, dtype=np.float32).reshape(shape)
-        result = compiler.transform_numpy(arr)
-
-        np.testing.assert_array_equal(arr, result)
+        expected = np.arange(32, dtype=np.float32).reshape(shape)
+        np.testing.assert_array_equal(result, expected)
 
     def test_col_major_round_trip(self):
         """Col-major round-trip should return original data."""
-        shape = (4, 8)
-        L = OrderBy(Col(*shape)).GroupBy([shape])
-        compiler = LayoutCompiler(L, shape)
+        layout = ColMajor((4, 8))
+        result = layout.create_tensor(np.float32)
+        back = layout.inverse_transform(result)
 
-        arr = np.arange(32, dtype=np.float32).reshape(shape)
-        result = compiler.transform_numpy(arr)
-
-        back = compiler.inverse_transform_numpy(result)
-        np.testing.assert_array_equal(arr, back)
+        expected = np.arange(32, dtype=np.float32).reshape(4, 8)
+        np.testing.assert_array_equal(back, expected)
 
     def test_round_trip_regp(self):
         """RegP with reversed permutation: transform + inverse == identity."""
         shape = (4, 8)
         perm = [1, 0]
         L = OrderBy(RegP(shape, perm)).GroupBy([shape])
-        compiler = LayoutCompiler(L, shape)
+        layout = LegoLayout(L, shape)
 
-        arr = np.random.randn(*shape).astype(np.float32)
-        transformed = compiler.transform_numpy(arr)
-        back = compiler.inverse_transform_numpy(transformed)
-        np.testing.assert_array_almost_equal(arr, back)
+        result = layout.create_tensor(np.float32)
+        back = layout.inverse_transform(result)
+
+        expected = np.arange(32, dtype=np.float32).reshape(shape)
+        np.testing.assert_array_almost_equal(back, expected)
 
     def test_3d_layout(self):
         """Test with a 3D shape."""
         shape = (2, 3, 4)
         L = OrderBy(Row(*shape)).GroupBy([shape])
-        compiler = LayoutCompiler(L, shape)
+        layout = LegoLayout(L, shape)
 
-        arr = np.arange(24, dtype=np.float32).reshape(shape)
-        result = compiler.transform_numpy(arr)
-        np.testing.assert_array_equal(arr, result)
+        result = layout.create_tensor(np.float32)
+        expected = np.arange(24, dtype=np.float32).reshape(shape)
+        np.testing.assert_array_equal(result, expected)
 
 
 class TestGroupByTransform:
@@ -82,19 +78,18 @@ class TestGroupByTransform:
     def test_groupby_transform(self):
         """GroupBy.transform works on NumPy arrays."""
         shape = (4, 8)
-        L = OrderBy(Row(*shape)).GroupBy([shape])
-        arr = np.arange(32, dtype=np.float32).reshape(shape)
-        result = L.transform(arr)
-        assert result.shape == arr.shape
+        layout = RowMajor(shape)
+        result = layout.create_tensor(np.float32)
+        assert result.shape == shape
 
     def test_groupby_inverse_transform(self):
         """GroupBy.inverse_transform reverses the transform."""
         shape = (4, 8)
-        L = OrderBy(Row(*shape)).GroupBy([shape])
-        arr = np.arange(32, dtype=np.float32).reshape(shape)
-        result = L.transform(arr)
-        back = L.inverse_transform(result)
-        np.testing.assert_array_equal(arr, back)
+        layout = RowMajor(shape)
+        result = layout.create_tensor(np.float32)
+        back = layout.inverse_transform(result)
+        expected = np.arange(32, dtype=np.float32).reshape(shape)
+        np.testing.assert_array_equal(back, expected)
 
 
 class TestConvenienceConstructors:
@@ -138,19 +133,18 @@ class TestLegoLayout:
             LegoLayout("not a layout", (4, 8))
 
     def test_lego_layout_transform_numpy(self):
-        """LegoLayout.transform works with NumPy."""
+        """LegoLayout.create_tensor works with NumPy."""
         layout = RowMajor((4, 8))
-        arr = np.arange(32, dtype=np.float32).reshape(4, 8)
-        result = layout.transform(arr)
+        result = layout.create_tensor(np.float32)
         assert result.shape == (4, 8)
 
     def test_lego_layout_round_trip_numpy(self):
-        """LegoLayout round-trip: transform + inverse_transform == identity."""
-        layout = RowMajor((4, 8))
-        arr = np.random.randn(4, 8).astype(np.float32)
-        result = layout.transform(arr)
+        """LegoLayout round-trip: create_tensor + inverse_transform == identity."""
+        layout = ColMajor((4, 8))
+        result = layout.create_tensor(np.float32)
         back = layout.inverse_transform(result)
-        np.testing.assert_array_almost_equal(arr, back)
+        expected = np.arange(32, dtype=np.float32).reshape(4, 8)
+        np.testing.assert_array_almost_equal(back, expected)
 
 
 class TestDescriptorAPI:
@@ -224,52 +218,44 @@ class TestDescriptorAPI:
     def test_row_major_round_trip_with_row_desc(self):
         """RowMajor with RowDesc compiles and round-trips correctly."""
         layout = RowMajor((4, 8))
-        arr = np.arange(32, dtype=np.float32).reshape(4, 8)
-        result = layout.transform(arr)
-        np.testing.assert_array_equal(arr, result)
+        result = layout.create_tensor(np.float32)
+        expected = np.arange(32, dtype=np.float32).reshape(4, 8)
+        np.testing.assert_array_equal(result, expected)
 
     def test_col_major_round_trip_with_col_desc(self):
         """ColMajor with ColDesc compiles and round-trips correctly."""
         layout = ColMajor((4, 8))
-        arr = np.arange(32, dtype=np.float32).reshape(4, 8)
-        result = layout.transform(arr)
+        result = layout.create_tensor(np.float32)
         back = layout.inverse_transform(result)
-        np.testing.assert_array_almost_equal(arr, back)
+        expected = np.arange(32, dtype=np.float32).reshape(4, 8)
+        np.testing.assert_array_almost_equal(back, expected)
 
     def test_col_major_produces_col_order(self):
-        """ColMajor actually reorders data to column-major."""
-        shape = (4, 8)
-        layout = ColMajor(shape)
-        arr = np.arange(32, dtype=np.float32).reshape(shape)
-        result = layout.transform(arr)
+        """ColMajor create_tensor: result[i,j] = flat[col_major_index(i,j)]."""
+        layout = ColMajor((4, 8))
+        result = layout.create_tensor(np.float32)
 
-        # Col-major flat order groups by column:
-        # col 0: [0, 8, 16, 24], col 1: [1, 9, 17, 25], ...
-        expected_flat = np.array([
-            arr[r, c]
-            for c in range(8)
-            for r in range(4)
-        ], dtype=np.float32)
-        np.testing.assert_array_equal(result.ravel(), expected_flat)
+        # Col-major indexing: flat_idx = col * nrows + row
+        # So result[i,j] = flat[j * 4 + i]
+        expected = np.arange(32, dtype=np.float32).reshape((4, 8), order='F')
+        np.testing.assert_array_equal(result, expected)
+        assert result[0, 1] == 4  # j=1, i=0 → flat[1*4+0] = flat[4] = 4
 
     def test_tiled_round_trip(self):
         """Tiled with TileByDesc compiles and round-trips correctly."""
         layout = Tiled((8, 8), tile_shape=(4, 4))
-        arr = np.arange(64, dtype=np.float32).reshape(8, 8)
-        result = layout.transform(arr)
+        result = layout.create_tensor(np.float32)
         back = layout.inverse_transform(result)
-        np.testing.assert_array_almost_equal(arr, back)
+        expected = np.arange(64, dtype=np.float32).reshape(8, 8)
+        np.testing.assert_array_almost_equal(back, expected)
 
     def test_composable_api_col_tile(self):
         """order_by(col(...)).tile_by(...) composes correctly."""
-        layout = LegoLayout(
-            order_by(col(4, 8)).tile_by((4,), (8,)),
-            (4, 8),
-        )
-        arr = np.arange(32, dtype=np.float32).reshape(4, 8)
-        result = layout.transform(arr)
+        layout = LegoLayout(order_by(col(4, 8)).tile_by((4,), (8,)))
+        result = layout.create_tensor(np.float32)
         back = layout.inverse_transform(result)
-        np.testing.assert_array_almost_equal(arr, back)
+        expected = np.arange(32, dtype=np.float32).reshape(4, 8)
+        np.testing.assert_array_almost_equal(back, expected)
 
     def test_mlir_text_contains_row_op(self):
         """RowMajor MLIR text contains lego.row."""
@@ -301,62 +287,38 @@ class TestPyTorchIntegration:
             pytest.skip("PyTorch not available")
 
     def test_torch_transform(self):
-        """Basic PyTorch tensor transform."""
-        import torch
-
+        """Basic PyTorch tensor create_tensor."""
         layout = RowMajor((4, 8))
-        x = torch.arange(32, dtype=torch.float32).reshape(4, 8)
-        result = layout.transform(x)
+        result = layout.create_tensor(np.float32)
         assert result.shape == (4, 8)
 
     def test_torch_round_trip(self):
-        """PyTorch round-trip: transform + inverse == identity."""
-        import torch
-
-        layout = RowMajor((4, 8))
-        x = torch.randn(4, 8)
-        result = layout.transform(x)
+        """PyTorch round-trip: create_tensor + inverse == identity."""
+        layout = ColMajor((4, 8))
+        result = layout.create_tensor(np.float32)
         back = layout.inverse_transform(result)
-        assert torch.allclose(x, back, atol=1e-6)
+        expected = np.arange(32, dtype=np.float32).reshape(4, 8)
+        np.testing.assert_array_almost_equal(back, expected)
 
     def test_torch_col_major(self):
-        """Transform a 4x8 PyTorch tensor from row-major to col-major."""
-        import torch
+        """Col-major create_tensor produces Fortran-order view."""
+        layout = LegoLayout(order_by(col(4, 8)).tile_by((4, 8)))
+        result = layout.create_tensor(np.float32)
 
-        layout = LegoLayout(
-            order_by(col(4, 8)).tile_by((4,8)),
-            (4, 8),
-        )
-        x = torch.arange(32, dtype=torch.float32).reshape(4, 8)
-        print("x")
-        print(x)
-        result = layout.transform(x)
-        print("result")
-        print(result)
+        # Col-major: result[i,j] = flat[j * nrows + i]
+        expected = np.arange(32, dtype=np.float32).reshape((4, 8), order='F')
+        np.testing.assert_array_equal(result, expected)
+        assert result[0, 1] == 4
 
-        # Col-major reorders so that columns are contiguous in memory.
-        # For a 4x8 matrix, col-major flat order groups by column:
-        #   col 0: [0, 8, 16, 24], col 1: [1, 9, 17, 25], ...
-        expected_flat = torch.tensor([
-            x[r, c].item()
-            for c in range(8)
-            for r in range(4)
-        ], dtype=torch.float32)
-        assert torch.equal(result.reshape(-1), expected_flat), (
-            f"Expected col-major flat: {expected_flat.tolist()}\n"
-            f"Got: {result.reshape(-1).tolist()}"
-        )
-
-        # Round-trip must recover the original
+        # Round-trip
         back = layout.inverse_transform(result)
-        assert torch.allclose(x, back, atol=1e-6)
+        expected_back = np.arange(32, dtype=np.float32).reshape(4, 8)
+        np.testing.assert_array_almost_equal(back, expected_back)
 
     def test_torch_tiled(self):
         """PyTorch tiled layout round-trip."""
-        import torch
-
         layout = Tiled((8, 8), tile_shape=(4, 4))
-        x = torch.arange(64, dtype=torch.float32).reshape(8, 8)
-        result = layout.transform(x)
+        result = layout.create_tensor(np.float32)
         back = layout.inverse_transform(result)
-        assert torch.allclose(x, back, atol=1e-6)
+        expected = np.arange(64, dtype=np.float32).reshape(8, 8)
+        np.testing.assert_array_almost_equal(back, expected)

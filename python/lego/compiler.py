@@ -249,6 +249,7 @@ class IRBuilder:
         with InsertionPoint(entry):
             # Use the layout's own dims for linearization/delinearization
             layout_dims = self._layout.dims
+            print(layout_dims)
 
             dim_vals = []
             for s in layout_dims:
@@ -271,18 +272,20 @@ class IRBuilder:
 
                 rank = len(layout_dims)
                 if forward:
-                    # Forward: row-major → custom layout
-                    # Delinearize with identity, relinearize with custom
-                    val = memref_dialect.LoadOp(src, [iv])
-                    indices = _emit_apply_inverse(identity_group, iv, rank)
-                    new_idx = _emit_apply(layout_val, indices)
-                    memref_dialect.StoreOp(val.result, dst, [new_idx])
-                else:
-                    # Inverse: custom layout → row-major
-                    # Delinearize with custom, relinearize with identity
+                    # Forward: view src as custom layout → row-major dst
+                    # Delinearize iv with custom (src layout) → multi-D coords
+                    # Relinearize coords with identity (dst layout) → 1D dst index
                     val = memref_dialect.LoadOp(src, [iv])
                     indices = _emit_apply_inverse(layout_val, iv, rank)
                     new_idx = _emit_apply(identity_group, indices)
+                    memref_dialect.StoreOp(val.result, dst, [new_idx])
+                else:
+                    # Inverse: row-major src → encode into custom layout dst
+                    # Delinearize iv with identity (src layout) → multi-D coords
+                    # Relinearize coords with custom (dst layout) → 1D dst index
+                    val = memref_dialect.LoadOp(src, [iv])
+                    indices = _emit_apply_inverse(identity_group, iv, rank)
+                    new_idx = _emit_apply(layout_val, indices)
                     memref_dialect.StoreOp(val.result, dst, [new_idx])
 
                 scf_dialect.YieldOp([])
