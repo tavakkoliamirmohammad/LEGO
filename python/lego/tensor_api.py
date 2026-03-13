@@ -5,7 +5,7 @@ User-facing API for applying LEGO layout transformations to NumPy arrays
 and PyTorch tensors.
 
 Two usage patterns:
-  1. Power users: use the algebra directly (OrderBy, GroupBy) with .transform()
+  1. Power users: use the composable descriptor API (row, col, order_by, tile_by, ...)
   2. Casual users: use convenience constructors (RowMajor, ColMajor, Tiled)
 
 Example:
@@ -21,8 +21,11 @@ Example:
 
 import time
 import numpy as np
-from .lego import Row, Col, OrderBy, RegP, GroupBy, get_sigma_perm
-from .compiler import LayoutCompiler, _dtype_to_mlir
+from .compiler import (
+    RegPDesc, RowDesc, ColDesc, OrderByDesc, GroupByDesc, TileByDesc, GenPDesc,
+    _LAYOUT_DESC_TYPES, _layout_from_sympy,
+    LayoutCompiler, _dtype_to_mlir,
+)
 
 try:
     import torch
@@ -31,8 +34,51 @@ except ImportError:
     _HAS_TORCH = False
 
 
+# ============================================================================
+# Composable functional constructors (mirror MLIR ops)
+# ============================================================================
+
+def row(*dims):
+    """Create a RowDesc — mirrors lego.row."""
+    return RowDesc(dims)
+
+
+def col(*dims):
+    """Create a ColDesc — mirrors lego.col."""
+    return ColDesc(dims)
+
+
+def reg_p(dims, perm):
+    """Create a RegPDesc — mirrors lego.reg_p."""
+    return RegPDesc(dims, perm)
+
+
+def order_by(*ps):
+    """Create an OrderByDesc — mirrors lego.order_by."""
+    return OrderByDesc(list(ps))
+
+
+def tile_by(input_layout, *tile_groups):
+    """Create a TileByDesc — mirrors lego.tile_by."""
+    return TileByDesc(input_layout, list(tile_groups))
+
+
+def group_by(dims, *objects):
+    """Create a GroupByDesc — mirrors lego.group_by."""
+    return GroupByDesc(dims, list(objects))
+
+
+def gen_p(dims, apply_builder, inv_builder):
+    """Create a GenPDesc — mirrors lego.gen_p."""
+    return GenPDesc(dims, apply_builder, inv_builder)
+
+
+# ============================================================================
+# LegoLayout wrapper
+# ============================================================================
+
 class LegoLayout:
-    """Wrapper around a GroupBy layout with convenience methods and caching.
+    """Wrapper around a layout descriptor with convenience methods and caching.
 
     Provides transform/inverse_transform for both NumPy arrays and PyTorch
     tensors, with automatic JIT compilation and caching.
@@ -41,13 +87,12 @@ class LegoLayout:
     def __init__(self, layout, shape):
         """
         Args:
-            layout: A GroupBy layout object
+            layout: Any layout descriptor (GroupByDesc, TileByDesc, etc.) or SymPy layout
             shape: Tuple of concrete dimension sizes
         """
-        if not isinstance(layout, GroupBy):
-            raise TypeError(
-                f"Expected GroupBy layout, got {type(layout).__name__}"
-            )
+        if not isinstance(layout, _LAYOUT_DESC_TYPES):
+            # Convert SymPy-based layout to descriptor
+            layout = _layout_from_sympy(layout)
         self._layout = layout
         self._shape = tuple(int(s) for s in shape)
         self._cache = {}  # (shape, dtype_str) -> compiler
@@ -157,8 +202,8 @@ def RowMajor(shape):
     Args:
         shape: Tuple of dimension sizes, e.g. (512, 512)
     """
-    L = OrderBy(Row(*shape)).GroupBy([shape])
-    return LegoLayout(L, shape)
+    group = GroupByDesc(shape, [OrderByDesc([RowDesc(shape)])])
+    return LegoLayout(group, shape)
 
 
 def ColMajor(shape):
@@ -167,8 +212,8 @@ def ColMajor(shape):
     Args:
         shape: Tuple of dimension sizes
     """
-    L = OrderBy(Col(*shape)).GroupBy([shape])
-    return LegoLayout(L, shape)
+    group = GroupByDesc(shape, [OrderByDesc([ColDesc(shape)])])
+    return LegoLayout(group, shape)
 
 
 def Tiled(shape, tile_shape):
@@ -184,20 +229,17 @@ def Tiled(shape, tile_shape):
     if len(shape) != len(tile_shape):
         raise ValueError("shape and tile_shape must have the same rank")
 
-    # Compute tile grid dimensions
-    # shape = tile_grid * tile_shape
     tile_grid = tuple(s // t for s, t in zip(shape, tile_shape))
-
-    # Build: OrderBy(Row(*shape)).TileBy(tile_grid, tile_shape)
-    L = OrderBy(Row(*shape)).TileBy(tile_grid, tile_shape)
-    return LegoLayout(L, shape)
+    ob = OrderByDesc([RowDesc(shape)])
+    tb = TileByDesc(ob, [tile_grid, tile_shape])
+    return LegoLayout(tb, shape)
 
 
 def Custom(layout_obj, shape):
-    """Wrap an existing GroupBy layout object.
+    """Wrap an existing layout object (any descriptor type or SymPy layout).
 
     Args:
-        layout_obj: A GroupBy layout object
+        layout_obj: A layout descriptor or SymPy layout object
         shape: Tuple of dimension sizes
     """
     return LegoLayout(layout_obj, shape)

@@ -120,9 +120,6 @@ include_directories(${CMAKE_BINARY_DIR}/include)
 add_subdirectory(include/Lego)
 add_subdirectory(lib/Lego)
 add_subdirectory(tools/lego-opt)
-if(LEGO_BUILD_TESTS)
-  add_subdirectory(test)
-endif()
 
 # --- Python Bindings for LEGO Dialect ---
 # Requires MLIR_ENABLE_BINDINGS_PYTHON=ON in the LLVM build.
@@ -206,4 +203,20 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     COMMON_CAPI_LINK_LIBS
       LegoPythonCAPI
     MLIR_BINDINGS_PYTHON_NB_DOMAIN lego)
+
+  # Copy the generated _lego_ops_gen.py into the source tree so that
+  # ``from lego.dialects.lego_dialect import RowOp, ...`` works at runtime.
+  # The source-tree lego/dialects/ already has an _ods_common.py shim that
+  # re-exports from mlir.dialects._ods_common.
+  add_custom_command(
+    TARGET LegoPythonModules POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_BINARY_DIR}/lego/dialects/_lego_ops_gen.py"
+      "${CMAKE_SOURCE_DIR}/python/lego/dialects/_lego_ops_gen.py"
+    COMMENT "Copying _lego_ops_gen.py to source tree for lego.dialects import")
+endif()
+
+# --- Tests (after Python bindings so check-lego-python can depend on LegoPythonModules) ---
+if(LEGO_BUILD_TESTS)
+  add_subdirectory(test)
 endif()

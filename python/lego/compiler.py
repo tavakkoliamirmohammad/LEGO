@@ -9,12 +9,11 @@ Uses mlir.execution_engine.ExecutionEngine for JIT (no custom C++ wrapper).
 
 import ctypes
 import numpy as np
-from .lego import GroupBy, OrderBy, RegP, GenP
 
 from mlir.ir import (
     Context, Location, Module, InsertionPoint,
     IndexType, MemRefType, FunctionType, IntegerAttr, StringAttr,
-    IntegerType, ArrayAttr, F32Type, F64Type, UnitAttr,
+    IntegerType, F32Type, F64Type, UnitAttr,
 )
 from mlir.dialects import func as func_dialect
 from mlir.dialects import arith as arith_dialect
@@ -24,6 +23,119 @@ from mlir.passmanager import PassManager
 from mlir.execution_engine import ExecutionEngine
 from mlir.runtime import get_ranked_memref_descriptor
 from lego.dialects.lego_dialect import register as register_lego
+
+
+# ============================================================================
+# Lightweight layout descriptors (no SymPy dependency)
+# ============================================================================
+
+class RegPDesc:
+    """Regular permutation: dims + permutation vector."""
+
+    def __init__(self, dims, perm):
+        self.dims = tuple(int(d) for d in dims)
+        self.perm = [int(p) for p in perm]
+
+
+class RowDesc:
+    """Mirrors lego.row [dims] : !lego.layout"""
+
+    def __init__(self, dims):
+        self.dims = tuple(int(d) for d in dims)
+
+
+class ColDesc:
+    """Mirrors lego.col [dims] : !lego.layout"""
+
+    def __init__(self, dims):
+        self.dims = tuple(int(d) for d in dims)
+
+
+class OrderByDesc:
+    """Sequence of permutation blocks."""
+
+    def __init__(self, perms):
+        self.perms = list(perms)
+
+    @property
+    def dims(self):
+        result = []
+        for p in self.perms:
+            result.extend(p.dims)
+        return tuple(result)
+
+    def tile_by(self, *tile_groups):
+        """Chain into a TileByDesc."""
+        return TileByDesc(self, list(tile_groups))
+
+
+class GroupByDesc:
+    """Grouped layout: outer dims + inner layout objects."""
+
+    def __init__(self, dims, objects):
+        self.dims = tuple(int(d) for d in dims)
+        self.objects = list(objects)
+
+
+class TileByDesc:
+    """Mirrors lego.tile_by %input tile_dims [[g0], [g1], ...] : !lego.layout"""
+
+    def __init__(self, input_layout, tile_groups):
+        self.input = input_layout
+        self.tile_groups = [tuple(int(x) for x in g) for g in tile_groups]
+
+    @property
+    def d(self):
+        return len(self.tile_groups[0])
+
+    @property
+    def q(self):
+        return len(self.tile_groups)
+
+    @property
+    def dims(self):
+        """Flattened tile dims — matches getLayoutInputDims(TileByOp)."""
+        return tuple(x for g in self.tile_groups for x in g)
+
+    @property
+    def tile_shape(self):
+        """[d, d, ..., d] (q times) — the tile_shape I64ArrayAttr."""
+        return [self.d] * self.q
+
+
+class GenPDesc:
+    """Mirrors lego.gen_p [dims] apply { ... } inv { ... } : !lego.layout
+
+    apply_builder: callable(block_args: list[Value]) -> Value  (single flat index)
+    inv_builder:   callable(block_arg: Value) -> list[Value]   (N-D indices)
+    """
+
+    def __init__(self, dims, apply_builder, inv_builder):
+        self.dims = tuple(int(d) for d in dims)
+        self.apply_builder = apply_builder
+        self.inv_builder = inv_builder
+
+
+_LAYOUT_DESC_TYPES = (
+    RegPDesc, RowDesc, ColDesc, OrderByDesc, GroupByDesc, TileByDesc, GenPDesc,
+)
+
+
+def _layout_from_sympy(block):
+    """Convert a SymPy-based layout block to a lightweight descriptor."""
+    from .lego import RegP, OrderBy, GroupBy
+
+    if isinstance(block, RegP):
+        return RegPDesc(block.dims(), block._raw_perm)
+    elif isinstance(block, OrderBy):
+        return OrderByDesc([_layout_from_sympy(p) for p in block.perms])
+    elif isinstance(block, GroupBy):
+        return GroupByDesc(
+            block.dims(),
+            [_layout_from_sympy(o) for o in block.objects],
+        )
+    else:
+        raise TypeError(f"Cannot convert {type(block).__name__} to descriptor")
 
 
 def _dtype_to_mlir(dtype):
@@ -74,12 +186,14 @@ class IRBuilder:
     """Builds MLIR IR for LEGO layout transforms using the Python bindings.
 
     Constructs a complete module with @transform and @inverse_transform
-    functions that use LEGO dialect ops (reg_p, order_by, group_by, apply,
-    apply_inverse) and standard dialects (func, arith, scf, memref).
+    functions that use LEGO dialect ops (reg_p, row, col, order_by, group_by,
+    tile_by, gen_p, apply, apply_inverse) and standard dialects.
     """
 
-    def __init__(self, group_by, shape, dtype_str="f32"):
-        self._layout = group_by
+    def __init__(self, layout_desc, shape, dtype_str="f32"):
+        if not isinstance(layout_desc, _LAYOUT_DESC_TYPES):
+            layout_desc = _layout_from_sympy(layout_desc)
+        self._layout = layout_desc
         self._shape = shape
         self._dtype_str = dtype_str
         self._total = 1
@@ -111,6 +225,13 @@ class IRBuilder:
 
         return ctx, module
 
+    def _make_identity_layout(self, layout_dims, dim_vals, idx_ty):
+        """Auto-generate row-major identity layout matching the descriptor's dims."""
+        identity_perm = list(range(len(layout_dims)))
+        identity_reg_p = _emit_reg_p(identity_perm, dim_vals)
+        identity_layout = _emit_order_by([identity_reg_p])
+        return _emit_group_by(dim_vals, [identity_layout])
+
     def _build_function(self, module, name, idx_ty, memref_ty, forward):
         """Build a single transform function inside the module."""
         func_ty = FunctionType.get(
@@ -126,17 +247,16 @@ class IRBuilder:
         src, dst, n = entry.arguments
 
         with InsertionPoint(entry):
-            # Create dimension constants
+            # Use the layout's own dims for linearization/delinearization
+            layout_dims = self._layout.dims
+
             dim_vals = []
-            for s in self._shape:
+            for s in layout_dims:
                 c = arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(s)))
                 dim_vals.append(c.result)
 
             # Build the identity (row-major) layout for delinearization
-            identity_perm = list(range(len(self._shape)))
-            identity_reg_p = _emit_reg_p_raw(identity_perm, dim_vals, idx_ty)
-            identity_layout = _emit_order_by_op([identity_reg_p])
-            identity_group = _emit_group_by_op(dim_vals, [identity_layout])
+            identity_group = self._make_identity_layout(layout_dims, dim_vals, idx_ty)
 
             # Build the custom layout
             layout_val = self._emit_layout(self._layout, dim_vals, idx_ty)
@@ -149,18 +269,19 @@ class IRBuilder:
             with InsertionPoint(loop.body):
                 iv = loop.induction_variable
 
+                rank = len(layout_dims)
                 if forward:
                     # Forward: row-major → custom layout
                     # Delinearize with identity, relinearize with custom
                     val = memref_dialect.LoadOp(src, [iv])
-                    indices = _emit_apply_inverse(identity_group, iv, len(self._shape))
+                    indices = _emit_apply_inverse(identity_group, iv, rank)
                     new_idx = _emit_apply(layout_val, indices)
                     memref_dialect.StoreOp(val.result, dst, [new_idx])
                 else:
                     # Inverse: custom layout → row-major
                     # Delinearize with custom, relinearize with identity
                     val = memref_dialect.LoadOp(src, [iv])
-                    indices = _emit_apply_inverse(layout_val, iv, len(self._shape))
+                    indices = _emit_apply_inverse(layout_val, iv, rank)
                     new_idx = _emit_apply(identity_group, indices)
                     memref_dialect.StoreOp(val.result, dst, [new_idx])
 
@@ -169,13 +290,22 @@ class IRBuilder:
             func_dialect.ReturnOp([])
 
     def _emit_layout(self, block, dim_vals, idx_ty):
-        """Emit LEGO dialect ops for a layout block. Returns the layout SSA value."""
-        if isinstance(block, RegP):
-            return _emit_reg_p(block, dim_vals, idx_ty)
-        elif isinstance(block, OrderBy):
+        """Emit LEGO dialect ops for a layout descriptor. Returns the layout SSA value."""
+        if isinstance(block, RegPDesc):
+            return _emit_reg_p(block.perm, dim_vals)
+        elif isinstance(block, RowDesc):
+            return _emit_row(dim_vals)
+        elif isinstance(block, ColDesc):
+            return _emit_col(dim_vals)
+        elif isinstance(block, OrderByDesc):
             return self._emit_order_by(block, dim_vals, idx_ty)
-        elif isinstance(block, GroupBy):
+        elif isinstance(block, GroupByDesc):
             return self._emit_group_by(block, dim_vals, idx_ty)
+        elif isinstance(block, TileByDesc):
+            return self._emit_tile_by(block, idx_ty)
+        elif isinstance(block, GenPDesc):
+            return _emit_gen_p(dim_vals, len(block.dims),
+                               block.apply_builder, block.inv_builder, idx_ty)
         else:
             raise TypeError(f"Unsupported layout block type: {type(block).__name__}")
 
@@ -184,22 +314,20 @@ class IRBuilder:
         offset = 0
         perm_vals = []
         for perm in order_by.perms:
-            perm_dims = perm.dims()
-            count = len(perm_dims)
+            count = len(perm.dims)
             sub_dims = dim_vals[offset:offset + count]
             offset += count
             perm_val = self._emit_layout(perm, sub_dims, idx_ty)
             perm_vals.append(perm_val)
 
-        return _emit_order_by_op(perm_vals)
+        return _emit_order_by(perm_vals)
 
     def _emit_group_by(self, group_by, dim_vals, idx_ty):
         """Emit lego.group_by with its object layouts."""
         obj_vals = []
         for obj in group_by.objects:
-            obj_dim_values = obj.dims()
             obj_dim_vals = []
-            for d in obj_dim_values:
+            for d in obj.dims:
                 c = arith_dialect.ConstantOp(
                     idx_ty, IntegerAttr.get(idx_ty, int(d))
                 )
@@ -207,15 +335,28 @@ class IRBuilder:
             obj_val = self._emit_layout(obj, obj_dim_vals, idx_ty)
             obj_vals.append(obj_val)
 
-        return _emit_group_by_op(dim_vals, obj_vals)
+        return _emit_group_by(dim_vals, obj_vals)
+
+    def _emit_tile_by(self, tile_by, idx_ty):
+        """Emit lego.tile_by with its input layout and tile dimensions."""
+        # Emit input layout (e.g. OrderByDesc) with its own dims
+        input_dim_vals = [
+            arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(d))).result
+            for d in tile_by.input.dims
+        ]
+        input_val = self._emit_layout(tile_by.input, input_dim_vals, idx_ty)
+
+        # Emit tile dim constants
+        tile_dim_vals = [
+            arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(d))).result
+            for d in tile_by.dims
+        ]
+        return _emit_tile_by(input_val, tile_dim_vals, tile_by.tile_shape)
 
 
 # ============================================================================
-# Low-level op emission using MLIR Python bindings
+# Op emission helpers using auto-generated LEGO dialect Python bindings
 # ============================================================================
-# These use the generic Operation.create API since the auto-generated Python
-# op classes may not be available yet. When the TableGen Python bindings are
-# built, these can be replaced with the generated classes.
 
 def _lego_layout_type():
     """Get the !lego.layout type from the current context."""
@@ -223,82 +364,83 @@ def _lego_layout_type():
     return Type.parse("!lego.layout")
 
 
-def _emit_reg_p_raw(perm, dim_vals, idx_ty):
-    """Emit a lego.reg_p op from a raw permutation list."""
-    from mlir.ir import Operation, ArrayAttr, IntegerAttr, IntegerType
-
+def _emit_reg_p(perm, dim_vals):
+    """Emit a lego.reg_p op. Returns the layout SSA value."""
+    from lego.dialects.lego_dialect import RegPOp
     layout_ty = _lego_layout_type()
-    i64_ty = IntegerType.get_signless(64)
-    perm_attrs = [IntegerAttr.get(i64_ty, p) for p in perm]
-    perm_array = ArrayAttr.get(perm_attrs)
-
-    op = Operation.create(
-        "lego.reg_p",
-        results=[layout_ty],
-        operands=dim_vals,
-        attributes={"perm": perm_array},
-    )
-    return op.result
+    return RegPOp(result=layout_ty, perm=perm, dims=dim_vals).result
 
 
-def _emit_reg_p(reg_p, dim_vals, idx_ty):
-    """Emit a lego.reg_p op from a RegP object."""
-    return _emit_reg_p_raw(reg_p._raw_perm, dim_vals, idx_ty)
-
-
-def _emit_order_by_op(perm_vals):
-    """Emit a lego.order_by op."""
-    from mlir.ir import Operation
+def _emit_row(dim_vals):
+    """Emit a lego.row op. Returns the layout SSA value."""
+    from lego.dialects.lego_dialect import RowOp
     layout_ty = _lego_layout_type()
-
-    op = Operation.create(
-        "lego.order_by",
-        results=[layout_ty],
-        operands=perm_vals,
-    )
-    return op.result
+    return RowOp(result=layout_ty, dims=dim_vals).result
 
 
-def _emit_group_by_op(dim_vals, obj_vals):
-    """Emit a lego.group_by op."""
-    from mlir.ir import Operation, DenseI32ArrayAttr
+def _emit_col(dim_vals):
+    """Emit a lego.col op. Returns the layout SSA value."""
+    from lego.dialects.lego_dialect import ColOp
     layout_ty = _lego_layout_type()
+    return ColOp(result=layout_ty, dims=dim_vals).result
 
-    # group_by has AttrSizedOperandSegments: [num_group_dims, num_objects]
-    segments = DenseI32ArrayAttr.get([len(dim_vals), len(obj_vals)])
 
-    op = Operation.create(
-        "lego.group_by",
-        results=[layout_ty],
-        operands=dim_vals + obj_vals,
-        attributes={"operandSegmentSizes": segments},
-    )
-    return op.result
+def _emit_order_by(perm_vals):
+    """Emit a lego.order_by op. Returns the layout SSA value."""
+    from lego.dialects.lego_dialect import OrderByOp
+    layout_ty = _lego_layout_type()
+    return OrderByOp(result=layout_ty, perms=perm_vals).result
+
+
+def _emit_group_by(dim_vals, obj_vals):
+    """Emit a lego.group_by op. Returns the layout SSA value."""
+    from lego.dialects.lego_dialect import GroupByOp
+    layout_ty = _lego_layout_type()
+    return GroupByOp(result=layout_ty, group_dims=dim_vals, objects=obj_vals).result
+
+
+def _emit_tile_by(input_val, tile_dim_vals, tile_shape):
+    """Emit a lego.tile_by op. Returns the layout SSA value."""
+    from lego.dialects.lego_dialect import TileByOp
+    layout_ty = _lego_layout_type()
+    return TileByOp(result=layout_ty, input=input_val,
+                    tile_dims=tile_dim_vals, tile_shape=tile_shape).result
+
+
+def _emit_gen_p(dim_vals, rank, apply_builder, inv_builder, idx_ty):
+    """Emit a lego.gen_p op with apply and inverse regions."""
+    from lego.dialects.lego_dialect import GenPOp, YieldOp
+    layout_ty = _lego_layout_type()
+    gen_p_op = GenPOp(result=layout_ty, dims=dim_vals)
+
+    # Apply region: block args = N indices → yield single flat index
+    apply_block = gen_p_op.body.blocks.append(*([idx_ty] * rank))
+    with InsertionPoint(apply_block):
+        flat_result = apply_builder(list(apply_block.arguments))
+        YieldOp(values=[flat_result])
+
+    # Inverse region: block arg = single flat index → yield N indices
+    inv_block = gen_p_op.inv_body.blocks.append(idx_ty)
+    with InsertionPoint(inv_block):
+        index_results = inv_builder(inv_block.arguments[0])
+        YieldOp(values=list(index_results))
+
+    return gen_p_op.result
 
 
 def _emit_apply(layout_val, indices):
     """Emit a lego.apply op. Returns the flat index Value."""
-    from mlir.ir import Operation, IndexType
+    from lego.dialects.lego_dialect import ApplyOp
     idx_ty = IndexType.get()
-
-    op = Operation.create(
-        "lego.apply",
-        results=[idx_ty],
-        operands=[layout_val] + list(indices),
-    )
-    return op.result
+    return ApplyOp(flat_index=idx_ty, layout=layout_val, indices=list(indices)).result
 
 
 def _emit_apply_inverse(layout_val, flat_index, rank):
     """Emit a lego.apply_inverse op. Returns list of index Values."""
-    from mlir.ir import Operation, IndexType
+    from lego.dialects.lego_dialect import ApplyInverseOp
     idx_ty = IndexType.get()
-
-    op = Operation.create(
-        "lego.apply_inverse",
-        results=[idx_ty] * rank,
-        operands=[layout_val, flat_index],
-    )
+    op = ApplyInverseOp(indices=[idx_ty] * rank, layout=layout_val,
+                        flat_index=flat_index)
     return list(op.results)
 
 
@@ -323,12 +465,11 @@ class LayoutCompiler:
     """
 
     def __init__(self, layout, shape, dtype="f32"):
-        if not isinstance(layout, GroupBy):
-            raise TypeError(
-                f"Expected GroupBy layout, got {type(layout).__name__}. "
-                "Wrap your layout in GroupBy first."
-            )
-        self._layout = layout
+        if isinstance(layout, _LAYOUT_DESC_TYPES):
+            self._layout = layout
+        else:
+            # Convert SymPy-based GroupBy to descriptor
+            self._layout = _layout_from_sympy(layout)
         self._shape = tuple(int(s) for s in shape)
         if isinstance(dtype, str):
             self._dtype = dtype
