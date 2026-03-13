@@ -209,7 +209,6 @@ class RegP(LayoutBlock):
                    index tuple and returns the permuted multi-dimensional index tuple.
         """
         self._dims = nd
-        self._raw_perm = list(perm)  # Store for MLIR serialization
         self.perm = lambda idx: sigma(idx, perm)
         self.perm_inv = lambda idx: sigma(idx, inverse_permutation(perm))
 
