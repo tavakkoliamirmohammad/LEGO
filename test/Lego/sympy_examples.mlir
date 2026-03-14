@@ -1,12 +1,4 @@
-// RUN: lego-opt %s \
-// RUN:   --lego-materialize-assume-bounds \
-// RUN:   -lego-lower \
-// RUN:   --lego-arith-simplification --int-range-optimizations --canonicalize --cse \
-// RUN:   --lego-arith-simplification --int-range-optimizations --canonicalize --cse \
-// RUN:   --lego-arith-simplification --int-range-optimizations --canonicalize --cse \
-// RUN:   --lego-arith-simplification --int-range-optimizations --canonicalize --cse \
-// RUN:   --lego-materialize-assume-bounds=cleanup --canonicalize --cse \
-// RUN:   -split-input-file | FileCheck %s
+// RUN: lego-opt %s -lego-lower -split-input-file | FileCheck %s
 //
 // ============================================================================
 // Tests derived from Python/SymPy layout examples

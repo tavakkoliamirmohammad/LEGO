@@ -15,6 +15,10 @@ namespace {
 struct LegoMaterializeAssumeBoundsPass
     : public mlir::lego::impl::LegoMaterializeAssumeBoundsPassBase<
           LegoMaterializeAssumeBoundsPass> {
+
+  LegoMaterializeAssumeBoundsPass() = default;
+  LegoMaterializeAssumeBoundsPass(bool cleanupMode) { cleanup = cleanupMode; }
+
   void runOnOperation() override {
     if (cleanup) {
       runCleanup();
@@ -31,7 +35,10 @@ struct LegoMaterializeAssumeBoundsPass
       Value ub = op.getUb();
       if (!ub)
         return;
-      // Skip if x is already a remui.
+      // Only materialize bounds on block arguments (user-declared).
+      // Skip computed values (e.g., from lego-generate-bounds-checks).
+      if (!mlir::isa<BlockArgument>(x))
+        return;
       if (x.getDefiningOp<arith::RemUIOp>())
         return;
       workList.emplace_back(op.getOperation(), x, ub);
@@ -62,6 +69,7 @@ struct LegoMaterializeAssumeBoundsPass
       Value bounded =
           arith::RemUIOp::create(builder, originOp->getLoc(), x, d);
       Operation *remOp = bounded.getDefiningOp();
+      remOp->setAttr("lego.materialized", builder.getUnitAttr());
 
       x.replaceUsesWithIf(bounded, [&](OpOperand &operand) {
         Operation *user = operand.getOwner();
@@ -91,13 +99,13 @@ struct LegoMaterializeAssumeBoundsPass
     }
   }
 
-  /// Cleanup mode: remove remui(block_arg, d) → block_arg.
-  /// These were inserted by a previous materialization run and are
-  /// identity ops since the user's assume_bounds guarantees x < d.
+  /// Cleanup mode: remove remui(block_arg, d) that we inserted.
+  /// We tag inserted remui ops with a "lego.materialized" unit attribute
+  /// so we can identify them later.
   void runCleanup() {
     SmallVector<arith::RemUIOp> toFold;
     getOperation()->walk([&](arith::RemUIOp op) {
-      if (mlir::isa<BlockArgument>(op.getLhs()))
+      if (op->hasAttr("lego.materialized"))
         toFold.push_back(op);
     });
     for (auto op : toFold) {
@@ -111,8 +119,8 @@ struct LegoMaterializeAssumeBoundsPass
 
 namespace mlir {
 namespace lego {
-std::unique_ptr<Pass> createLegoMaterializeAssumeBoundsPass() {
-  return std::make_unique<LegoMaterializeAssumeBoundsPass>();
+std::unique_ptr<Pass> createLegoMaterializeAssumeBoundsPass(bool cleanupMode) {
+  return std::make_unique<LegoMaterializeAssumeBoundsPass>(cleanupMode);
 }
 } // namespace lego
 } // namespace mlir

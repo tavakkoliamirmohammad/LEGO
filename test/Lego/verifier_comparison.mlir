@@ -1,4 +1,4 @@
-// RUN: lego-opt %s -lego-generate-bounds-checks -lego-lower -lego-external-smt-verifier -split-input-file -verify-diagnostics
+// RUN: lego-opt %s -lego-generate-bounds-checks --lego-normalization --lego-to-arith --canonicalize --cse --lego-arith-simplification --int-range-optimizations --canonicalize --cse -lego-external-smt-verifier -split-input-file -verify-diagnostics
 
 // ============================================================================
 // gen_p: Symbolic vs Concrete

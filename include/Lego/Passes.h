@@ -17,7 +17,7 @@ std::unique_ptr<Pass> createLegoToArithPass();
 std::unique_ptr<Pass> createLegoNormalizationPass();
 std::unique_ptr<Pass> createLegoVerifyGenpConsistencyPass();
 std::unique_ptr<Pass> createLegoArithSimplificationPass();
-std::unique_ptr<Pass> createLegoMaterializeAssumeBoundsPass();
+std::unique_ptr<Pass> createLegoMaterializeAssumeBoundsPass(bool cleanup = false);
 std::unique_ptr<Pass> createLegoGenerateBoundsChecksPass();
 std::unique_ptr<Pass> createLegoExternalSMTVerifierPass();
 std::unique_ptr<Pass> createLegoVerifyBijectivityPass();

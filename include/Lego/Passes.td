@@ -52,7 +52,7 @@ def LegoMaterializeAssumeBoundsPass : Pass<"lego-materialize-assume-bounds", "ml
   let constructor = "mlir::lego::createLegoMaterializeAssumeBoundsPass()";
   let dependentDialects = ["mlir::arith::ArithDialect", "mlir::lego::LegoDialect"];
   let options = [
-    Option<"cleanup", "cleanup", "bool", "false",
+    Option<"cleanup", "cleanup", "bool", /*default=*/"false",
            "Remove remui(block_arg, d) inserted by a previous materialization">
   ];
 }
