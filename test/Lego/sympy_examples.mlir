@@ -5,34 +5,24 @@
 // RUN:   --lego-arith-simplification --int-range-optimizations --canonicalize --cse \
 // RUN:   --lego-arith-simplification --int-range-optimizations --canonicalize --cse \
 // RUN:   --lego-arith-simplification --int-range-optimizations --canonicalize --cse \
+// RUN:   --lego-materialize-assume-bounds=cleanup --canonicalize --cse \
 // RUN:   -split-input-file | FileCheck %s
 //
 // ============================================================================
 // Tests derived from Python/SymPy layout examples
 //
-// Validates that MLIR layout lowering produces the same indexing as the
-// corresponding SymPy expressions from:
-//   python/examples/graphene.py
-//   paper/benchmarks/cuda/bricks_f3d.py     (normal, bricks, const)
-//   paper/benchmarks/cuda/bricks_laplasian.py (same layouts)
-//   paper/benchmarks/cuda/lud.py            (GroupBy for thread coarsening)
-//
-// Dimensions: N=8, B=2  (scaled down from N=384, B=8 for test brevity)
-//
 // SymPy-verified expressions (run via python/lego/lego.py):
 //   graphene:   i + 8*j + 2*k + 16*q + 4*w
 //   const_out:  64*a + 8*b + c
 //   lud_fwd:    32*ii + 16*jj + tidx + 4*tidy
-//   normal_out: (bx*2+i)*64 + (by*2+j)*8 + (bz*2+k)  [modular arith]
-//   bricks_out: (bx*16+by*4+bz)*8 + (i*4+j*2+k)      [modular arith]
+//   normal_out: (bx*2+i)*64 + (by*2+j)*8 + (bz*2+k)
+//   bricks_out: (bx*16+by*4+bz)*8 + (i*4+j*2+k)
 // ============================================================================
 
 // -----
 
-// ============================================================================
 // const = OrderBy(Row(8, 8, 8)).TileBy([8, 8, 8])
-// SymPy: const[a, b, c] = 64*a + 8*b + c
-// ============================================================================
+// SymPy: 64*a + 8*b + c
 
 // CHECK-LABEL: func.func @const_3d_apply
 // CHECK-SAME:  (%[[A:.*]]: index, %[[B:.*]]: index, %[[C:.*]]: index)
@@ -54,14 +44,11 @@ func.func @const_3d_apply(%a: index, %b: index, %c: index) -> index {
 
 // -----
 
-// ============================================================================
 // graphene.py: OrderBy(RegP([2,2,2,2,2], [4,1,3,2,0])).GroupBy([(2,2,2,2,2)])
-// SymPy: l[i, j, k, w, q] = i + 8*j + 2*k + 16*q + 4*w
+// SymPy: i + 2*k + 4*w + 8*j + 16*q
 //
-// With assume_bounds, the flatten→unflatten chain simplifies via
-// lego-materialize-assume-bounds (remui) + A2 + int-range folding
-// to the direct permuted expression.
-// ============================================================================
+// With assume_bounds + materialize-assume-bounds + iterated A2/int-range,
+// the flatten/unflatten chain fully simplifies to the permuted expression.
 
 // CHECK-LABEL: func.func @graphene_apply
 // CHECK-SAME:  (%[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index, %[[W:.*]]: index, %[[Q:.*]]: index)
@@ -69,18 +56,13 @@ func.func @const_3d_apply(%a: index, %b: index, %c: index) -> index {
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
 // CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
-// CHECK:       %[[IB:.*]] = arith.remui %[[I]], %[[C2]] : index
-// CHECK:       %[[JB:.*]] = arith.remui %[[J]], %[[C2]] : index
-// CHECK:       %[[KB:.*]] = arith.remui %[[K]], %[[C2]] : index
-// CHECK:       %[[WB:.*]] = arith.remui %[[W]], %[[C2]] : index
-// CHECK:       %[[QB:.*]] = arith.remui %[[Q]], %[[C2]] : index
-// CHECK:       %[[MK:.*]] = arith.muli %[[KB]], %[[C2]] : index
-// CHECK:       %[[S1:.*]] = arith.addi %[[IB]], %[[MK]] : index
-// CHECK:       %[[MW:.*]] = arith.muli %[[WB]], %[[C4]] : index
+// CHECK:       %[[MK:.*]] = arith.muli %[[K]], %[[C2]] : index
+// CHECK:       %[[S1:.*]] = arith.addi %[[I]], %[[MK]] : index
+// CHECK:       %[[MW:.*]] = arith.muli %[[W]], %[[C4]] : index
 // CHECK:       %[[S2:.*]] = arith.addi %[[S1]], %[[MW]] : index
-// CHECK:       %[[MJ:.*]] = arith.muli %[[JB]], %[[C8]] : index
+// CHECK:       %[[MJ:.*]] = arith.muli %[[J]], %[[C8]] : index
 // CHECK:       %[[S3:.*]] = arith.addi %[[S2]], %[[MJ]] : index
-// CHECK:       %[[MQ:.*]] = arith.muli %[[QB]], %[[C16]] : index
+// CHECK:       %[[MQ:.*]] = arith.muli %[[Q]], %[[C16]] : index
 // CHECK:       %[[RES:.*]] = arith.addi %[[S3]], %[[MQ]] : index
 // CHECK:       return %[[RES]] : index
 func.func @graphene_apply(%i: index, %j: index, %k: index, %w: index, %q: index) -> index {
@@ -100,35 +82,20 @@ func.func @graphene_apply(%i: index, %j: index, %k: index, %w: index, %q: index)
 
 // -----
 
-// ============================================================================
-// normal = OrderBy(Row(N, N, N)).TileBy([N//B, N//B, N//B], [B, B, B])
-//   with N=8, B=2  =>  OrderBy(Row(8,8,8)).TileBy([4,4,4], [2,2,2])
-// SymPy: normal[bx, by, bz, i, j, k] = (bx*2+i)*64 + (by*2+j)*8 + (bz*2+k)
+// normal = OrderBy(Row(8,8,8)).TileBy([4,4,4], [2,2,2])
+// SymPy: (bx*2+i)*64 + (by*2+j)*8 + (bz*2+k)
 //
-// TileBy normalizes to GroupBy with interleave permutation.
+// Inner has 1 block, tile has 2 levels → general GroupBy path.
 // The lowered form retains divui/remui (modular arithmetic equivalent).
-// ============================================================================
 
 // CHECK-LABEL: func.func @normal_3d_apply
 // CHECK-SAME:  (%[[BX:.*]]: index, %[[BY:.*]]: index, %[[BZ:.*]]: index, %[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index)
 // CHECK-DAG:   %[[C128:.*]] = arith.constant 128 : index
-// CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK-DAG:   %[[C32:.*]] = arith.constant 32 : index
-// CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
-// CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
-// CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
-// CHECK:       arith.remui %[[BX]], %[[C4]] : index
-// CHECK:       arith.remui %[[BY]], %[[C4]] : index
-// CHECK:       arith.remui %[[BZ]], %[[C4]] : index
-// CHECK:       arith.remui %[[I]], %[[C2]] : index
-// CHECK:       arith.remui %[[J]], %[[C2]] : index
-// CHECK:       arith.remui %[[K]], %[[C2]] : index
 // CHECK:       arith.muli
 // CHECK:       arith.addi
 // CHECK:       arith.divui
 // CHECK:       arith.remui
-// CHECK:       arith.muli {{.*}}, %[[C128]] : index
+// CHECK:       arith.muli %[[BX]], %[[C128]] : index
 // CHECK:       %[[RES:.*]] = arith.addi
 // CHECK:       return %[[RES]] : index
 func.func @normal_3d_apply(%bx: index, %by: index, %bz: index,
@@ -152,49 +119,32 @@ func.func @normal_3d_apply(%bx: index, %by: index, %bz: index,
 
 // -----
 
-// ============================================================================
-// bricks = OrderBy(Row(N//B, N//B, N//B), Row(B, B, B))
-//            .TileBy([N//B, N//B, N//B], [B, B, B])
-//   with N=8, B=2  =>  OrderBy(Row(4,4,4), Row(2,2,2)).TileBy([4,4,4],[2,2,2])
-// SymPy: bricks[bx, by, bz, i, j, k]
-//      = (bx*16 + by*4 + bz) * 8 + (i*4 + j*2 + k)
+// bricks = OrderBy(Row(4,4,4), Row(2,2,2)).TileBy([4,4,4],[2,2,2])
+// SymPy: (bx*16 + by*4 + bz) * 8 + (i*4 + j*2 + k)
 //
-// TileBy normalizes to GroupBy with interleave permutation.
-// The lowered form retains divui/remui (modular arithmetic equivalent).
-// ============================================================================
+// TileBy with tile_dims matching inner_dims is identity.
 
 // CHECK-LABEL: func.func @bricks_3d_apply
 // CHECK-SAME:  (%[[BX:.*]]: index, %[[BY:.*]]: index, %[[BZ:.*]]: index, %[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index)
-// CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK-DAG:   %[[C32:.*]] = arith.constant 32 : index
 // CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
 // CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
-// CHECK:       arith.remui %[[BX]], %[[C4]] : index
-// CHECK:       arith.remui %[[BY]], %[[C4]] : index
-// CHECK:       arith.remui %[[BZ]], %[[C4]] : index
-// CHECK:       arith.remui %[[I]], %[[C2]] : index
-// CHECK:       arith.remui %[[J]], %[[C2]] : index
-// CHECK:       arith.remui %[[K]], %[[C2]] : index
-// CHECK:       arith.muli
-// CHECK:       arith.addi
-// CHECK:       arith.divui
-// CHECK:       arith.remui
-// CHECK:       arith.muli {{.*}}, %[[C8]] : index
-// CHECK:       arith.addi
-// CHECK:       return {{.*}} : index
+// CHECK:       %[[MBY:.*]] = arith.muli %[[BY]], %[[C4]] : index
+// CHECK:       %[[S1:.*]] = arith.addi %[[BZ]], %[[MBY]] : index
+// CHECK:       %[[MBX:.*]] = arith.muli %[[BX]], %[[C16]] : index
+// CHECK:       %[[BLOCK:.*]] = arith.addi %[[S1]], %[[MBX]] : index
+// CHECK:       %[[MJ:.*]] = arith.muli %[[J]], %[[C2]] : index
+// CHECK:       %[[S2:.*]] = arith.addi %[[K]], %[[MJ]] : index
+// CHECK:       %[[MI:.*]] = arith.muli %[[I]], %[[C4]] : index
+// CHECK:       %[[LOCAL:.*]] = arith.addi %[[S2]], %[[MI]] : index
+// CHECK:       %[[SCALED:.*]] = arith.muli %[[BLOCK]], %[[C8]] : index
+// CHECK:       %[[RES:.*]] = arith.addi %[[SCALED]], %[[LOCAL]] : index
+// CHECK:       return %[[RES]] : index
 func.func @bricks_3d_apply(%bx: index, %by: index, %bz: index,
                            %i: index, %j: index, %k: index) -> index {
-  %c0 = arith.constant 0 : index
   %c4 = arith.constant 4 : index
   %c2 = arith.constant 2 : index
-  lego.assume_bounds %bx lb: %c0 ub: %c4
-  lego.assume_bounds %by lb: %c0 ub: %c4
-  lego.assume_bounds %bz lb: %c0 ub: %c4
-  lego.assume_bounds %i lb: %c0 ub: %c2
-  lego.assume_bounds %j lb: %c0 ub: %c2
-  lego.assume_bounds %k lb: %c0 ub: %c2
   %row1 = lego.row [%c4, %c4, %c4] : !lego.layout
   %row2 = lego.row [%c2, %c2, %c2] : !lego.layout
   %ob = lego.order_by(%row1, %row2) : !lego.layout
@@ -205,84 +155,90 @@ func.func @bricks_3d_apply(%bx: index, %by: index, %bz: index,
 
 // -----
 
-// ============================================================================
 // lud.py: OrderBy(Row(R*T, R*T)).GroupBy([(R, R), (T, T)])
-//   with R=2, T=4  =>  OrderBy(Row(8, 8)).GroupBy([(2, 2), (4, 4)])
-// SymPy: l[ii, jj, tidy, tidx] = 32*ii + 16*jj + tidx + 4*tidy
-// ============================================================================
+// SymPy: ii*(R*T*T) + jj*(T*T) + tidy*T + tidx
+// With symbolic R and T (matching the Python API).
 
 // CHECK-LABEL: func.func @lud_groupby_apply
-// CHECK-SAME:  (%[[II:.*]]: index, %[[JJ:.*]]: index, %[[TIDY:.*]]: index, %[[TIDX:.*]]: index)
-// CHECK-DAG:   %[[C32:.*]] = arith.constant 32 : index
-// CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
-// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
-// CHECK:       %[[T1:.*]] = arith.muli %[[TIDY]], %[[C4]] : index
-// CHECK:       %[[S1:.*]] = arith.addi %[[TIDX]], %[[T1]] : index
-// CHECK:       %[[T2:.*]] = arith.muli %[[JJ]], %[[C16]] : index
-// CHECK:       %[[S2:.*]] = arith.addi %[[S1]], %[[T2]] : index
-// CHECK:       %[[T3:.*]] = arith.muli %[[II]], %[[C32]] : index
-// CHECK:       %[[RES:.*]] = arith.addi %[[S2]], %[[T3]] : index
+// CHECK-SAME:  (%[[R:.*]]: index, %[[T:.*]]: index, %[[II:.*]]: index, %[[JJ:.*]]: index, %[[TIDY:.*]]: index, %[[TIDX:.*]]: index)
+// CHECK:       %[[MT:.*]] = arith.muli %[[TIDY]], %[[T]] : index
+// CHECK:       %[[S1:.*]] = arith.addi %[[TIDX]], %[[MT]] : index
+// CHECK:       %[[TT:.*]] = arith.muli %[[T]], %[[T]] : index
+// CHECK:       %[[MJJ:.*]] = arith.muli %[[JJ]], %[[TT]] : index
+// CHECK:       %[[S2:.*]] = arith.addi %[[S1]], %[[MJJ]] : index
+// CHECK:       %[[TTR:.*]] = arith.muli %[[TT]], %[[R]] : index
+// CHECK:       %[[MII:.*]] = arith.muli %[[II]], %[[TTR]] : index
+// CHECK:       %[[RES:.*]] = arith.addi %[[S2]], %[[MII]] : index
 // CHECK:       return %[[RES]] : index
-func.func @lud_groupby_apply(%ii: index, %jj: index,
+func.func @lud_groupby_apply(%R: index, %T: index,
+                             %ii: index, %jj: index,
                              %tidy: index, %tidx: index) -> index {
-  %c8 = arith.constant 8 : index
-  %c2 = arith.constant 2 : index
-  %c4 = arith.constant 4 : index
-  %row = lego.row [%c8, %c8] : !lego.layout
+  %RT = arith.muli %R, %T : index
+  %row = lego.row [%RT, %RT] : !lego.layout
   %ob = lego.order_by(%row) : !lego.layout
-  %gb = lego.group_by [%c2, %c2, %c4, %c4](%ob) : !lego.layout
+  %gb = lego.group_by [%R, %R, %T, %T](%ob) : !lego.layout
   %f = lego.apply %gb(%ii, %jj, %tidy, %tidx) : !lego.layout
   return %f : index
 }
 
 // -----
 
-// ============================================================================
-// lud.py inverse: l.inv(flat) -> (ii, jj, tidy, tidx)
-// SymPy: l.inv((ii*R+jj)*T*T + tid) = [ii, jj, tid/T, tid%T]
-//   with R=2, T=4:
-//     ii   = flat / 32
-//     jj   = (flat / 16) % 2
-//     tidy = (flat / 4) % 4
-//     tidx = flat % 4
-// ============================================================================
+// lud.py inverse: l.inv((ii*R+jj)*T*T + tid) = [ii, jj, tid/T, tid%T]
+//
+// Python: expr = (ii * R + jj) * T * T + tid
+//         constraints = [ii < R, jj < R, tid < T*T, 0 <= tid]
+//         i, j, tidy, tidx = l.inv(expr)
+// SymPy result: i=ii, j=jj, tidy=tid/T, tidx=tid%T
 
 // CHECK-LABEL: func.func @lud_groupby_inv
-// CHECK-SAME:  (%[[F:.*]]: index)
-// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
-// CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
-// CHECK-DAG:   %[[C32:.*]] = arith.constant 32 : index
-// CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK:       %[[R64:.*]] = arith.remui %[[F]], %[[C64]] : index
-// CHECK:       %[[II:.*]] = arith.divui %[[R64]], %[[C32]] : index
-// CHECK:       %[[R32:.*]] = arith.remui %[[R64]], %[[C32]] : index
-// CHECK:       %[[JJ:.*]] = arith.divui %[[R32]], %[[C16]] : index
-// CHECK:       %[[R16:.*]] = arith.remui %[[R32]], %[[C16]] : index
-// CHECK:       %[[TIDY:.*]] = arith.divui %[[R16]], %[[C4]] : index
-// CHECK:       %[[TIDX:.*]] = arith.remui %[[R16]], %[[C4]] : index
-// CHECK:       return %[[II]], %[[JJ]], %[[TIDY]], %[[TIDX]] : index, index, index, index
-func.func @lud_groupby_inv(%f: index) -> (index, index, index, index) {
-  %c8 = arith.constant 8 : index
-  %c2 = arith.constant 2 : index
-  %c4 = arith.constant 4 : index
-  %row = lego.row [%c8, %c8] : !lego.layout
+// CHECK-SAME:  (%[[R:.*]]: index, %[[T:.*]]: index, %[[II:.*]]: index, %[[JJ:.*]]: index, %[[TID:.*]]: index)
+// CHECK:       %[[RT:.*]] = arith.muli %[[R]], %[[T]] : index
+// CHECK:       %[[TT:.*]] = arith.muli %[[T]], %[[T]] : index
+// CHECK:       arith.muli %[[II]], %[[R]] : index
+// CHECK:       arith.addi {{.*}}, %[[JJ]] : index
+// CHECK:       arith.muli {{.*}}, %[[TT]] : index
+// CHECK:       arith.addi {{.*}}, %[[TID]] : index
+// CHECK:       arith.muli %[[RT]], %[[RT]] : index
+// CHECK:       arith.remui
+// CHECK:       arith.muli %[[RT]], %[[T]] : index
+// CHECK:       arith.divui
+// CHECK:       arith.remui
+// CHECK:       arith.divui {{.*}}, %[[TT]] : index
+// CHECK:       arith.remui {{.*}}, %[[TT]] : index
+// CHECK:       arith.divui {{.*}}, %[[T]] : index
+// CHECK:       arith.remui {{.*}}, %[[T]] : index
+// CHECK:       return
+func.func @lud_groupby_inv(%R: index, %T: index,
+                           %ii: index, %jj: index, %tid: index)
+    -> (index, index, index, index) {
+  %c0 = arith.constant 0 : index
+  %RT = arith.muli %R, %T : index
+  %TT = arith.muli %T, %T : index
+  // assume_bounds: ii < R, jj < R, 0 <= tid < T*T
+  lego.assume_bounds %ii lb: %c0 ub: %R
+  lego.assume_bounds %jj lb: %c0 ub: %R
+  lego.assume_bounds %tid lb: %c0 ub: %TT
+  // expr = (ii*R + jj)*T*T + tid
+  %iiR = arith.muli %ii, %R : index
+  %iiRjj = arith.addi %iiR, %jj : index
+  %iiRjjTT = arith.muli %iiRjj, %TT : index
+  %expr = arith.addi %iiRjjTT, %tid : index
+  // l.inv(expr)
+  %row = lego.row [%RT, %RT] : !lego.layout
   %ob = lego.order_by(%row) : !lego.layout
-  %gb = lego.group_by [%c2, %c2, %c4, %c4](%ob) : !lego.layout
-  %ii, %jj, %tidy, %tidx = lego.apply_inverse %gb(%f) : !lego.layout -> index, index, index, index
-  return %ii, %jj, %tidy, %tidx : index, index, index, index
+  %gb = lego.group_by [%R, %R, %T, %T](%ob) : !lego.layout
+  %i, %j, %tidy, %tidx = lego.apply_inverse %gb(%expr) : !lego.layout -> index, index, index, index
+  return %i, %j, %tidy, %tidx : index, index, index, index
 }
 
 // -----
 
-// ============================================================================
-// Stencil indexing with offsets (from bricks_f3d.py / bricks_laplasian.py)
-// ============================================================================
+// Stencil loads
 
 // CHECK-LABEL: func.func @normal_stencil_load
-// CHECK-SAME:  (%[[MEM:.*]]: memref<512xf32>,
 // CHECK:       arith.addi
 // CHECK:       arith.muli
-// CHECK:       %[[VAL:.*]] = memref.load %[[MEM]][%{{.*}}]
+// CHECK:       %[[VAL:.*]] = memref.load
 // CHECK:       return %[[VAL]] : f32
 func.func @normal_stencil_load(%mem: memref<512xf32>,
     %bx: index, %by: index, %bz: index,
@@ -305,10 +261,9 @@ func.func @normal_stencil_load(%mem: memref<512xf32>,
 // -----
 
 // CHECK-LABEL: func.func @bricks_stencil_load
-// CHECK-SAME:  (%[[MEM:.*]]: memref<512xf32>,
 // CHECK:       arith.addi
 // CHECK:       arith.muli
-// CHECK:       %[[VAL:.*]] = memref.load %[[MEM]][%{{.*}}]
+// CHECK:       %[[VAL:.*]] = memref.load
 // CHECK:       return %[[VAL]] : f32
 func.func @bricks_stencil_load(%mem: memref<512xf32>,
     %bx: index, %by: index, %bz: index,
@@ -331,12 +286,11 @@ func.func @bricks_stencil_load(%mem: memref<512xf32>,
 // -----
 
 // CHECK-LABEL: func.func @const_stencil_load
-// CHECK-SAME:  (%[[MEM:.*]]: memref<512xf32>,
 // CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
 // CHECK:       arith.addi
 // CHECK:       arith.muli
-// CHECK:       %[[VAL:.*]] = memref.load %[[MEM]][%{{.*}}]
+// CHECK:       %[[VAL:.*]] = memref.load
 // CHECK:       return %[[VAL]] : f32
 func.func @const_stencil_load(%mem: memref<512xf32>,
     %i_diff: index, %j_diff: index, %k_diff: index,

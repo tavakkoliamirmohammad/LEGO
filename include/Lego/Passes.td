@@ -44,9 +44,17 @@ def LegoMaterializeAssumeBoundsPass : Pass<"lego-materialize-assume-bounds", "ml
     `%x_bounded = arith.remui %x, %d` and rewrites downstream uses of %x
     to use %x_bounded.  This establishes the range [0, d-1] so that
     --int-range-optimizations can fold divui/remui to constants.
+
+    With --cleanup, removes remui(block_arg, d) ops that were previously
+    inserted, replacing them with the original block argument (since the
+    user-declared bounds guarantee x < d, making remui identity).
   }];
   let constructor = "mlir::lego::createLegoMaterializeAssumeBoundsPass()";
   let dependentDialects = ["mlir::arith::ArithDialect", "mlir::lego::LegoDialect"];
+  let options = [
+    Option<"cleanup", "cleanup", "bool", "false",
+           "Remove remui(block_arg, d) inserted by a previous materialization">
+  ];
 }
 
 def LegoGenerateBoundsChecksPass : Pass<"lego-generate-bounds-checks", "mlir::ModuleOp"> {

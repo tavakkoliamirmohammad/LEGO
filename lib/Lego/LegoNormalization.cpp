@@ -84,7 +84,7 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
 
   LogicalResult matchAndRewrite(TileByOp op,
                                 PatternRewriter &rewriter) const override {
-    
+
     auto tileShapeAttr = op.getTileShape();
     auto tileShape = extractI64Array(tileShapeAttr);
     if (tileShape.empty())
@@ -92,9 +92,43 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
 
     int64_t d_tile = tileShape[0];
     int64_t q_tile = tileShape.size();
-    
+
     auto tileDims = op.getTileDims();
     Location loc = op.getLoc();
+
+    // ---- Identity 1 ----
+    // TileBy(OrderBy(P0(d0), P1(d1), ...), [[d0], [d1], ...])
+    //   → OrderBy(P0(d0), P1(d1), ...)
+    // When each tile level's dims match the corresponding inner block's
+    // dims, the TileBy is identity — just use the inner layout directly.
+    {
+      Value inner = op.getInput();
+      if (auto obOp = inner.getDefiningOp<OrderByOp>()) {
+        auto perms = obOp.getPerms();
+        if (q_tile == (int64_t)perms.size()) {
+          bool allMatch = true;
+          for (int64_t level = 0; level < q_tile && allMatch; ++level) {
+            auto blockDims = getLayoutInputDims(perms[level]);
+            if ((int64_t)blockDims.size() != d_tile) {
+              allMatch = false;
+              break;
+            }
+            for (int64_t k = 0; k < d_tile; ++k) {
+              if (tileDims[level * d_tile + k] != blockDims[k]) {
+                allMatch = false;
+                break;
+              }
+            }
+          }
+          if (allMatch) {
+            rewriter.replaceOp(op, inner);
+            return success();
+          }
+        }
+      }
+    }
+
+    // ---- General case: full GroupBy normalization ----
 
     // 2. Identify the chain of OrderBy objects from input.
     //    Python: for o in self.chain: ...

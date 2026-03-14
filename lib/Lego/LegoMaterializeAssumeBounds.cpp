@@ -16,6 +16,11 @@ struct LegoMaterializeAssumeBoundsPass
     : public mlir::lego::impl::LegoMaterializeAssumeBoundsPassBase<
           LegoMaterializeAssumeBoundsPass> {
   void runOnOperation() override {
+    if (cleanup) {
+      runCleanup();
+      return;
+    }
+
     OpBuilder builder(&getContext());
 
     // Phase 1: Collect (value, upper_bound) pairs from assume_bounds ops.
@@ -83,6 +88,21 @@ struct LegoMaterializeAssumeBoundsPass
       for (auto *defOp : maybeDeadDefs)
         if (defOp->use_empty())
           defOp->erase();
+    }
+  }
+
+  /// Cleanup mode: remove remui(block_arg, d) → block_arg.
+  /// These were inserted by a previous materialization run and are
+  /// identity ops since the user's assume_bounds guarantees x < d.
+  void runCleanup() {
+    SmallVector<arith::RemUIOp> toFold;
+    getOperation()->walk([&](arith::RemUIOp op) {
+      if (mlir::isa<BlockArgument>(op.getLhs()))
+        toFold.push_back(op);
+    });
+    for (auto op : toFold) {
+      op.replaceAllUsesWith(op.getLhs());
+      op.erase();
     }
   }
 };
