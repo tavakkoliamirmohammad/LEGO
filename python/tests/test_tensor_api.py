@@ -247,10 +247,10 @@ class TestDescriptorAPI:
 
     def test_composable_api_col_tile(self):
         """order_by(col(...)).tile_by(...) composes correctly."""
-        layout = LegoLayout(order_by(col(4, 8)).tile_by((4,), (8,)))
+        layout = LegoLayout(order_by(col(4, 8)).tile_by((2, 4), (2, 2)))
         result = layout.create_tensor(np.float32)
         back = layout.inverse_transform(result)
-        expected = np.arange(32, dtype=np.float32).reshape(4, 8)
+        expected = np.arange(32, dtype=np.float32).reshape(2, 4, 2, 2)
         np.testing.assert_array_almost_equal(back, expected)
 
     def test_mlir_text_contains_row_op(self):
