@@ -97,11 +97,29 @@ struct LegoMaterializeAssumeBoundsPass
         if (defOp->use_empty())
           defOp->erase();
     }
+
+    // Phase 4: Erase remaining assume_bounds ops (lb-only).
+    // When both lb+ub are present the whole op is already erased above
+    // (lb is silently discarded, only ub produces remui).
+    // Lb-only ops must also be erased here to prevent normalization from
+    // lowering them into persistent cmpi + lego.assume ops.
+    SmallVector<lego::AssumeBoundsOp> remaining;
+    getOperation()->walk([&](lego::AssumeBoundsOp op) {
+      remaining.push_back(op);
+    });
+    for (auto op : remaining) {
+      SmallVector<Operation *> maybeDeadDefs;
+      for (Value operand : op->getOperands())
+        if (auto *defOp = operand.getDefiningOp())
+          maybeDeadDefs.push_back(defOp);
+      op->erase();
+      for (auto *defOp : maybeDeadDefs)
+        if (defOp->use_empty())
+          defOp->erase();
+    }
   }
 
   /// Cleanup mode: remove remui(block_arg, d) that we inserted.
-  /// We tag inserted remui ops with a "lego.materialized" unit attribute
-  /// so we can identify them later.
   void runCleanup() {
     SmallVector<arith::RemUIOp> toFold;
     getOperation()->walk([&](arith::RemUIOp op) {

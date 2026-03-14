@@ -48,7 +48,6 @@ int main(int argc, char **argv) {
   mlir::lego::registerLegoToArithPass();
   mlir::lego::registerLegoNormalizationPass();
   mlir::lego::registerLegoArithSimplificationPass();
-  mlir::lego::registerLegoMaterializeAssumeBoundsPass();
   mlir::lego::registerLegoGenerateBoundsChecksPass();
   mlir::lego::registerLegoExternalSMTVerifierPass();
   mlir::lego::registerLegoVerifyBijectivityPass();
