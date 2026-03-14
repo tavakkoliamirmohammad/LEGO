@@ -189,8 +189,9 @@ struct LegoArithSimplificationPass
           LegoArithSimplificationPass> {
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
-    patterns.add<SimplifyRemId, SimplifyDivId, SimplifyDivConst, ReconstructId>(&getContext());
-    
+    patterns.add<SimplifyRemId, SimplifyDivId, SimplifyDivConst,
+                 ReconstructId>(&getContext());
+
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
     }
