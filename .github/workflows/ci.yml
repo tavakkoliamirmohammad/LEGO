@@ -77,8 +77,17 @@ jobs:
       - name: Build all targets
         run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
 
+      - name: Install lit
+        run: pip install lit
+
+      - name: Run lit tests (check-lego)
+        run: cmake --build build --target check-lego
+
+      - name: Run Python tests (check-lego-python)
+        run: cmake --build build --target check-lego-python
+
       - name: Tar build artifacts
-        run: tar cf build-artifacts.tar build/python_packages build/tools build/test build/include build/llvm-build/bin
+        run: tar cf build-artifacts.tar build/python_packages build/tools build/include
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -87,48 +96,9 @@ jobs:
           path: build-artifacts.tar
           retention-days: 1
 
-  # ── Stage 2: Test (runs after build) ──
-  test:
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, macos-15]
-        python: ["3.12", "3.13"]
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      - name: Install Python dependencies
-        run: pip install nanobind sympy pytest lit
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-${{ matrix.os }}-py${{ matrix.python }}
-
-      - name: Extract build artifacts
-        run: |
-          tar xf build-artifacts.tar
-          chmod +x build/llvm-build/bin/* build/tools/lego-opt/*
-
-      - name: Run lit tests (check-lego)
-        run: |
-          lit build/test -v --path build/tools/lego-opt --path build/llvm-build/bin
-
-      - name: Run Python tests (check-lego-python)
-        run: |
-          PYTHONPATH=build/python_packages/lego:python \
-            python -m pytest python/tests -v
-
-  # ── Stage 3: Package wheels (runs after test) ──
+  # ── Stage 2: Package wheels (runs after build) ──
   package:
-    needs: test
+    needs: build
     strategy:
       fail-fast: false
       matrix:
