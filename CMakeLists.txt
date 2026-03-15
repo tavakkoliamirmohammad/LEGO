@@ -3,6 +3,7 @@ project(lego-mlir)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- Build Options ---
 option(LEGO_MONOLITHIC_LLVM "Build LLVM/MLIR as part of the project" OFF)
@@ -97,6 +98,7 @@ else()
   
   message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
   message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+  message(STATUS "MLIR_ENABLE_BINDINGS_PYTHON (from MLIRConfig): ${MLIR_ENABLE_BINDINGS_PYTHON}")
 
   list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
   list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")

@@ -7,6 +7,16 @@ set(LEGO_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(LEGO_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/..)
 set(LEGO_TOOLS_DIR ${CMAKE_BINARY_DIR}/tools/lego-opt)
 
+# In a monolithic build LLVM_TOOLS_DIR may be empty; always ensure it
+# points at the llvm-build binary directory for FileCheck, count, not.
+if(NOT LLVM_TOOLS_DIR OR LLVM_TOOLS_DIR STREQUAL "")
+  set(LLVM_TOOLS_DIR "${CMAKE_BINARY_DIR}/llvm-build/bin")
+endif()
+# Also set LLVM_TOOLS_BINARY_DIR which configure_lit_site_cfg reads
+if(NOT LLVM_TOOLS_BINARY_DIR OR LLVM_TOOLS_BINARY_DIR STREQUAL "")
+  set(LLVM_TOOLS_BINARY_DIR "${CMAKE_BINARY_DIR}/llvm-build/bin")
+endif()
+
 configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in
   ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py
@@ -22,16 +32,7 @@ if(NOT LLVM_EXTERNAL_LIT)
   endif()
 endif()
 
-set(LEGO_TEST_DEPENDS lego-opt)
-if(TARGET FileCheck)
-  list(APPEND LEGO_TEST_DEPENDS FileCheck)
-endif()
-if(TARGET count)
-  list(APPEND LEGO_TEST_DEPENDS count)
-endif()
-if(TARGET not)
-  list(APPEND LEGO_TEST_DEPENDS not)
-endif()
+set(LEGO_TEST_DEPENDS lego-opt FileCheck count not)
 
 # Add Python binding target as a dependency when available
 if(TARGET LegoPythonModules)
