@@ -52,9 +52,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/llvm-build
-          key: llvm-build-v3-${{ matrix.os }}-${{ steps.llvm-rev.outputs.sha }}
+          key: llvm-build-v4-${{ matrix.os }}-${{ steps.llvm-rev.outputs.sha }}
           restore-keys: |
-            llvm-build-v3-${{ matrix.os }}-
+            llvm-build-v4-${{ matrix.os }}-
 
       - name: Get nanobind cmake dir
         id: nanobind
