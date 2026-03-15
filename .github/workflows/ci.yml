@@ -88,6 +88,19 @@ jobs:
       - name: Run Python tests (check-lego-python)
         run: cmake --build build --target check-lego-python
 
+      - name: Resolve symlinks in python package
+        run: |
+          cd build/python_packages/lego
+          find . -type l | while read link; do
+            target=$(python -c "import os; print(os.path.realpath('$link'))")
+            if [ -e "$target" ]; then
+              rm "$link"
+              cp -a "$target" "$link"
+            else
+              rm "$link"
+            fi
+          done
+
       - name: Tar build artifacts
         run: tar cf build-artifacts.tar build/python_packages build/tools build/include
 
@@ -126,14 +139,6 @@ jobs:
       - name: Prepare wheel package
         run: |
           cd build/python_packages/lego
-
-          # Resolve symlinks — wheels can't contain symlinks
-          find . -type l | while read link; do
-            target=$(readlink -f "$link")
-            rm "$link"
-            cp -a "$target" "$link"
-          done
-
           cat > pyproject.toml << 'EOF'
           [build-system]
           requires = ["setuptools>=61.0"]
