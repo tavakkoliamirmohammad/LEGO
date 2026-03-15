@@ -78,7 +78,7 @@ jobs:
         run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
 
       - name: Tar build artifacts
-        run: tar cf build-artifacts.tar build/python_packages build/tools build/test build/include
+        run: tar cf build-artifacts.tar build/python_packages build/tools build/test build/include build/llvm-build/bin
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -113,7 +113,9 @@ jobs:
           name: build-${{ matrix.os }}-py${{ matrix.python }}
 
       - name: Extract build artifacts
-        run: tar xf build-artifacts.tar
+        run: |
+          tar xf build-artifacts.tar
+          chmod +x build/llvm-build/bin/* build/tools/lego-opt/*
 
       - name: Run lit tests (check-lego)
         run: |
