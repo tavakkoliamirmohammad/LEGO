@@ -65,6 +65,11 @@ jobs:
           restore-keys: |
             llvm-build-${{ matrix.os }}-py${{ matrix.python }}-
 
+      - name: Get nanobind cmake dir
+        id: nanobind
+        run: |
+          echo "dir=$(python -c 'import nanobind; print(nanobind.cmake_dir())')" >> "$GITHUB_OUTPUT"
+
       - name: Configure CMake
         run: |
           cmake -G Ninja -B build \
@@ -75,7 +80,8 @@ jobs:
             -DLEGO_LLVM_TARGETS="X86;NVPTX" \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DLEGO_BUILD_TESTS=OFF \
-            -DLLVM_USE_LINKER=lld
+            -DLLVM_USE_LINKER=lld \
+            -Dnanobind_DIR="${{ steps.nanobind.outputs.dir }}"
 
       - name: Build Python bindings
         run: cmake --build build --target LegoPythonModules -j$(nproc)
