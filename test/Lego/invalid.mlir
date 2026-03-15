@@ -105,3 +105,15 @@ func.func @apply_rank_mismatch(%i: index) {
   %f = lego.apply %r(%i) : !lego.layout
   return
 }
+
+// -----
+
+func.func @test_tile_by_requires_orderby() {
+  %c4 = arith.constant 4 : index
+  %c8 = arith.constant 8 : index
+  %regp = lego.reg_p perm [0, 1] dims [%c4, %c8] : !lego.layout
+  %c2 = arith.constant 2 : index
+  // expected-error @+1 {{'lego.tile_by' op input must be an OrderBy layout}}
+  %tb = lego.tile_by %regp tile_dims [[%c2, %c2], [%c2, %c4]] : !lego.layout
+  return
+}

@@ -125,3 +125,50 @@ func.func @test_assume_bounds_ub_only(%arg0: index, %arg1: index) {
 // CHECK: lego.assume %[[CMP_UB]]
 // CHECK-NOT: arith.cmpi sge
 // CHECK: return
+
+// CHECK-LABEL: func @test_tile_by_identity_single
+// TileBy with single tile level matching inner block dims is identity.
+// CHECK-NOT: lego.group_by
+// CHECK-NOT: lego.tile_by
+// CHECK: %[[R:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
+// CHECK: %[[OB:.*]] = lego.order_by(%[[R]])
+// CHECK: return %[[OB]]
+func.func @test_tile_by_identity_single() -> !lego.layout {
+  %c4 = arith.constant 4 : index
+  %c3 = arith.constant 3 : index
+  %r = lego.row [%c4, %c3] : !lego.layout
+  %ob = lego.order_by(%r) : !lego.layout
+  %tb = lego.tile_by %ob tile_dims [[%c4, %c3]] : !lego.layout
+  return %tb : !lego.layout
+}
+
+// CHECK-LABEL: func @test_tile_by_identity_multi
+// TileBy with multiple tile levels all matching inner blocks is identity.
+// CHECK-NOT: lego.group_by
+// CHECK-NOT: lego.tile_by
+// CHECK: %[[R1:.*]] = lego.reg_p perm [0, 1, 2] dims[%{{.*}}, %{{.*}}, %{{.*}}]
+// CHECK: %[[R2:.*]] = lego.reg_p perm [0, 1, 2] dims[%{{.*}}, %{{.*}}, %{{.*}}]
+// CHECK: %[[OB:.*]] = lego.order_by(%[[R1]], %[[R2]])
+// CHECK: return %[[OB]]
+func.func @test_tile_by_identity_multi() -> !lego.layout {
+  %c4 = arith.constant 4 : index
+  %c2 = arith.constant 2 : index
+  %r1 = lego.row [%c4, %c4, %c4] : !lego.layout
+  %r2 = lego.row [%c2, %c2, %c2] : !lego.layout
+  %ob = lego.order_by(%r1, %r2) : !lego.layout
+  %tb = lego.tile_by %ob tile_dims [[%c4, %c4, %c4], [%c2, %c2, %c2]] : !lego.layout
+  return %tb : !lego.layout
+}
+
+// CHECK-LABEL: func @test_tile_by_not_identity
+// TileBy with dims NOT matching inner blocks should produce GroupBy.
+// CHECK: lego.group_by
+func.func @test_tile_by_not_identity() -> !lego.layout {
+  %c8 = arith.constant 8 : index
+  %c4 = arith.constant 4 : index
+  %c2 = arith.constant 2 : index
+  %r = lego.row [%c8, %c8, %c8] : !lego.layout
+  %ob = lego.order_by(%r) : !lego.layout
+  %tb = lego.tile_by %ob tile_dims [[%c4, %c4, %c4], [%c2, %c2, %c2]] : !lego.layout
+  return %tb : !lego.layout
+}
