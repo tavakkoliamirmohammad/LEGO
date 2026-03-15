@@ -143,6 +143,12 @@ LogicalResult RegPOp::verify() {
 // ============================================================================
 
 LogicalResult TileByOp::verify() {
+  // TileBy only accepts OrderBy as input.
+  if (auto *defOp = getInput().getDefiningOp()) {
+    if (!mlir::isa<OrderByOp>(defOp))
+      return emitOpError("input must be an OrderBy layout");
+  }
+
   auto tileShapeOpt = getTileShape();
   auto tileShapeAttr = getTileShape();
   auto tileShape = extractI64Array(tileShapeAttr);

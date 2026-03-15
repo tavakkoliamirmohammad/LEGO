@@ -34,6 +34,7 @@ add_mlir_dialect_library(MLIRLego
   LegoNormalization.cpp
   LegoToArith.cpp
   LegoArithSimplification.cpp
+  LegoMaterializeAssumeBounds.cpp
   Passes.cpp
   # Verification
   LegoGenerateBoundsChecks.cpp

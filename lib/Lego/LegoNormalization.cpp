@@ -79,12 +79,62 @@ struct ColOpRewrite : public OpRewritePattern<ColOp> {
 // TileByOp Rewrite Pattern
 // ============================================================================
 
+// ============================================================================
+// TileBy Identity Rewrite Pattern
+// ============================================================================
+// TileBy(OrderBy(P0(d0), P1(d1), ...), [[d0], [d1], ...])
+//   → OrderBy(P0(d0), P1(d1), ...)
+// When each tile level's dims match the corresponding inner block's
+// dims, the TileBy is identity — just use the inner layout directly.
+
+struct TileByIdentityRewrite : public OpRewritePattern<TileByOp> {
+  using OpRewritePattern<TileByOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(TileByOp op,
+                                PatternRewriter &rewriter) const override {
+    auto tileShapeAttr = op.getTileShape();
+    auto tileShape = extractI64Array(tileShapeAttr);
+    if (tileShape.empty())
+      return failure();
+
+    int64_t d_tile = tileShape[0];
+    int64_t q_tile = tileShape.size();
+    auto tileDims = op.getTileDims();
+
+    Value inner = op.getInput();
+    auto obOp = inner.getDefiningOp<OrderByOp>();
+    if (!obOp)
+      return failure();
+
+    auto perms = obOp.getPerms();
+    if (q_tile != (int64_t)perms.size())
+      return failure();
+
+    for (int64_t level = 0; level < q_tile; ++level) {
+      auto blockDims = getLayoutInputDims(perms[level]);
+      if ((int64_t)blockDims.size() != d_tile)
+        return failure();
+      for (int64_t k = 0; k < d_tile; ++k) {
+        if (tileDims[level * d_tile + k] != blockDims[k])
+          return failure();
+      }
+    }
+
+    rewriter.replaceOp(op, inner);
+    return success();
+  }
+};
+
+// ============================================================================
+// TileBy General Rewrite Pattern
+// ============================================================================
+
 struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
   using OpRewritePattern<TileByOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(TileByOp op,
                                 PatternRewriter &rewriter) const override {
-    
+
     auto tileShapeAttr = op.getTileShape();
     auto tileShape = extractI64Array(tileShapeAttr);
     if (tileShape.empty())
@@ -92,14 +142,11 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
 
     int64_t d_tile = tileShape[0];
     int64_t q_tile = tileShape.size();
-    
+
     auto tileDims = op.getTileDims();
     Location loc = op.getLoc();
 
-    // 2. Identify the chain of OrderBy objects from input.
-    //    Python: for o in self.chain: ...
-    //    Each chain element must be a FULL OrderBy (not individual perms),
-    //    so that every GroupBy object has product-of-dims == total elements.
+    // Collect the chain of OrderBy objects from input.
     SmallVector<Value> chain;
     chain.push_back(op.getInput());
 
@@ -107,49 +154,40 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
     for (size_t i = 0; i < chain.size(); ++i) {
         Value obj = chain[i];
 
-        // Compute shuffle params using the full OrderBy's {d, q}
+        // Per-chain inter-block reshuffle: RegP(σ(O.dims), σ⁻¹_O)
         auto [d_obj, q_obj] = getLayoutDQ(obj);
         auto objDims = getLayoutInputDims(obj);
         auto sigma_o = getSigmaPerm(d_obj, q_obj);
         auto sigma_o_inv = inversePermutation(sigma_o);
         auto reshuffleDims = sigmaValues(ValueRange(objDims), sigma_o);
 
-        // Create RegP over ALL the OrderBy's dims
         auto regPOp = RegPOp::create(
             rewriter, loc, op.getType(), rewriter.getI64ArrayAttr(sigma_o_inv),
             reshuffleDims);
-
-        // Wrap in OrderBy
         auto orderByOp = OrderByOp::create(rewriter, loc, regPOp.getType(),
                                            ValueRange{regPOp.getResult()});
 
         groupByObjects.push_back(obj);
         groupByObjects.push_back(orderByOp.getResult());
     }
-    
-    // Final reshuffle: RegP(σ(tile_dims), σ⁻¹) per the formula
+
+    // Tile reshuffle: RegP(tileDims, σ_{d×q})
     {
         auto sigma_dq = getSigmaPerm(d_tile, q_tile);
-        auto sigma_dq_inv = inversePermutation(sigma_dq);
-        auto reshuffledTileDims = sigmaValues(tileDims, sigma_dq);
         auto regPOp = RegPOp::create(rewriter, loc, op.getType(),
-                                     rewriter.getI64ArrayAttr(sigma_dq_inv),
-                                     reshuffledTileDims);
-
+                                     rewriter.getI64ArrayAttr(sigma_dq),
+                                     tileDims);
         auto orderByOp = OrderByOp::create(rewriter, loc, regPOp.getType(),
                                            ValueRange{regPOp.getResult()});
 
         groupByObjects.push_back(orderByOp.getResult());
     }
 
-    // 6. Create GroupByOp
-    //    GroupBy([dims], new_order_by + ...)
     auto groupByOp = GroupByOp::create(rewriter, loc, op.getType(),
                                        tileDims,
                                        groupByObjects);
 
     rewriter.replaceOp(op, groupByOp.getResult());
-
     return success();
   }
 };
@@ -195,7 +233,7 @@ struct LegoNormalizationPassImpl
     MLIRContext *context = &getContext();
 
     RewritePatternSet patterns(context);
-    patterns.add<TileByOpRewrite, RowOpRewrite, ColOpRewrite,
+    patterns.add<TileByIdentityRewrite, TileByOpRewrite, RowOpRewrite, ColOpRewrite,
                  AssumeBoundsOpRewrite>(context);
 
     if (failed(applyPatternsGreedily(module, std::move(patterns)))) {

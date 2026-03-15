@@ -17,6 +17,7 @@ std::unique_ptr<Pass> createLegoToArithPass();
 std::unique_ptr<Pass> createLegoNormalizationPass();
 std::unique_ptr<Pass> createLegoVerifyGenpConsistencyPass();
 std::unique_ptr<Pass> createLegoArithSimplificationPass();
+std::unique_ptr<Pass> createLegoMaterializeAssumeBoundsPass(bool cleanup = false);
 std::unique_ptr<Pass> createLegoGenerateBoundsChecksPass();
 std::unique_ptr<Pass> createLegoExternalSMTVerifierPass();
 std::unique_ptr<Pass> createLegoVerifyBijectivityPass();
@@ -30,6 +31,7 @@ void buildLegoToLLVMPipeline(OpPassManager &pm);
 #define GEN_PASS_DECL_LEGONORMALIZATIONPASS
 #define GEN_PASS_DECL_LEGOVERIFYGENPCONSISTENCYPASS
 #define GEN_PASS_DECL_LEGOARITHSIMPLIFICATIONPASS
+#define GEN_PASS_DECL_LEGOMATERIALIZEASSUMEBOUNDSPASS
 #define GEN_PASS_DECL_LEGOGENERATEBOUNDSCHECKSPASS
 #define GEN_PASS_DECL_LEGOEXTERNALSMTVERIFIERPASS
 #define GEN_PASS_DECL_LEGOVERIFYBIJECTIVITYPASS
