@@ -78,6 +78,13 @@ jobs:
       - name: Build all targets
         run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
 
+      - name: Debug lit config
+        run: |
+          echo "--- lit.site.cfg.py ---"
+          grep -E "tools_dir|TOOLS" build/test/lit.site.cfg.py || true
+          echo "--- FileCheck location ---"
+          find build -name FileCheck -type f 2>/dev/null || true
+
       - name: Run lit tests (check-lego)
         run: cmake --build build --target check-lego
 
