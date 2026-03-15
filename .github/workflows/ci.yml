@@ -165,7 +165,7 @@ jobs:
 
           setup(
               name="lego-layout",
-              version="0.1.1",
+              version="0.1.2",
               description="LEGO: Layout Expression Language for Code Generation",
               python_requires=">=3.12",
               packages=packages,
@@ -198,6 +198,17 @@ jobs:
           from mlir.passmanager import PassManager
           print('PassManager OK')
           "
+
+      - name: Retag Linux wheel to manylinux
+        if: runner.os == 'Linux'
+        run: |
+          pip install auditwheel patchelf
+          cd build/python_packages/lego
+          for whl in dist/*.whl; do
+            auditwheel repair "$whl" --plat manylinux_2_35_x86_64 -w dist-fixed/
+          done
+          rm -rf dist
+          mv dist-fixed dist
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
