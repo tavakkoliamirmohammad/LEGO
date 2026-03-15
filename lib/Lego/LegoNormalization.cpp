@@ -160,15 +160,13 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
         groupByObjects.push_back(obj);
         groupByObjects.push_back(orderByOp.getResult());
     }
-    
-    // Final reshuffle: RegP(σ(tile_dims), σ⁻¹) per the formula
+
+    // Tile reshuffle: RegP(tileDims, σ(d,q))
     {
         auto sigma_dq = getSigmaPerm(d_tile, q_tile);
-        auto sigma_dq_inv = inversePermutation(sigma_dq);
-        auto reshuffledTileDims = sigmaValues(tileDims, sigma_dq);
         auto regPOp = RegPOp::create(rewriter, loc, op.getType(),
-                                     rewriter.getI64ArrayAttr(sigma_dq_inv),
-                                     reshuffledTileDims);
+                                     rewriter.getI64ArrayAttr(sigma_dq),
+                                     tileDims);
 
         auto orderByOp = OrderByOp::create(rewriter, loc, regPOp.getType(),
                                            ValueRange{regPOp.getResult()});

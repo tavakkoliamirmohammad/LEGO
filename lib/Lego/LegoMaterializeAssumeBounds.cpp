@@ -35,12 +35,10 @@ struct LegoMaterializeAssumeBoundsPass
       Value ub = op.getUb();
       if (!ub)
         return;
-      // Only materialize bounds on block arguments (user-declared).
-      // Skip computed values (e.g., from lego-generate-bounds-checks).
-      if (!mlir::isa<BlockArgument>(x))
-        return;
-      if (x.getDefiningOp<arith::RemUIOp>())
-        return;
+      // Skip values already wrapped in remui.
+      if (auto *defOp = x.getDefiningOp())
+        if (mlir::isa<arith::RemUIOp>(defOp))
+          return;
       workList.emplace_back(op.getOperation(), x, ub);
     });
 

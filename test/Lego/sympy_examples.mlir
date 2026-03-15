@@ -84,37 +84,19 @@ func.func @graphene_apply(%i: index, %j: index, %k: index, %w: index, %q: index)
 // CHECK-SAME:  (%[[BX:.*]]: index, %[[BY:.*]]: index, %[[BZ:.*]]: index, %[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index)
 // CHECK-DAG:   %[[C128:.*]] = arith.constant 128 : index
 // CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK-DAG:   %[[C32:.*]] = arith.constant 32 : index
 // CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
-// CHECK:       %[[MJ:.*]] = arith.muli %[[J]], %[[C2]] : index
-// CHECK:       %[[S0:.*]] = arith.addi %[[K]], %[[MJ]] : index
-// CHECK:       %[[MI:.*]] = arith.muli %[[I]], %[[C4]] : index
-// CHECK:       %[[S1:.*]] = arith.addi %[[S0]], %[[MI]] : index
-// CHECK:       %[[MBZ:.*]] = arith.muli %[[BZ]], %[[C8]] : index
-// CHECK:       %[[S2:.*]] = arith.addi %[[S1]], %[[MBZ]] : index
-// CHECK:       %[[MBY:.*]] = arith.muli %[[BY]], %[[C32]] : index
-// CHECK:       %[[FLAT:.*]] = arith.addi %[[S2]], %[[MBY]] : index
-// CHECK:       %[[D0:.*]] = arith.divui %[[FLAT]], %[[C64]] : index
-// CHECK:       %[[R0:.*]] = arith.remui %[[FLAT]], %[[C64]] : index
-// CHECK:       %[[D1:.*]] = arith.divui %[[R0]], %[[C16]] : index
-// CHECK:       %[[R1:.*]] = arith.remui %[[R0]], %[[C16]] : index
-// CHECK:       %[[D2:.*]] = arith.divui %[[R1]], %[[C8]] : index
-// CHECK:       %[[R2:.*]] = arith.remui %[[R1]], %[[C8]] : index
-// CHECK:       %[[D3:.*]] = arith.divui %[[R2]], %[[C2]] : index
-// CHECK:       %[[R3:.*]] = arith.remui %[[R2]], %[[C2]] : index
-// CHECK:       %[[T0:.*]] = arith.muli %[[D2]], %[[C2]] : index
-// CHECK:       %[[T1:.*]] = arith.addi %[[R3]], %[[T0]] : index
-// CHECK:       %[[T2:.*]] = arith.muli %[[D0]], %[[C4]] : index
-// CHECK:       %[[T3:.*]] = arith.addi %[[T1]], %[[T2]] : index
-// CHECK:       %[[T4:.*]] = arith.muli %[[D3]], %[[C8]] : index
-// CHECK:       %[[T5:.*]] = arith.addi %[[T3]], %[[T4]] : index
-// CHECK:       %[[T6:.*]] = arith.muli %[[D1]], %[[C32]] : index
-// CHECK:       %[[T7:.*]] = arith.addi %[[T5]], %[[T6]] : index
+// CHECK:       %[[MBZ:.*]] = arith.muli %[[BZ]], %[[C2]] : index
+// CHECK:       %[[S0:.*]] = arith.addi %[[K]], %[[MBZ]] : index
+// CHECK:       %[[MJ:.*]] = arith.muli %[[J]], %[[C8]] : index
+// CHECK:       %[[S1:.*]] = arith.addi %[[S0]], %[[MJ]] : index
+// CHECK:       %[[MBY:.*]] = arith.muli %[[BY]], %[[C16]] : index
+// CHECK:       %[[S2:.*]] = arith.addi %[[S1]], %[[MBY]] : index
+// CHECK:       %[[MI:.*]] = arith.muli %[[I]], %[[C64]] : index
+// CHECK:       %[[S3:.*]] = arith.addi %[[S2]], %[[MI]] : index
 // CHECK:       %[[MBX:.*]] = arith.muli %[[BX]], %[[C128]] : index
-// CHECK:       %[[RES:.*]] = arith.addi %[[T7]], %[[MBX]] : index
+// CHECK:       %[[RES:.*]] = arith.addi %[[S3]], %[[MBX]] : index
 // CHECK:       return %[[RES]] : index
 func.func @normal_3d_apply(%bx: index, %by: index, %bz: index,
                            %i: index, %j: index, %k: index) -> index {
@@ -263,52 +245,35 @@ func.func @lud_groupby_inv(%R: index, %T: index,
 // CHECK-SAME:  (%[[MEM:.*]]: memref<512xf32>, %[[BX:.*]]: index, %[[BY:.*]]: index, %[[BZ:.*]]: index, %[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index, %[[ID:.*]]: index, %[[JD:.*]]: index, %[[KD:.*]]: index)
 // CHECK-DAG:   %[[C128:.*]] = arith.constant 128 : index
 // CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK-DAG:   %[[C32:.*]] = arith.constant 32 : index
 // CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
 // CHECK:       %[[IO:.*]] = arith.addi %[[I]], %[[ID]] : index
 // CHECK:       %[[JO:.*]] = arith.addi %[[J]], %[[JD]] : index
 // CHECK:       %[[KO:.*]] = arith.addi %[[K]], %[[KD]] : index
-// CHECK:       %[[MJ:.*]] = arith.muli %[[JO]], %[[C2]] : index
-// CHECK:       %[[S0:.*]] = arith.addi %[[KO]], %[[MJ]] : index
-// CHECK:       %[[MI:.*]] = arith.muli %[[IO]], %[[C4]] : index
-// CHECK:       %[[S1:.*]] = arith.addi %[[S0]], %[[MI]] : index
-// CHECK:       %[[MBZ:.*]] = arith.muli %[[BZ]], %[[C8]] : index
-// CHECK:       %[[S2:.*]] = arith.addi %[[S1]], %[[MBZ]] : index
-// CHECK:       %[[MBY:.*]] = arith.muli %[[BY]], %[[C32]] : index
-// CHECK:       %[[FLAT:.*]] = arith.addi %[[S2]], %[[MBY]] : index
-// CHECK:       %[[D0:.*]] = arith.divui %[[FLAT]], %[[C128]] : index
-// CHECK:       %[[NBX:.*]] = arith.addi %[[BX]], %[[D0]] : index
-// CHECK:       %[[R0:.*]] = arith.remui %[[FLAT]], %[[C128]] : index
-// CHECK:       %[[D1:.*]] = arith.divui %[[R0]], %[[C64]] : index
-// CHECK:       %[[R1:.*]] = arith.remui %[[R0]], %[[C64]] : index
-// CHECK:       %[[D2:.*]] = arith.divui %[[R1]], %[[C16]] : index
-// CHECK:       %[[R2:.*]] = arith.remui %[[R1]], %[[C16]] : index
-// CHECK:       %[[D3:.*]] = arith.divui %[[R2]], %[[C8]] : index
-// CHECK:       %[[R3:.*]] = arith.remui %[[R2]], %[[C8]] : index
-// CHECK:       %[[D4:.*]] = arith.divui %[[R3]], %[[C2]] : index
-// CHECK:       %[[R4:.*]] = arith.remui %[[R3]], %[[C2]] : index
-// CHECK:       %[[T0:.*]] = arith.muli %[[D3]], %[[C2]] : index
-// CHECK:       %[[T1:.*]] = arith.addi %[[R4]], %[[T0]] : index
-// CHECK:       %[[T2:.*]] = arith.muli %[[D1]], %[[C4]] : index
-// CHECK:       %[[T3:.*]] = arith.addi %[[T1]], %[[T2]] : index
-// CHECK:       %[[T4:.*]] = arith.muli %[[D4]], %[[C8]] : index
-// CHECK:       %[[T5:.*]] = arith.addi %[[T3]], %[[T4]] : index
-// CHECK:       %[[T6:.*]] = arith.muli %[[D2]], %[[C32]] : index
-// CHECK:       %[[T7:.*]] = arith.addi %[[T5]], %[[T6]] : index
-// CHECK:       %[[T8:.*]] = arith.muli %[[NBX]], %[[C128]] : index
-// CHECK:       %[[IDX:.*]] = arith.addi %[[T7]], %[[T8]] : index
+// CHECK:       %[[MBZ:.*]] = arith.muli %[[BZ]], %[[C2]] : index
+// CHECK:       %[[S0:.*]] = arith.addi %[[KO]], %[[MBZ]] : index
+// CHECK:       %[[MJO:.*]] = arith.muli %[[JO]], %[[C8]] : index
+// CHECK:       %[[S1:.*]] = arith.addi %[[S0]], %[[MJO]] : index
+// CHECK:       %[[MBY:.*]] = arith.muli %[[BY]], %[[C16]] : index
+// CHECK:       %[[S2:.*]] = arith.addi %[[S1]], %[[MBY]] : index
+// CHECK:       %[[MIO:.*]] = arith.muli %[[IO]], %[[C64]] : index
+// CHECK:       %[[S3:.*]] = arith.addi %[[S2]], %[[MIO]] : index
+// CHECK:       %[[MBX:.*]] = arith.muli %[[BX]], %[[C128]] : index
+// CHECK:       %[[IDX:.*]] = arith.addi %[[S3]], %[[MBX]] : index
 // CHECK:       %[[VAL:.*]] = memref.load %[[MEM]][%[[IDX]]] : memref<512xf32>
 // CHECK:       return %[[VAL]] : f32
 func.func @normal_stencil_load(%mem: memref<512xf32>,
     %bx: index, %by: index, %bz: index,
     %i: index, %j: index, %k: index,
     %i_diff: index, %j_diff: index, %k_diff: index) -> f32 {
+  %c0 = arith.constant 0 : index
   %c8 = arith.constant 8 : index
   %c4 = arith.constant 4 : index
   %c2 = arith.constant 2 : index
+  lego.assume_bounds %bx lb: %c0 ub: %c4
+  lego.assume_bounds %by lb: %c0 ub: %c4
+  lego.assume_bounds %bz lb: %c0 ub: %c4
   %row = lego.row [%c8, %c8, %c8] : !lego.layout
   %ob = lego.order_by(%row) : !lego.layout
   %tiled = lego.tile_by %ob tile_dims [[%c4, %c4, %c4], [%c2, %c2, %c2]] : !lego.layout
@@ -316,6 +281,9 @@ func.func @normal_stencil_load(%mem: memref<512xf32>,
   %io = arith.addi %i, %i_diff : index
   %jo = arith.addi %j, %j_diff : index
   %ko = arith.addi %k, %k_diff : index
+  lego.assume_bounds %io lb: %c0 ub: %c2
+  lego.assume_bounds %jo lb: %c0 ub: %c2
+  lego.assume_bounds %ko lb: %c0 ub: %c2
   %val = lego.load %view[%bx, %by, %bz, %io, %jo, %ko] : !lego.view<f32>, index, index, index, index, index, index
   return %val : f32
 }

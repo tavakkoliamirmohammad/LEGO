@@ -35,6 +35,7 @@ func.func @test_tile_by_row() -> !lego.layout {
 // CHECK: %[[ROW_REGP:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
 // CHECK: %[[REGP1:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
 // CHECK: %[[OB1:.*]] = lego.order_by(%[[REGP1]])
+// Tile reshuffle: d=2, q=2 → σ=[0, 2, 1, 3]
 // CHECK: %[[REGP2:.*]] = lego.reg_p perm [0, 2, 1, 3] dims[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}]
 // CHECK: %[[OB2:.*]] = lego.order_by(%[[REGP2]])
 // CHECK: %[[RES:.*]] = lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[ROW_REGP]], %[[OB1]], %[[OB2]])
@@ -82,8 +83,8 @@ func.func @test_tile_by_d2_q3() -> !lego.layout {
 // CHECK: %[[ROW_REGP:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
 // CHECK: %[[RP_MID:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
 // CHECK: %[[OB_MID:.*]] = lego.order_by(%[[RP_MID]])
-// Final reshuffle: d=2, q=3 → σ⁻¹=[0, 3, 1, 4, 2, 5]
-// CHECK: %[[RPF:.*]] = lego.reg_p perm [0, 3, 1, 4, 2, 5] dims[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}]
+// Tile reshuffle: d=2, q=3 → σ=[0, 2, 4, 1, 3, 5]
+// CHECK: %[[RPF:.*]] = lego.reg_p perm [0, 2, 4, 1, 3, 5] dims[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}]
 // CHECK: %[[OBF:.*]] = lego.order_by(%[[RPF]])
 // CHECK: lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[ROW_REGP]], %[[OB_MID]], %[[OBF]])
 
