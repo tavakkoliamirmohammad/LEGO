@@ -26,19 +26,21 @@ func.func @test_tile_by_row() -> !lego.layout {
   // TileBy(Row(12, 12), [[4, 4], [3, 3]])
   %c12 = arith.constant 12 : index
   %0 = lego.row [%c12, %c12] : !lego.layout
+  %ob = lego.order_by(%0) : !lego.layout
   %c4 = arith.constant 4 : index
   %c3 = arith.constant 3 : index
-  %1 = lego.tile_by %0 tile_dims [[%c4, %c4], [%c3, %c3]] : !lego.layout
+  %1 = lego.tile_by %ob tile_dims [[%c4, %c4], [%c3, %c3]] : !lego.layout
   return %1 : !lego.layout
 }
 
 // CHECK: %[[ROW_REGP:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
+// CHECK: %[[OB_ORIG:.*]] = lego.order_by(%[[ROW_REGP]])
 // CHECK: %[[REGP1:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
 // CHECK: %[[OB1:.*]] = lego.order_by(%[[REGP1]])
 // Tile reshuffle: d=2, q=2 → σ=[0, 2, 1, 3]
 // CHECK: %[[REGP2:.*]] = lego.reg_p perm [0, 2, 1, 3] dims[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}]
 // CHECK: %[[OB2:.*]] = lego.order_by(%[[REGP2]])
-// CHECK: %[[RES:.*]] = lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[ROW_REGP]], %[[OB1]], %[[OB2]])
+// CHECK: %[[RES:.*]] = lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[OB_ORIG]], %[[OB1]], %[[OB2]])
 // CHECK: return %[[RES]]
 
 // CHECK-LABEL: func @test_tile_by_chain
@@ -72,21 +74,23 @@ func.func @test_tile_by_d2_q3() -> !lego.layout {
   // d=2, q=3 → σ=[0,2,4,1,3,5], σ⁻¹=[0,3,1,4,2,5]
   %c6 = arith.constant 6 : index
   %0 = lego.row [%c6, %c6] : !lego.layout
+  %ob = lego.order_by(%0) : !lego.layout
   %c2 = arith.constant 2 : index
   %c3 = arith.constant 3 : index
   %c1 = arith.constant 1 : index
-  %1 = lego.tile_by %0 tile_dims [[%c2, %c2], [%c3, %c3], [%c1, %c1]] : !lego.layout
+  %1 = lego.tile_by %ob tile_dims [[%c2, %c2], [%c3, %c3], [%c1, %c1]] : !lego.layout
   return %1 : !lego.layout
 }
 
-// Middle reshuffle for Row(6,6): d=2, q=1 → σ=[0,1] (identity)
 // CHECK: %[[ROW_REGP:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
+// CHECK: %[[OB_ORIG:.*]] = lego.order_by(%[[ROW_REGP]])
+// Middle reshuffle for Row(6,6): d=2, q=1 → σ=[0,1] (identity)
 // CHECK: %[[RP_MID:.*]] = lego.reg_p perm [0, 1] dims[%{{.*}}, %{{.*}}]
 // CHECK: %[[OB_MID:.*]] = lego.order_by(%[[RP_MID]])
 // Tile reshuffle: d=2, q=3 → σ=[0, 2, 4, 1, 3, 5]
 // CHECK: %[[RPF:.*]] = lego.reg_p perm [0, 2, 4, 1, 3, 5] dims[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}]
 // CHECK: %[[OBF:.*]] = lego.order_by(%[[RPF]])
-// CHECK: lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[ROW_REGP]], %[[OB_MID]], %[[OBF]])
+// CHECK: lego.group_by[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] (%[[OB_ORIG]], %[[OB_MID]], %[[OBF]])
 
 // CHECK-LABEL: func.func @test_assume_bounds
 // CHECK-SAME: (%[[VAL:arg[0-9]+]]: index, %[[LB:arg[0-9]+]]: index, %[[UB:arg[0-9]+]]: index)
