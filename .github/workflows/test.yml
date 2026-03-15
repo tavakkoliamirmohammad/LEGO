@@ -1,0 +1,51 @@
+name: Test
+
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  test:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+        python: ["3.12", "3.13"]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+
+      - name: Install Python dependencies
+        run: pip install nanobind sympy pytest lit
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ matrix.os }}-py${{ matrix.python }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract build artifacts
+        run: tar xf build-artifacts.tar
+
+      # Run MLIR lit regression tests (check-lego)
+      - name: Run lit tests (check-lego)
+        run: |
+          lit build/test -v --path build/tools/lego-opt --path build/llvm-build/bin
+
+      # Run Python tests (check-lego-python)
+      - name: Run Python tests (check-lego-python)
+        run: |
+          PYTHONPATH=build/python_packages/lego:python \
+            python -m pytest python/tests -v

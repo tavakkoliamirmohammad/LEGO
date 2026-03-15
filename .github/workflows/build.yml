@@ -1,0 +1,147 @@
+name: Build
+
+on:
+  push:
+    branches: [test_pip_package]
+  workflow_dispatch:
+
+jobs:
+  # ── Stage 1: Build LLVM/MLIR once per OS (Python-independent) ──
+  build-llvm:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build lld ccache
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja ccache
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: llvm-${{ matrix.os }}
+          max-size: 2G
+
+      - name: Get LLVM submodule commit
+        id: llvm-rev
+        run: |
+          echo "sha=$(git submodule status third_party/llvm-project | awk '{print $1}' | tr -d '-+')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache LLVM install
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: llvm-install
+          key: llvm-install-${{ matrix.os }}-${{ steps.llvm-rev.outputs.sha }}
+
+      - name: Build and install LLVM/MLIR
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -G Ninja -B llvm-build \
+            -S third_party/llvm-project/llvm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/llvm-install \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLLVM_ENABLE_PROJECTS=mlir \
+            -DLLVM_TARGETS_TO_BUILD="${{ contains(matrix.os, 'macos') && 'AArch64' || 'X86;NVPTX' }}" \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF \
+            -DMLIR_ENABLE_BINDINGS_PYTHON=OFF \
+            -DLLVM_ENABLE_Z3_SOLVER=OFF \
+            ${{ runner.os == 'Linux' && '-DLLVM_USE_LINKER=lld' || '' }}
+          cmake --build llvm-build -j$(nproc)
+          cmake --install llvm-build
+
+      - name: Upload LLVM install
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-install-${{ matrix.os }}
+          path: llvm-install
+          retention-days: 1
+
+  # ── Stage 2: Build LEGO per OS×Python (uses pre-built LLVM) ──
+  build-lego:
+    needs: build-llvm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+        python: ["3.12", "3.13"]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false      # don't need llvm-project anymore
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install Python dependencies
+        run: pip install nanobind sympy pytest
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build lld
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Download LLVM install
+        uses: actions/download-artifact@v4
+        with:
+          name: llvm-install-${{ matrix.os }}
+          path: llvm-install
+
+      - name: Get nanobind cmake dir
+        id: nanobind
+        run: |
+          echo "dir=$(python -c 'import nanobind; print(nanobind.cmake_dir())')" >> "$GITHUB_OUTPUT"
+
+      - name: Configure CMake
+        run: |
+          cmake -G Ninja -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLEGO_MONOLITHIC_LLVM=OFF \
+            -DMLIR_DIR=${{ github.workspace }}/llvm-install/lib/cmake/mlir \
+            -DLLVM_DIR=${{ github.workspace }}/llvm-install/lib/cmake/llvm \
+            -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+            -DLEGO_BUILD_TESTS=ON \
+            ${{ runner.os == 'Linux' && '-DLLVM_USE_LINKER=lld' || '' }} \
+            -Dnanobind_DIR="${{ steps.nanobind.outputs.dir }}"
+
+      - name: Build all targets
+        run: cmake --build build -j$(nproc)
+
+      - name: Tar build artifacts
+        run: tar cf build-artifacts.tar build/python_packages build/tools build/test build/include
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.os }}-py${{ matrix.python }}
+          path: build-artifacts.tar
+          retention-days: 1
