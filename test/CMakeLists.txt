@@ -7,6 +7,12 @@ set(LEGO_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(LEGO_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/..)
 set(LEGO_TOOLS_DIR ${CMAKE_BINARY_DIR}/tools/lego-opt)
 
+# In a monolithic build LLVM_TOOLS_DIR may not be set; point it at the
+# llvm-build binary directory so that lit can find FileCheck, count, not.
+if(NOT LLVM_TOOLS_DIR)
+  set(LLVM_TOOLS_DIR "${CMAKE_BINARY_DIR}/llvm-build/bin")
+endif()
+
 configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in
   ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py
