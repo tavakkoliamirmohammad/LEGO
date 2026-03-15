@@ -178,8 +178,23 @@ jobs:
         run: |
           pip install sympy
           pip install build/python_packages/lego/dist/*.whl
-          python -c "from mlir.ir import Context; print('mlir.ir OK')"
-          python -c "from mlir.lego.dialects.lego_dialect import register; print('lego dialect OK')"
+          python -c "
+          from mlir.ir import Context, Module, Location
+          from mlir.lego.dialects.lego_dialect import register
+          with Context() as ctx:
+              register(ctx)
+              loc = Location.unknown(ctx)
+              m = Module.create(loc)
+              print('Context + dialect registration OK')
+          "
+          python -c "
+          from mlir.dialects import arith, func, scf, memref
+          print('Standard dialects OK')
+          "
+          python -c "
+          from mlir.passmanager import PassManager
+          print('PassManager OK')
+          "
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
