@@ -23,6 +23,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install Python dependencies
+        run: pip install nanobind
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -49,7 +52,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: llvm-install
-          key: llvm-install-${{ matrix.os }}-${{ steps.llvm-rev.outputs.sha }}
+          key: llvm-install-v2-${{ matrix.os }}-${{ steps.llvm-rev.outputs.sha }}
+
+      - name: Get nanobind cmake dir
+        id: nanobind
+        run: |
+          echo "dir=$(python -c 'import nanobind; print(nanobind.cmake_dir())')" >> "$GITHUB_OUTPUT"
 
       - name: Build and install LLVM/MLIR
         if: steps.llvm-cache.outputs.cache-hit != 'true'
@@ -65,10 +73,11 @@ jobs:
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_ENABLE_BINDINGS=OFF \
-            -DMLIR_ENABLE_BINDINGS_PYTHON=OFF \
+            -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DLLVM_ENABLE_Z3_SOLVER=OFF \
+            -Dnanobind_DIR="${{ steps.nanobind.outputs.dir }}" \
             ${{ runner.os == 'Linux' && '-DLLVM_USE_LINKER=lld' || '' }}
-          cmake --build llvm-build -j$(nproc)
+          cmake --build llvm-build -j$(getconf _NPROCESSORS_ONLN)
           cmake --install llvm-build
 
       - name: Upload LLVM install
@@ -137,10 +146,18 @@ jobs:
             -Dnanobind_DIR="${{ steps.nanobind.outputs.dir }}"
 
       - name: Build all targets
-        run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
+        run: |
+          cmake --build build -j$(getconf _NPROCESSORS_ONLN)
+          echo "--- Build directory structure ---"
+          find build -maxdepth 4 -type d | sort
 
       - name: Tar build artifacts
-        run: tar cf build-artifacts.tar build/python_packages build/tools build/test build/include
+        run: |
+          dirs=""
+          for d in build/python_packages build/tools build/test build/include; do
+            [ -d "$d" ] && dirs="$dirs $d"
+          done
+          tar cf build-artifacts.tar $dirs
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
