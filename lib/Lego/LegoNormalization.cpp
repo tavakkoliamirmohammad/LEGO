@@ -148,7 +148,7 @@ struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
         auto sigma_o_inv = inversePermutation(sigma_o);
         auto reshuffleDims = sigmaValues(ValueRange(objDims), sigma_o);
 
-        // Create RegP over ALL the OrderBy's dims
+        // Create RegP(σ(o_dims), σ⁻¹)
         auto regPOp = RegPOp::create(
             rewriter, loc, op.getType(), rewriter.getI64ArrayAttr(sigma_o_inv),
             reshuffleDims);

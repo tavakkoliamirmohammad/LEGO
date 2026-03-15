@@ -301,10 +301,9 @@ class TestPyTorchIntegration:
         layout = LegoLayout(order_by(col(4, 8)).tile_by((4, 8)))
         result = layout.create_tensor(np.float32)
 
-        # layout = LegoLayout(order_by(row(2,2), col(2,4)).tile_by((4, 8)))
+        # layout = LegoLayout(order_by(row(2,3), col(4,5)).tile_by((8, 15)))
         # result = layout.create_tensor(np.float32)
-
-        print(result)
+        # print(result)
 
 
         # Col-major: result[i,j] = flat[j * nrows + i]
