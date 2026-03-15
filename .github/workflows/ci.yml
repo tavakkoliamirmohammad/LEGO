@@ -25,7 +25,13 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Install Python dependencies
-        run: pip install nanobind sympy pytest lit numpy torch
+        run: |
+          pip install nanobind sympy pytest lit numpy
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            pip install torch --index-url https://download.pytorch.org/whl/cpu
+          else
+            pip install torch
+          fi
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
