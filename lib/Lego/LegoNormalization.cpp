@@ -128,20 +128,6 @@ struct TileByIdentityRewrite : public OpRewritePattern<TileByOp> {
 // ============================================================================
 // TileBy General Rewrite Pattern
 // ============================================================================
-//
-// TileOrderBy_{q×d}(P¹_d,...,Pᵈ_q) ≡
-//   GroupBy(P¹_d,...,Pᵈ_q).
-//     (P¹_d,...,Pᵈ_q)
-//     OrderBy(RegP(P¹_d.dims,..,Pᵈ_q.dims, σ_{d×q}))
-//
-// For each chain element O (an OrderBy with blocks of dim d and q levels):
-//   - Push O itself
-//   - Push OrderBy(RegP(σ(O.dims), σ⁻¹_O)) as inter-block reshuffle
-// Then push the tile reshuffle: OrderBy(RegP(tileDims, σ_{d×q}))
-//
-// The tile reshuffle uses tileDims (not σ(tileDims)) so that
-// GroupBy.apply's unflatten dims match the groupDims, enabling
-// all div/rem to simplify via pattern A2.
 
 struct TileByOpRewrite : public OpRewritePattern<TileByOp> {
   using OpRewritePattern<TileByOp>::OpRewritePattern;
