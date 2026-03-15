@@ -2,10 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -146,32 +143,26 @@ jobs:
       - name: Extract build artifacts
         run: tar xzf build-artifacts.tar.gz
 
-      - name: Prepare wheel package
-        run: |
-          cd build/python_packages/lego
-          cat > pyproject.toml << 'EOF'
-          [build-system]
-          requires = ["setuptools>=61.0"]
-          build-backend = "setuptools.build_meta"
-
-          [project]
-          name = "lego-mlir"
-          version = "0.1.0"
-          description = "LEGO: Layout Expression Language for Code Generation"
-          requires-python = ">=3.12"
-
-          [tool.setuptools.packages.find]
-          include = ["mlir*"]
-
-          [tool.setuptools.package-data]
-          "*" = ["*.so", "*.so.*", "*.dylib", "*.pyd", "*.h"]
-          EOF
-
       - name: Build wheel
         run: |
-          pip install build setuptools
+          pip install wheel setuptools
           cd build/python_packages/lego
-          python -m build --wheel --no-isolation
+
+          cat > setup.py << 'SETUP'
+          from setuptools import setup, find_packages
+          setup(
+              name="lego-layout",
+              version="0.1.0",
+              description="LEGO: Layout Expression Language for Code Generation",
+              python_requires=">=3.12",
+              packages=find_packages(include=["mlir*"]),
+              package_data={"": ["*.so", "*.so.*", "*.dylib", "*.pyd", "*.h"]},
+              has_ext_modules=lambda: True,  # forces platform-specific wheel tag
+          )
+          SETUP
+
+          python setup.py bdist_wheel
+          ls -lh dist/
 
       - name: Verify wheel installs
         run: |
