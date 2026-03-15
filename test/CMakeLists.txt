@@ -32,16 +32,7 @@ if(NOT LLVM_EXTERNAL_LIT)
   endif()
 endif()
 
-set(LEGO_TEST_DEPENDS lego-opt)
-if(TARGET FileCheck)
-  list(APPEND LEGO_TEST_DEPENDS FileCheck)
-endif()
-if(TARGET count)
-  list(APPEND LEGO_TEST_DEPENDS count)
-endif()
-if(TARGET not)
-  list(APPEND LEGO_TEST_DEPENDS not)
-endif()
+set(LEGO_TEST_DEPENDS lego-opt FileCheck count not)
 
 # Add Python binding target as a dependency when available
 if(TARGET LegoPythonModules)
