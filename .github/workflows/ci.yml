@@ -149,15 +149,28 @@ jobs:
           cd build/python_packages/lego
 
           cat > setup.py << 'SETUP'
-          from setuptools import setup, find_packages
+          import os
+          from setuptools import setup, find_namespace_packages
+
+          # Find all packages including implicit namespace packages (no __init__.py)
+          packages = find_namespace_packages(include=["mlir", "mlir.*"])
+
+          # Also collect all data files (headers, .so, etc.) under mlir/
+          package_data = {}
+          for root, dirs, files in os.walk("mlir"):
+              pkg = root.replace(os.sep, ".")
+              data = [f for f in files if not f.endswith((".py", ".pyc"))]
+              if data:
+                  package_data[pkg] = data
+
           setup(
               name="lego-layout",
               version="0.1.0",
               description="LEGO: Layout Expression Language for Code Generation",
               python_requires=">=3.12",
-              packages=find_packages(include=["mlir*"]),
-              package_data={"": ["*.so", "*.so.*", "*.dylib", "*.pyd", "*.h"]},
-              has_ext_modules=lambda: True,  # forces platform-specific wheel tag
+              packages=packages,
+              package_data=package_data,
+              has_ext_modules=lambda: True,
           )
           SETUP
 
