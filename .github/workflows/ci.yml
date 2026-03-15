@@ -10,7 +10,17 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ── Stage 1: Build ──
+  # ── Cleanup old artifacts ──
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: c-hive/gha-remove-artifacts@v1
+        with:
+          age: '1 day'
+
+  # ── Stage 1: Build & Test ──
   build:
     strategy:
       fail-fast: false
@@ -23,6 +33,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 1              # shallow clone — saves ~minutes
 
       - uses: actions/setup-python@v5
         with:
@@ -82,9 +93,10 @@ jobs:
       - name: Run Python tests (check-lego-python)
         run: cmake --build build --target check-lego-python
 
-      - name: Resolve symlinks in python package
+      - name: Resolve symlinks and strip binaries
         run: |
           cd build/python_packages/lego
+          # Resolve symlinks
           find . -type l | while read link; do
             target=$(python -c "import os; print(os.path.realpath('$link'))")
             if [ -e "$target" ]; then
@@ -94,15 +106,21 @@ jobs:
               rm "$link"
             fi
           done
+          # Strip debug symbols from .so/.dylib — shrinks wheel significantly
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            find . -name '*.so' -o -name '*.so.*' | xargs strip --strip-unneeded 2>/dev/null || true
+          else
+            find . -name '*.dylib' -o -name '*.so' | xargs strip -x 2>/dev/null || true
+          fi
 
       - name: Tar build artifacts
-        run: tar cf build-artifacts.tar build/python_packages build/tools build/include
+        run: tar czf build-artifacts.tar.gz build/python_packages
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.os }}-py${{ matrix.python }}
-          path: build-artifacts.tar
+          path: build-artifacts.tar.gz
           retention-days: 1
 
   # ── Stage 2: Package wheels (runs after build) ──
@@ -116,8 +134,6 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -129,7 +145,7 @@ jobs:
           name: build-${{ matrix.os }}-py${{ matrix.python }}
 
       - name: Extract build artifacts
-        run: tar xf build-artifacts.tar
+        run: tar xzf build-artifacts.tar.gz
 
       - name: Prepare wheel package
         run: |
