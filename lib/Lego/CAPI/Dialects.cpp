@@ -12,6 +12,7 @@
 #include "mlir/CAPI/IR.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "mlir/Transforms/Passes.h"
 
 // LEGO dialect
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Lego, lego, mlir::lego::LegoDialect)
@@ -35,6 +36,10 @@ void legoRegisterPasses() {
   if (registered)
     return;
   registered = true;
+
+  // Standard MLIR passes
+  mlir::registerCanonicalizerPass();
+  mlir::registerCSEPass();
 
   // Individual LEGO passes (from GEN_PASS_REGISTRATION in Passes.h.inc)
   mlir::lego::registerLegoToArithPass();

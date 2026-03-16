@@ -410,6 +410,51 @@ module {
 class TestSymbolicShapes:
     """Test layouts with symbolic dimensions (e.g. TileBy with M//BM)."""
 
+    def test_lud_benchmark_with_constraints(self):
+        """Exact reproduction of paper/benchmarks/cuda/lud.py.
+
+        l = OrderBy(Row(R*T, R*T)).GroupBy([(R, R, T, T)], constraints)
+        expr = (ii*R + jj)*T*T + tid
+        constraints = [ii < R, jj < R, tid < T*T, 0 < tid]
+        l.inv(expr) should give [ii, jj, floor(tid/T), Mod(tid, T)]
+        """
+        from lego.lego import le_constraint
+
+        R, T, ii, jj, tid = syms("R T ii jj tid")
+        expr = (ii * R + jj) * T * T + tid
+        constraints = [
+            le_constraint(ii, R),       # ii < R
+            le_constraint(jj, R),       # jj < R
+            le_constraint(tid, T * T),  # tid < T*T
+            le_constraint(0, tid),      # 0 < tid  (tid > 0)
+        ]
+
+        L = OrderBy(Row(R * T, R * T)).GroupBy([(R, R, T, T)], constraints)
+        i_out, j_out, tidy_out, tidx_out = L.inv(expr)
+
+        # Verify numerically for R=4, T=4
+        R_val, T_val = 4, 4
+        for ii_v in range(R_val):
+            for jj_v in range(R_val):
+                for tid_v in range(T_val * T_val):
+                    subs = {R: R_val, T: T_val, ii: ii_v, jj: jj_v, tid: tid_v}
+                    assert int(i_out.subs(subs)) == ii_v, (
+                        f"i mismatch at ii={ii_v} jj={jj_v} tid={tid_v}: "
+                        f"got {int(i_out.subs(subs))}"
+                    )
+                    assert int(j_out.subs(subs)) == jj_v, (
+                        f"j mismatch at ii={ii_v} jj={jj_v} tid={tid_v}: "
+                        f"got {int(j_out.subs(subs))}"
+                    )
+                    assert int(tidy_out.subs(subs)) == tid_v // T_val, (
+                        f"tidy mismatch at ii={ii_v} jj={jj_v} tid={tid_v}: "
+                        f"got {int(tidy_out.subs(subs))}"
+                    )
+                    assert int(tidx_out.subs(subs)) == tid_v % T_val, (
+                        f"tidx mismatch at ii={ii_v} jj={jj_v} tid={tid_v}: "
+                        f"got {int(tidx_out.subs(subs))}"
+                    )
+
     def test_lud_symbolic_apply(self):
         """lud with symbolic R, T dims."""
         R, T = syms("R T")

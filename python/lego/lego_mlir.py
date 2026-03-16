@@ -1,5 +1,6 @@
 from .lego import *
 import functools
+import os
 
 from mlir.dialects import arith, scf, func, memref
 try:
@@ -651,8 +652,13 @@ def _collect_free_symbols(layout):
     return syms
 
 
+_LEGO_DEBUG = os.environ.get("LEGO_DEBUG", "")
+
+
 def simplify_via_mlir(layout, mode, args, constraints=None):
     """Compute layout.apply or layout.inv via MLIR roundtrip.
+
+    Set LEGO_DEBUG=1 to print MLIR IR before and after lowering.
 
     Args:
         layout: GroupBy or other LayoutBlock
@@ -757,8 +763,28 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
                 func_dialect.ReturnOp(list(inv_op.results))
 
         # Run lego-lower pipeline
+        if _LEGO_DEBUG:
+            print("=== MLIR input (LEGO dialect) ===")
+            print(module)
+            print()
+
+            # Show intermediate: after canonicalize + CSE only (no LEGO passes)
+            module_copy = Module.parse(str(module))
+            pm_pre = PassManager.parse(
+                "builtin.module(canonicalize,cse)"
+            )
+            pm_pre.run(module_copy.operation)
+            print("=== MLIR after canonicalize + CSE ===")
+            print(module_copy)
+            print()
+
         pm = PassManager.parse("builtin.module(lego-lower)")
         pm.run(module.operation)
+
+        if _LEGO_DEBUG:
+            print("=== MLIR after lego-lower (fully simplified) ===")
+            print(module)
+            print()
 
         # Extract the function after lowering (passes may rebuild ops)
         func_op = None
