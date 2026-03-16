@@ -4,7 +4,7 @@ from sympy import Symbol, symbols, Piecewise, Function
 from typing import List, Tuple, Callable
 import sympy as sp
 from functools import reduce
-from .simplifier import simplify_ops
+# simplifier.py (z3) no longer needed — using MLIR roundtrip
 
 
 class TritonRange(Function):
@@ -209,6 +209,7 @@ class RegP(LayoutBlock):
                    index tuple and returns the permuted multi-dimensional index tuple.
         """
         self._dims = nd
+        self._perm_vector = list(perm)
         self.perm = lambda idx: sigma(idx, perm)
         self.perm_inv = lambda idx: sigma(idx, inverse_permutation(perm))
 
@@ -362,6 +363,17 @@ class OrderBy(LayoutBlock):
         return self._cached_dims
 
 
+def _merge_bound(constraints, sym, lb=None, ub=None):
+    """Merge a new bound into the constraints dict for sym."""
+    if sym not in constraints:
+        constraints[sym] = (lb, ub)
+    else:
+        old_lb, old_ub = constraints[sym]
+        new_lb = lb if old_lb is None else (lb if lb is not None else old_lb)
+        new_ub = ub if old_ub is None else (ub if ub is not None else old_ub)
+        constraints[sym] = (new_lb, new_ub)
+
+
 class GroupBy(LayoutBlock):
     """
     GroupBy Block.
@@ -409,36 +421,94 @@ class GroupBy(LayoutBlock):
         Input: A flat index.
         Output: The original multi-dimensional index.
         """
-        current_flat_index = flat_idx
-        add_bound = self._get_input_constraints() + self.user_constraints
-        # Iterate through objects in forward order
-        for obj in self.objects:
-            obj_dims = obj.dims()  # n'd_1, ..., n'd_qo
-            if not obj_dims:
-                continue
-            idx_from_obj = obj.inv(current_flat_index)
-            current_flat_index = flatten_index(idx_from_obj, obj_dims)
-        original_idx = unflatten_index(current_flat_index, self._dims)
-        self.constraints = {}
-        self.constraints[flat_idx] = (0, product(self._dims))
-        inverse_indices = sp.sympify(original_idx)
-        result = []
-        for index in inverse_indices:
-            expr_no_expand = simplify_ops(
-                index, self.constraints, add_bound)
-            expr_with_expand = simplify_ops(
-                sp.expand(index), self.constraints, add_bound)
-            result += [min([expr_no_expand, expr_with_expand],
-                           key=lambda x: sp.count_ops(x, visual=False))]
-        return result
+        from .lego_mlir import simplify_via_mlir
+
+        index_constraints = {flat_idx: (0, product(self._dims))}
+        constraints = self._build_constraints(index_constraints)
+        return simplify_via_mlir(self, 'inv', flat_idx, constraints)
 
     def dims(self) -> Tuple[Symbol, ...]:
         """Returns the combined dimensions of the GroupBy block."""
         return self._dims
 
+    def _get_all_dim_symbols(self):
+        """Collect all SymPy symbols used in layout dimensions."""
+        syms = set()
+        for d in self._dims:
+            if isinstance(d, sp.Expr):
+                syms |= d.free_symbols
+        for obj in self.objects:
+            for d in obj.dims():
+                if isinstance(d, sp.Expr):
+                    syms |= d.free_symbols
+        return syms
+
     def _get_input_constraints(self):
         return list(map(lambda x: sp.Gt(x, 0, evaluate=False), set().union(
             *(e.free_symbols for t in [self.dims()] + [x.dims() for x in self.objects] for e in t if isinstance(e, sp.Expr)))))
+
+    def _build_constraints(self, index_constraints=None):
+        """Build a unified constraint dict for MLIR assume_bounds.
+
+        Merges:
+        1. index_constraints: {sym: (lb, ub)} from __getitem__/inv
+        2. dim_symbols: all layout dimension symbols get lb=1
+        3. user_constraints: SymPy relationals from TileBy/GroupBy
+        4. _get_input_constraints: auto-inferred "dim > 0" constraints
+
+        Returns:
+            dict {sp.Symbol: (lb, ub)} where lb/ub can be int, sp.Expr, or None
+        """
+        constraints = dict(index_constraints or {})
+
+        # Ensure all dimension symbols have lb >= 1
+        dim_syms = self._get_all_dim_symbols()
+        for sym in dim_syms:
+            if sym not in constraints:
+                constraints[sym] = (1, None)
+
+        # Parse user_constraints (SymPy relationals) into constraint dict
+        for c in self.user_constraints:
+            self._parse_relational(c, constraints)
+
+        # Parse auto-inferred constraints
+        for c in self._get_input_constraints():
+            self._parse_relational(c, constraints)
+
+        return constraints
+
+    @staticmethod
+    def _parse_relational(rel, constraints):
+        """Parse a SymPy relational into the constraints dict.
+
+        Updates constraints in-place. Handles:
+        - sp.Gt(x, v)  → x: lb = v+1
+        - sp.Ge(x, v)  → x: lb = v
+        - sp.Lt(x, v)  → x: ub = v
+        - sp.Le(x, v)  → x: ub = v+1
+        - sp.Eq(x%d, 0) → (divisibility, stored for reference)
+        """
+        if not isinstance(rel, sp.core.relational.Relational):
+            return
+
+        lhs, rhs = rel.args
+
+        if isinstance(rel, sp.StrictGreaterThan):  # lhs > rhs → lhs >= rhs+1
+            if isinstance(lhs, sp.Symbol):
+                lb = rhs + 1 if not isinstance(rhs, (int, sp.Integer)) else int(rhs) + 1
+                _merge_bound(constraints, lhs, lb=lb)
+        elif isinstance(rel, sp.GreaterThan):  # lhs >= rhs
+            if isinstance(lhs, sp.Symbol):
+                lb = rhs if not isinstance(rhs, (int, sp.Integer)) else int(rhs)
+                _merge_bound(constraints, lhs, lb=lb)
+        elif isinstance(rel, sp.StrictLessThan):  # lhs < rhs
+            if isinstance(lhs, sp.Symbol):
+                _merge_bound(constraints, lhs, ub=rhs)
+        elif isinstance(rel, sp.LessThan):  # lhs <= rhs
+            if isinstance(lhs, sp.Symbol):
+                ub = rhs + 1 if not isinstance(rhs, (int, sp.Integer)) else int(rhs) + 1
+                _merge_bound(constraints, lhs, ub=ub)
+
 
     def transform(self, tensor):
         """Apply layout transform to a PyTorch tensor or NumPy array.
@@ -465,7 +535,6 @@ class GroupBy(LayoutBlock):
         result = []
         self.constraints = {}
         logical_range = self.dims()
-        add_bound = self._get_input_constraints() + self.user_constraints
         tr_to_dummy = {}
         dummy_to_tr = {}
         i = 0
@@ -504,12 +573,12 @@ class GroupBy(LayoutBlock):
             else:
                 result.append(item)
                 self.constraints[item] = (0, logical_range[idx])
-        flat_index = self.apply(*result)
-        expr_no_expand = simplify_ops(
-            flat_index, self.constraints, add_bound).xreplace(dummy_to_tr)
-        expr_with_expand = simplify_ops(
-            sp.expand(flat_index), self.constraints).xreplace(dummy_to_tr)
-        return min([expr_no_expand, expr_with_expand], key=lambda x: sp.count_ops(x, visual=False))
+        from .lego_mlir import simplify_via_mlir
+
+        constraints = self._build_constraints(self.constraints)
+        simplified = simplify_via_mlir(self, 'apply', list(result),
+                                       constraints)
+        return simplified.xreplace(dummy_to_tr)
 
 
 def antidiag(n, args: Tuple[Symbol, ...]):

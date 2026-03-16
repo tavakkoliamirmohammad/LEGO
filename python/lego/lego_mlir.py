@@ -1,7 +1,12 @@
 from .lego import *
 import functools
 
-from mlir.dialects import arith, scf, func, affine, gpu, memref
+from mlir.dialects import arith, scf, func, memref
+try:
+    from mlir.dialects import affine, gpu
+except ImportError:
+    affine = None
+    gpu = None
 from mlir.ir import (
     Context,
     Location,
@@ -391,3 +396,400 @@ class MLIRTensor:
 
 
 printer = SympyMLIRPrinter()
+
+
+# ============================================================================
+# MLIR Roundtrip: replace simplify_ops (SymPy+z3) with MLIR pipeline
+# ============================================================================
+
+from mlir.ir import IndexType, FunctionType, StringAttr, UnitAttr
+from mlir.passmanager import PassManager
+from mlir.dialects import func as func_dialect
+from lego.dialects.lego_dialect import (
+    register as register_lego,
+    RegPOp, RowOp, ColOp, OrderByOp, GroupByOp, ApplyOp,
+    ApplyInverseOp, TileByOp, GenPOp, YieldOp,
+)
+from lego.dialects._lego_ops_gen import assume_bounds as _assume_bounds
+
+
+def _index_const(val):
+    """Emit arith.constant with index type."""
+    idx_ty = IndexType.get()
+    return arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(val))).result
+
+
+def _layout_type():
+    """Get !lego.layout type from current context."""
+    return ir.Type.parse("!lego.layout")
+
+
+def _resolve_dim(dim, sym_to_val):
+    """Resolve a dimension (int or SymPy expr) to an MLIR Value."""
+    if isinstance(dim, int):
+        return _index_const(dim)
+    if isinstance(dim, sp.Integer):
+        return _index_const(int(dim))
+    if isinstance(dim, sp.Symbol):
+        if dim in sym_to_val:
+            return sym_to_val[dim]
+        raise KeyError(f"Symbol {dim} not in sym_to_val mapping")
+    if isinstance(dim, sp.Expr):
+        # For compound expressions like M/BM, lower them to arith ops
+        return _lower_sympy_to_index(dim, sym_to_val)
+    raise TypeError(f"Cannot resolve dim of type {type(dim)}: {dim}")
+
+
+def _lower_sympy_to_index(expr, sym_to_val):
+    """Lower a SymPy expression to MLIR index-typed arith ops."""
+    if isinstance(expr, sp.Integer) or isinstance(expr, int):
+        return _index_const(int(expr))
+    if isinstance(expr, sp.Symbol):
+        if expr in sym_to_val:
+            return sym_to_val[expr]
+        raise KeyError(f"Symbol {expr} not found")
+
+    if isinstance(expr, sp.Add):
+        vals = [_lower_sympy_to_index(a, sym_to_val) for a in expr.args]
+        acc = vals[0]
+        for v in vals[1:]:
+            acc = arith.addi(acc, v)
+        return acc
+
+    if isinstance(expr, sp.Mul):
+        # Separate integer coefficient from rest
+        coeff, rest = expr.as_coeff_Mul()
+        if rest == sp.S.One:
+            return _index_const(int(coeff))
+        vals = []
+        for a in expr.args:
+            vals.append(_lower_sympy_to_index(a, sym_to_val))
+        acc = vals[0]
+        for v in vals[1:]:
+            acc = arith.muli(acc, v)
+        return acc
+
+    if isinstance(expr, sp.floor):
+        inner = expr.args[0]
+        num, den = inner.as_numer_denom()
+        a = _lower_sympy_to_index(num, sym_to_val)
+        b = _lower_sympy_to_index(den, sym_to_val)
+        return arith.divui(a, b)
+
+    if isinstance(expr, sp.Mod):
+        a = _lower_sympy_to_index(expr.args[0], sym_to_val)
+        b = _lower_sympy_to_index(expr.args[1], sym_to_val)
+        return arith.remui(a, b)
+
+    if isinstance(expr, sp.Pow):
+        base, exp = expr.args
+        if exp == sp.S.NegativeOne:
+            # x^-1 shouldn't appear at index level; skip
+            raise NotImplementedError(f"Negative power in index expr: {expr}")
+        if exp.is_Integer and int(exp) >= 0:
+            b = _lower_sympy_to_index(base, sym_to_val)
+            result = _index_const(1)
+            for _ in range(int(exp)):
+                result = arith.muli(result, b)
+            return result
+
+    raise NotImplementedError(f"Cannot lower SymPy expr to index: {expr}")
+
+
+def emit_layout_from_python(layout, sym_to_val):
+    """Convert a Python layout object to MLIR LEGO dialect ops.
+
+    Args:
+        layout: Python LayoutBlock (RegP, OrderBy, GroupBy, GenP)
+        sym_to_val: dict {sp.Symbol | int -> MLIR Value}
+    Returns:
+        MLIR Value of !lego.layout type
+    """
+    lt = _layout_type()
+
+    if isinstance(layout, RegP):
+        perm_vec = layout._perm_vector
+        dim_vals = [_resolve_dim(d, sym_to_val) for d in layout._dims]
+        return RegPOp(result=lt, perm=perm_vec, dims=dim_vals).result
+
+    if isinstance(layout, OrderBy):
+        perm_vals = []
+        for p in layout.perms:
+            perm_vals.append(emit_layout_from_python(p, sym_to_val))
+        return OrderByOp(result=lt, perms=perm_vals).result
+
+    if isinstance(layout, GroupBy):
+        dim_vals = [_resolve_dim(d, sym_to_val) for d in layout._dims]
+        obj_vals = []
+        for obj in layout.objects:
+            obj_vals.append(emit_layout_from_python(obj, sym_to_val))
+        return GroupByOp(result=lt, group_dims=dim_vals, objects=obj_vals).result
+
+    if isinstance(layout, GenP):
+        dim_vals = [_resolve_dim(d, sym_to_val) for d in layout._dims]
+        idx_ty = IndexType.get()
+        gen_p_op = GenPOp(result=lt, dims=dim_vals)
+
+        # Apply region: block args = N indices -> yield single flat index
+        rank = len(layout._dims)
+        apply_block = gen_p_op.body.blocks.append(*([idx_ty] * rank))
+        with InsertionPoint(apply_block):
+            # Create temp SymPy symbols and call the Python f_apply
+            temp_syms = [sp.Symbol(f"_genp_arg_{k}", integer=True) for k in range(rank)]
+            local_map = dict(sym_to_val)
+            for s, arg in zip(temp_syms, apply_block.arguments):
+                local_map[s] = arg
+            sympy_result = layout.f_apply(tuple(temp_syms))
+            mlir_result = _lower_sympy_to_index(sympy_result, local_map)
+            YieldOp(values=[mlir_result])
+
+        # Inverse region: block arg = single flat index -> yield N indices
+        inv_block = gen_p_op.inv_body.blocks.append(idx_ty)
+        with InsertionPoint(inv_block):
+            temp_flat = sp.Symbol("_genp_flat", integer=True)
+            local_map = dict(sym_to_val)
+            local_map[temp_flat] = inv_block.arguments[0]
+            sympy_inv = layout.f_inv(temp_flat)
+            inv_results = [_lower_sympy_to_index(r, local_map) for r in sympy_inv]
+            YieldOp(values=inv_results)
+
+        return gen_p_op.result
+
+    raise TypeError(f"Unsupported layout type: {type(layout).__name__}")
+
+
+def arith_to_sympy(value, val_to_sym, memo=None):
+    """Convert an MLIR Value (arith ops after lowering) back to SymPy.
+
+    Args:
+        value: MLIR Value to convert
+        val_to_sym: dict {MLIR block arg -> sp.Symbol}
+        memo: memoization dict keyed by MLIR Value (uses Value.__hash__)
+    Returns:
+        SymPy expression
+    """
+    if memo is None:
+        memo = {}
+
+    if value in memo:
+        return memo[value]
+
+    # Block argument -> look up in val_to_sym
+    if value in val_to_sym:
+        result = val_to_sym[value]
+        memo[value] = result
+        return result
+
+    # Check if this is a block argument (no defining op)
+    if isinstance(value.owner, ir.Block):
+        raise KeyError(f"Block argument not found in val_to_sym mapping")
+
+    # Must have a defining op
+    op = value.owner
+    op_name = op.name
+
+    if op_name == "arith.constant":
+        attr = op.attributes["value"]
+        val = int(ir.IntegerAttr(attr).value)
+        result = sp.Integer(val)
+        memo[value] = result
+        return result
+
+    if op_name == "arith.addi":
+        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
+        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
+        result = a + b
+        memo[value] = result
+        return result
+
+    if op_name == "arith.muli":
+        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
+        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
+        result = a * b
+        memo[value] = result
+        return result
+
+    if op_name == "arith.subi":
+        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
+        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
+        result = a - b
+        memo[value] = result
+        return result
+
+    if op_name == "arith.divui":
+        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
+        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
+        result = sp.floor(a / b)
+        memo[value] = result
+        return result
+
+    if op_name == "arith.remui":
+        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
+        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
+        result = sp.Mod(a, b)
+        memo[value] = result
+        return result
+
+    raise NotImplementedError(f"Cannot convert op '{op_name}' to SymPy")
+
+
+def _collect_free_symbols(layout):
+    """Collect all SymPy symbols used in a layout's dimensions (recursive)."""
+    syms = set()
+    if hasattr(layout, '_dims'):
+        for d in layout._dims:
+            if isinstance(d, sp.Expr):
+                syms |= d.free_symbols
+            elif isinstance(d, sp.Symbol):
+                syms.add(d)
+    if isinstance(layout, OrderBy):
+        for p in layout.perms:
+            syms |= _collect_free_symbols(p)
+    elif isinstance(layout, GroupBy):
+        for obj in layout.objects:
+            syms |= _collect_free_symbols(obj)
+    return syms
+
+
+def simplify_via_mlir(layout, mode, args, constraints=None):
+    """Compute layout.apply or layout.inv via MLIR roundtrip.
+
+    Args:
+        layout: GroupBy or other LayoutBlock
+        mode: 'apply' | 'inv'
+        args: for 'apply': list of SymPy symbols/exprs (N-D indices)
+              for 'inv': single SymPy symbol/expr (flat index)
+        constraints: dict {sp.Symbol: (lb, ub)} for assume_bounds
+                     lb/ub can be int, sp.Symbol, sp.Expr, or None
+    Returns:
+        'apply': single SymPy expression (flat index)
+        'inv': list of SymPy expressions (N-D indices)
+    """
+    if constraints is None:
+        constraints = {}
+
+    # Collect all unique SymPy symbols
+    all_syms = set()
+    all_syms |= _collect_free_symbols(layout)
+
+    if mode == 'apply':
+        for a in args:
+            if isinstance(a, sp.Expr):
+                all_syms |= a.free_symbols
+            elif isinstance(a, sp.Symbol):
+                all_syms.add(a)
+    else:  # inv
+        if isinstance(args, sp.Expr):
+            all_syms |= args.free_symbols
+        elif isinstance(args, sp.Symbol):
+            all_syms.add(args)
+
+    for sym in constraints:
+        if isinstance(sym, sp.Symbol):
+            all_syms.add(sym)
+        lb, ub = constraints[sym]
+        if isinstance(lb, sp.Expr):
+            all_syms |= lb.free_symbols
+        if isinstance(ub, sp.Expr):
+            all_syms |= ub.free_symbols
+
+    # Order symbols deterministically
+    sym_list = sorted(all_syms, key=lambda s: s.name)
+
+    ctx = Context()
+    register_lego(ctx)
+
+    with ctx, Location.unknown():
+        module = Module.create()
+        idx_ty = IndexType.get()
+
+        # Determine function signature
+        n_args = len(sym_list)
+        if mode == 'apply':
+            rank = len(layout._dims)
+            func_ty = FunctionType.get([idx_ty] * n_args, [idx_ty])
+        else:
+            # inv returns rank indices
+            rank = len(layout._dims)
+            func_ty = FunctionType.get([idx_ty] * n_args, [idx_ty] * rank)
+
+        with InsertionPoint(module.body):
+            f = func_dialect.FuncOp("roundtrip", func_ty)
+            f.sym_visibility = StringAttr.get("public")
+
+        entry = f.add_entry_block()
+
+        # Build sym_to_val and val_to_sym mappings
+        sym_to_val = {}
+        val_to_sym = {}
+        for i, sym in enumerate(sym_list):
+            sym_to_val[sym] = entry.arguments[i]
+            val_to_sym[entry.arguments[i]] = sym
+
+        with InsertionPoint(entry):
+            # Emit assume_bounds
+            for sym, (lb, ub) in constraints.items():
+                if not isinstance(sym, sp.Symbol):
+                    continue
+                if sym not in sym_to_val:
+                    continue
+                val = sym_to_val[sym]
+                lb_val = _resolve_dim(lb, sym_to_val) if lb is not None else None
+                ub_val = _resolve_dim(ub, sym_to_val) if ub is not None else None
+                _assume_bounds(val, lb=lb_val, ub=ub_val)
+
+            # Emit layout
+            layout_val = emit_layout_from_python(layout, sym_to_val)
+
+            # Emit apply or apply_inverse
+            if mode == 'apply':
+                arg_vals = [_resolve_dim(a, sym_to_val) for a in args]
+                result = ApplyOp(flat_index=idx_ty, layout=layout_val,
+                                 indices=arg_vals).result
+                func_dialect.ReturnOp([result])
+            else:
+                flat_val = _resolve_dim(args, sym_to_val)
+                inv_op = ApplyInverseOp(
+                    indices=[idx_ty] * rank,
+                    layout=layout_val,
+                    flat_index=flat_val,
+                )
+                func_dialect.ReturnOp(list(inv_op.results))
+
+        # Run lego-lower pipeline
+        pm = PassManager.parse("builtin.module(lego-lower)")
+        pm.run(module.operation)
+
+        # Extract the function after lowering (passes may rebuild ops)
+        func_op = None
+        for op in module.body:
+            if op.name == "roundtrip" or op.name == "func.func":
+                func_op = op
+                break
+        if func_op is None:
+            # Fallback: grab first op in module body
+            for op in module.body:
+                func_op = op
+                break
+
+        # Rebuild val_to_sym using entry block arguments by index
+        entry_block = func_op.regions[0].blocks[0]
+        val_to_sym_post = {}
+        for i, sym in enumerate(sym_list):
+            val_to_sym_post[entry_block.arguments[i]] = sym
+
+        # Find the return op
+        return_op = None
+        for op in entry_block:
+            if op.name == "func.return":
+                return_op = op
+                break
+
+        # Convert results back to SymPy
+        results_sympy = []
+        for operand in return_op.operands:
+            results_sympy.append(arith_to_sympy(operand, val_to_sym_post))
+
+        if mode == 'apply':
+            return results_sympy[0]
+        return results_sympy
