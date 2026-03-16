@@ -3,8 +3,6 @@ name: CI
 on:
   push:
     tags: ["v*"]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -111,6 +109,9 @@ jobs:
             find . -name '*.dylib' -o -name '*.so' | xargs strip -x 2>/dev/null || true
           fi
 
+      - name: Copy lego Python package into build tree
+        run: cp -r python/lego build/python_packages/lego/lego
+
       - name: Tar build artifacts
         run: tar czf build-artifacts.tar.gz build/python_packages
 
@@ -155,33 +156,38 @@ jobs:
           from setuptools import setup, find_namespace_packages
 
           # Find all packages including implicit namespace packages (no __init__.py)
-          packages = find_namespace_packages(include=["mlir", "mlir.*"])
+          packages = find_namespace_packages(include=["mlir", "mlir.*", "lego", "lego.*"])
 
           # Also collect all data files (headers, .so, etc.) under mlir/
           package_data = {}
-          for root, dirs, files in os.walk("mlir"):
-              pkg = root.replace(os.sep, ".")
-              data = [f for f in files if not f.endswith((".py", ".pyc"))]
-              if data:
-                  package_data[pkg] = data
+          for top in ("mlir", "lego"):
+              for root, dirs, files in os.walk(top):
+                  pkg = root.replace(os.sep, ".")
+                  data = [f for f in files if not f.endswith((".py", ".pyc"))]
+                  if data:
+                      package_data[pkg] = data
 
           setup(
               name="lego-layout",
-              version="0.1.2",
+              version="0.1.3",
               description="LEGO: Layout Expression Language for Code Generation",
               python_requires=">=3.12",
+              install_requires=["sympy", "numpy"],
               packages=packages,
               package_data=package_data,
               has_ext_modules=lambda: True,
           )
           SETUP
 
-          python setup.py bdist_wheel
+          PLAT_NAME=""
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            PLAT_NAME="--plat-name manylinux_2_35_x86_64"
+          fi
+          python setup.py bdist_wheel $PLAT_NAME
           ls -lh dist/
 
       - name: Verify wheel installs
         run: |
-          pip install sympy
           pip install build/python_packages/lego/dist/*.whl
           python -c "
           from mlir.ir import Context, Module, Location
@@ -200,17 +206,13 @@ jobs:
           from mlir.passmanager import PassManager
           print('PassManager OK')
           "
-
-      - name: Retag Linux wheel to manylinux
-        if: runner.os == 'Linux'
-        run: |
-          pip install auditwheel patchelf
-          cd build/python_packages/lego
-          for whl in dist/*.whl; do
-            auditwheel repair "$whl" --plat manylinux_2_35_x86_64 -w dist-fixed/
-          done
-          rm -rf dist
-          mv dist-fixed dist
+          python -c "
+          from lego import jit, get_kernel_source
+          from lego.lego import LayoutBlock
+          from lego.compiler import LayoutCompiler
+          from lego.tensor_api import RowMajor, ColMajor, Tiled
+          print('lego package OK')
+          "
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
