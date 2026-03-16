@@ -177,6 +177,7 @@ jobs:
               version="0.1.2",
               description="LEGO: Layout Expression Language for Code Generation",
               python_requires=">=3.12",
+              install_requires=["sympy", "numpy"],
               packages=packages,
               package_data=package_data,
               has_ext_modules=lambda: True,
@@ -192,7 +193,6 @@ jobs:
 
       - name: Verify wheel installs
         run: |
-          pip install sympy
           pip install build/python_packages/lego/dist/*.whl
           python -c "
           from mlir.ir import Context, Module, Location
