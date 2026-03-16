@@ -58,8 +58,17 @@ Value flattenIndex(OpBuilder &b, Location loc, ValueRange indices,
 
 SmallVector<Value> unflattenIndex(OpBuilder &b, Location loc, Value flatIndex,
                                   ValueRange dims) {
-  SmallVector<Value> indices;
   int rank = dims.size();
+
+  // Pre-compute strides right-to-left so the multiplication tree matches
+  // flattenIndex exactly.  After CSE the stride SSA values are shared,
+  // enabling SimplifyDivId / Extended-SimplifyDivId to fire.
+  SmallVector<Value> strides(rank);
+  strides[rank - 1] = getConstantIndex(b, loc, 1);
+  for (int k = rank - 2; k >= 0; --k)
+    strides[k] = arith::MulIOp::create(b, loc, strides[k + 1], dims[k + 1]);
+
+  SmallVector<Value> indices;
   Value current = flatIndex;
 
   for (int k = 0; k < rank; ++k) {
@@ -72,13 +81,9 @@ SmallVector<Value> unflattenIndex(OpBuilder &b, Location loc, Value flatIndex,
       continue;  // current stays the same
     }
 
-    Value strideVal = getConstantIndex(b, loc, 1);
-    for (int j = k + 1; j < rank; ++j) {
-      strideVal = arith::MulIOp::create(b, loc, strideVal, dims[j]);
-    }
-    Value idx = arith::DivUIOp::create(b, loc, current, strideVal);
+    Value idx = arith::DivUIOp::create(b, loc, current, strides[k]);
     indices.push_back(idx);
-    current = arith::RemUIOp::create(b, loc, current, strideVal);
+    current = arith::RemUIOp::create(b, loc, current, strides[k]);
   }
   return indices;
 }

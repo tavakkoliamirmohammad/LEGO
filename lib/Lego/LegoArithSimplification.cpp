@@ -230,13 +230,284 @@ struct SimplifyRemOfRem : public OpRewritePattern<arith::RemUIOp> {
   }
 };
 
+// ============================================================================
+// Extended SimplifyDivId: shared factor between numerator term and divisor.
+//
+//   divui(addi(muli(q, s), r), muli(k, s))
+//     → addi(divui(q, k), divui(addi(muli(remui(q, k), s), r), muli(k, s)))
+//
+// Algebraic identity: (q*s + r) / (k*s) = q/k + ((q%k)*s + r) / (k*s)
+//
+// The second term is structurally simpler (q replaced by remui(q,k))
+// and typically folds to 0 via SimplifyMixedRadixDiv below.
+// ============================================================================
+struct ExtendedSimplifyDivId : public OpRewritePattern<arith::DivUIOp> {
+  using OpRewritePattern<arith::DivUIOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::DivUIOp op,
+                                PatternRewriter &rewriter) const override {
+    Value numerator = op.getLhs();
+    Value divisor = op.getRhs();
+
+    auto addOp = numerator.getDefiningOp<arith::AddIOp>();
+    if (!addOp)
+      return failure();
+
+    auto divMul = divisor.getDefiningOp<arith::MulIOp>();
+    if (!divMul)
+      return failure();
+
+    // Try both sides of the addi as the muli(q, s) term.
+    Value addTerms[2] = {addOp.getLhs(), addOp.getRhs()};
+    for (int i = 0; i < 2; ++i) {
+      auto termMul = addTerms[i].getDefiningOp<arith::MulIOp>();
+      if (!termMul)
+        continue;
+
+      // Find shared factor s between termMul and divMul.
+      // termMul = muli(q, s), divMul = muli(k, s)  (commutative)
+      Value q, s, k;
+      Value tm[2] = {termMul.getLhs(), termMul.getRhs()};
+      Value dm[2] = {divMul.getLhs(), divMul.getRhs()};
+
+      bool found = false;
+      for (int a = 0; a < 2 && !found; ++a)
+        for (int b = 0; b < 2 && !found; ++b)
+          if (tm[a] == dm[b]) {
+            s = tm[a];
+            q = tm[1 - a];
+            k = dm[1 - b];
+            found = true;
+          }
+
+      if (!found)
+        continue;
+
+      // Don't fire if s == divisor (that's the basic SimplifyDivId case).
+      if (s == divisor)
+        continue;
+
+      // Don't fire if q is already a remui by k — that means we already
+      // decomposed and this is the "low part".  Prevents infinite loops.
+      if (auto remOp = q.getDefiningOp<arith::RemUIOp>())
+        if (remOp.getRhs() == k)
+          continue;
+
+      Location loc = op.getLoc();
+      Value r = addTerms[1 - i];
+
+      // q / k
+      Value qDivK = arith::DivUIOp::create(rewriter, loc, q, k);
+      // (q % k) * s + r
+      Value qRemK = arith::RemUIOp::create(rewriter, loc, q, k);
+      Value lowTerm = arith::MulIOp::create(rewriter, loc, qRemK, s);
+      Value lowSum = arith::AddIOp::create(rewriter, loc, lowTerm, r);
+      // divui(lowSum, divisor)  — typically folds to 0
+      Value lowDiv = arith::DivUIOp::create(rewriter, loc, lowSum, divisor);
+
+      rewriter.replaceOpWithNewOp<arith::AddIOp>(op, qDivK, lowDiv);
+      return success();
+    }
+    return failure();
+  }
+};
+
+// Similarly for remui:
+//   remui(addi(muli(q, s), r), muli(k, s))
+//     → addi(muli(remui(q, k), s), remui(r, s)) when applicable
+// But the simpler form: just strip the high term.
+//   remui(addi(muli(q, s), r), muli(k, s))
+//     → remui(addi(muli(remui(q, k), s), r), muli(k, s))
+struct ExtendedSimplifyRemId : public OpRewritePattern<arith::RemUIOp> {
+  using OpRewritePattern<arith::RemUIOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::RemUIOp op,
+                                PatternRewriter &rewriter) const override {
+    Value numerator = op.getLhs();
+    Value divisor = op.getRhs();
+
+    auto addOp = numerator.getDefiningOp<arith::AddIOp>();
+    if (!addOp)
+      return failure();
+
+    auto divMul = divisor.getDefiningOp<arith::MulIOp>();
+    if (!divMul)
+      return failure();
+
+    Value addTerms[2] = {addOp.getLhs(), addOp.getRhs()};
+    for (int i = 0; i < 2; ++i) {
+      auto termMul = addTerms[i].getDefiningOp<arith::MulIOp>();
+      if (!termMul)
+        continue;
+
+      Value q, s, k;
+      Value tm[2] = {termMul.getLhs(), termMul.getRhs()};
+      Value dm[2] = {divMul.getLhs(), divMul.getRhs()};
+
+      bool found = false;
+      for (int a = 0; a < 2 && !found; ++a)
+        for (int b = 0; b < 2 && !found; ++b)
+          if (tm[a] == dm[b]) {
+            s = tm[a];
+            q = tm[1 - a];
+            k = dm[1 - b];
+            found = true;
+          }
+
+      if (!found || s == divisor)
+        continue;
+
+      if (auto remOp = q.getDefiningOp<arith::RemUIOp>())
+        if (remOp.getRhs() == k)
+          continue;
+
+      Location loc = op.getLoc();
+      Value r = addTerms[1 - i];
+
+      // (q % k) * s + r
+      Value qRemK = arith::RemUIOp::create(rewriter, loc, q, k);
+      Value lowTerm = arith::MulIOp::create(rewriter, loc, qRemK, s);
+      Value lowSum = arith::AddIOp::create(rewriter, loc, lowTerm, r);
+
+      rewriter.replaceOpWithNewOp<arith::RemUIOp>(op, lowSum, divisor);
+      return success();
+    }
+    return failure();
+  }
+};
+
+// ============================================================================
+// Mixed-radix bound:
+//   divui(addi(muli(remui(a, n), m), remui(b, m)), muli(n, m)) → 0
+//
+// Proof: remui(a,n) ∈ [0,n-1], so muli(remui(a,n), m) ∈ [0, (n-1)*m].
+//        remui(b,m) ∈ [0,m-1].
+//        Sum ∈ [0, n*m - 1] < n*m = divisor.
+// ============================================================================
+struct SimplifyMixedRadixDiv : public OpRewritePattern<arith::DivUIOp> {
+  using OpRewritePattern<arith::DivUIOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::DivUIOp op,
+                                PatternRewriter &rewriter) const override {
+    Value numerator = op.getLhs();
+    Value divisor = op.getRhs();
+
+    auto divMul = divisor.getDefiningOp<arith::MulIOp>();
+    if (!divMul)
+      return failure();
+
+    auto addOp = numerator.getDefiningOp<arith::AddIOp>();
+    if (!addOp)
+      return failure();
+
+    Value n_candidates[2] = {divMul.getLhs(), divMul.getRhs()};
+    Value addTerms[2] = {addOp.getLhs(), addOp.getRhs()};
+
+    // Try each (n, m) assignment from the divisor = muli(n, m).
+    for (int d = 0; d < 2; ++d) {
+      Value n = n_candidates[d];
+      Value m = n_candidates[1 - d];
+
+      // Try each addi operand as the muli(remui(a,n), m) term.
+      for (int t = 0; t < 2; ++t) {
+        Value hiTerm = addTerms[t];
+        Value loTerm = addTerms[1 - t];
+
+        // Check hiTerm = muli(remui(a, n), m)
+        auto hiMul = hiTerm.getDefiningOp<arith::MulIOp>();
+        if (!hiMul)
+          continue;
+
+        // Find which mul operand is m and which is remui(a, n).
+        Value mulOps[2] = {hiMul.getLhs(), hiMul.getRhs()};
+        for (int mi = 0; mi < 2; ++mi) {
+          if (mulOps[mi] != m)
+            continue;
+          auto remA = mulOps[1 - mi].getDefiningOp<arith::RemUIOp>();
+          if (!remA || remA.getRhs() != n)
+            continue;
+
+          // Check loTerm = remui(b, m)
+          auto remB = loTerm.getDefiningOp<arith::RemUIOp>();
+          if (!remB || remB.getRhs() != m)
+            continue;
+
+          // Match! The sum is < n*m, so divui is 0.
+          rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(op, 0);
+          return success();
+        }
+      }
+    }
+    return failure();
+  }
+};
+
+// Mixed-radix bound for remui (dual of SimplifyMixedRadixDiv):
+//   remui(addi(muli(remui(a,n), m), remui(b,m)), muli(n,m))
+//     → addi(muli(remui(a,n), m), remui(b,m))
+// The sum is already < n*m, so the remui is identity.
+struct SimplifyMixedRadixRem : public OpRewritePattern<arith::RemUIOp> {
+  using OpRewritePattern<arith::RemUIOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::RemUIOp op,
+                                PatternRewriter &rewriter) const override {
+    Value numerator = op.getLhs();
+    Value divisor = op.getRhs();
+
+    auto divMul = divisor.getDefiningOp<arith::MulIOp>();
+    if (!divMul)
+      return failure();
+
+    auto addOp = numerator.getDefiningOp<arith::AddIOp>();
+    if (!addOp)
+      return failure();
+
+    Value n_candidates[2] = {divMul.getLhs(), divMul.getRhs()};
+    Value addTerms[2] = {addOp.getLhs(), addOp.getRhs()};
+
+    for (int d = 0; d < 2; ++d) {
+      Value n = n_candidates[d];
+      Value m = n_candidates[1 - d];
+
+      for (int t = 0; t < 2; ++t) {
+        Value hiTerm = addTerms[t];
+        Value loTerm = addTerms[1 - t];
+
+        auto hiMul = hiTerm.getDefiningOp<arith::MulIOp>();
+        if (!hiMul)
+          continue;
+
+        Value mulOps[2] = {hiMul.getLhs(), hiMul.getRhs()};
+        for (int mi = 0; mi < 2; ++mi) {
+          if (mulOps[mi] != m)
+            continue;
+          auto remA = mulOps[1 - mi].getDefiningOp<arith::RemUIOp>();
+          if (!remA || remA.getRhs() != n)
+            continue;
+
+          auto remB = loTerm.getDefiningOp<arith::RemUIOp>();
+          if (!remB || remB.getRhs() != m)
+            continue;
+
+          // Sum < n*m, so remui is identity.
+          rewriter.replaceOp(op, numerator);
+          return success();
+        }
+      }
+    }
+    return failure();
+  }
+};
+
 struct LegoArithSimplificationPass
     : public mlir::lego::impl::LegoArithSimplificationPassBase<
           LegoArithSimplificationPass> {
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<SimplifyRemId, SimplifyDivId, SimplifyDivConst,
-                 ReconstructId, SimplifyDivOfRem, SimplifyRemOfRem>(
+                 ReconstructId, SimplifyDivOfRem, SimplifyRemOfRem,
+                 ExtendedSimplifyDivId, ExtendedSimplifyRemId,
+                 SimplifyMixedRadixDiv, SimplifyMixedRadixRem>(
                      &getContext());
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {

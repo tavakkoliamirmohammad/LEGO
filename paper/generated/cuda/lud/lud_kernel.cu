@@ -259,9 +259,9 @@ lud_internal_reg_tiled(float *m, int matrix_dim, int offset)
 template<int T, int R>
 __device__ __host__ inline
 void invOpt(int ii, int jj, int tid, int& ty, int& i_, int& tx, int& j_) {
-  i_  = ii + ((T*T*jj + tid)/(R*T*T));
-  j_  = (((T*T*jj + tid) % (R*T*T))/(T*T));
-  ty = ((tid % T*T)/(T));
+  i_  = ii;
+  j_  = jj;
+  ty = ((tid)/(T));
   tx = tid % T;
 }
 

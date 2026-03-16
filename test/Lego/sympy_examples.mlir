@@ -194,22 +194,13 @@ func.func @lud_groupby_apply(%R: index, %T: index,
 //         i, j, tidy, tidx = l.inv(expr)
 // SymPy result: i=ii, j=jj, tidy=tid/T, tidx=tid%T
 
+// With mixed-radix simplification + assume_bounds (ii<R, jj<R, tid<T*T),
+// the inverse fully simplifies to: [ii, jj, tid/T, tid%T]
 // CHECK-LABEL: func.func @lud_groupby_inv
 // CHECK-SAME:  (%[[R:.*]]: index, %[[T:.*]]: index, %[[II:.*]]: index, %[[JJ:.*]]: index, %[[TID:.*]]: index)
-// CHECK:       %[[RT:.*]] = arith.muli %[[R]], %[[T]] : index
-// CHECK:       %[[TT:.*]] = arith.muli %[[T]], %[[T]] : index
-// CHECK:       %[[IIR:.*]] = arith.muli %[[II]], %[[R]] : index
-// CHECK:       %[[IIRJJ:.*]] = arith.addi %[[IIR]], %[[JJ]] : index
-// CHECK:       %[[IIRJJTT:.*]] = arith.muli %[[IIRJJ]], %[[TT]] : index
-// CHECK:       %[[EXPR:.*]] = arith.addi %[[IIRJJTT]], %[[TID]] : index
-// CHECK:       %[[RTT:.*]] = arith.muli %[[RT]], %[[T]] : index
-// CHECK:       %[[OUT0:.*]] = arith.divui %[[EXPR]], %[[RTT]] : index
-// CHECK:       %[[REM1:.*]] = arith.remui %[[EXPR]], %[[RTT]] : index
-// CHECK:       %[[OUT1:.*]] = arith.divui %[[REM1]], %[[TT]] : index
-// CHECK:       %[[REM2:.*]] = arith.remui %[[REM1]], %[[TT]] : index
-// CHECK:       %[[OUT2:.*]] = arith.divui %[[REM2]], %[[T]] : index
-// CHECK:       %[[OUT3:.*]] = arith.remui %[[REM2]], %[[T]] : index
-// CHECK:       return %[[OUT0]], %[[OUT1]], %[[OUT2]], %[[OUT3]] : index, index, index, index
+// CHECK:       %[[OUT2:.*]] = arith.divui %[[TID]], %[[T]] : index
+// CHECK:       %[[OUT3:.*]] = arith.remui %[[TID]], %[[T]] : index
+// CHECK:       return %[[II]], %[[JJ]], %[[OUT2]], %[[OUT3]] : index, index, index, index
 func.func @lud_groupby_inv(%R: index, %T: index,
                            %ii: index, %jj: index, %tid: index)
     -> (index, index, index, index) {
