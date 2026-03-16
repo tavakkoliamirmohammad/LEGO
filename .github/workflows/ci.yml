@@ -214,7 +214,7 @@ jobs:
           python -c "
           from lego import jit, get_kernel_source
           from lego.lego import LayoutBlock
-          from lego.compiler import compile_and_run
+          from lego.compiler import LayoutCompiler
           from lego.tensor_api import RowMajor, ColMajor, Tiled
           print('lego package OK')
           "
