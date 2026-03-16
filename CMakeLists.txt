@@ -65,10 +65,10 @@ if(LEGO_MONOLITHIC_LLVM)
   set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
   set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
 
-  # Enable GPU dialect + CUDA runner when the NVPTX backend is requested
-  if("${LEGO_LLVM_TARGETS}" MATCHES "NVPTX")
+  option(LEGO_ENABLE_CUDA_RUNNER "Enable MLIR CUDA runner (requires CUDA)" OFF)
+  if(LEGO_ENABLE_CUDA_RUNNER)
     set(MLIR_ENABLE_CUDA_RUNNER ON CACHE BOOL "" FORCE)
-    message(STATUS "NVPTX backend detected — enabling MLIR CUDA runner")
+    message(STATUS "LEGO_ENABLE_CUDA_RUNNER=ON — enabling MLIR CUDA runner")
   endif()
 
   # Minimal LLVM/MLIR build: disable components LEGO does not need
