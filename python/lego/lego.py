@@ -613,6 +613,57 @@ class TileByLayout(GroupBy):
         q = len(self._tile_groups)
         return [d] * q
 
+    def apply(self, *idx):
+        """Direct apply matching MLIR TileBy lowering semantics.
+
+        For TileBy with d dims per level and q tile levels:
+          1. Combine tile indices per-dimension across levels
+          2. Decompose into per-perm inner indices (if q_inner > 1)
+          3. Apply inner layout
+        """
+        d = len(self._tile_groups[0])
+        q_tile = len(self._tile_groups)
+
+        if len(idx) != d * q_tile:
+            raise ValueError(
+                f"Expected {d * q_tile} indices, got {len(idx)}")
+
+        # Step 1: Combine tile indices per dimension (Horner's method)
+        combined = []
+        for k in range(d):
+            val = idx[k]  # level 0, dim k
+            for l in range(1, q_tile):
+                val = val * self._tile_groups[l][k] + idx[l * d + k]
+            combined.append(val)
+
+        # Collect all inner perms
+        all_perms = []
+        for ob in self._input_chain:
+            all_perms.extend(ob.perms)
+        q_inner = len(all_perms)
+
+        # Step 2: Decompose combined into per-perm indices
+        if q_inner == 1:
+            inner_idx = tuple(combined)
+        else:
+            inner_idx_list = []
+            remaining = list(combined)
+            for h in range(q_inner):
+                for k in range(d):
+                    if h == q_inner - 1:
+                        inner_idx_list.append(remaining[k])
+                    else:
+                        stride = 1
+                        for h2 in range(h + 1, q_inner):
+                            stride *= all_perms[h2].dims()[k]
+                        inner_idx_list.append(remaining[k] // stride)
+                        remaining[k] = remaining[k] % stride
+            inner_idx = tuple(inner_idx_list)
+
+        # Step 3: Apply inner layout
+        inner_ob = OrderBy(*all_perms)
+        return inner_ob.apply(inner_idx)
+
 
 def antidiag(n, args: Tuple[Symbol, ...]):
     i, j = args

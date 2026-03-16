@@ -14,7 +14,7 @@ namespace mlir {
 namespace lego {
 
 std::unique_ptr<Pass> createLegoToArithPass();
-std::unique_ptr<Pass> createLegoNormalizationPass();
+std::unique_ptr<Pass> createLegoNormalizationPass(bool skipTileBy = false);
 std::unique_ptr<Pass> createLegoVerifyGenpConsistencyPass();
 std::unique_ptr<Pass> createLegoArithSimplificationPass();
 std::unique_ptr<Pass> createLegoMaterializeAssumeBoundsPass(bool cleanup = false);

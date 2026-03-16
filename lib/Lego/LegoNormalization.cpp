@@ -228,26 +228,35 @@ struct LegoNormalizationPassImpl
   using mlir::lego::impl::LegoNormalizationPassBase<
       LegoNormalizationPassImpl>::LegoNormalizationPassBase;
 
+  LegoNormalizationPassImpl() = default;
+  LegoNormalizationPassImpl(bool skipTileByArg) { skipTileBy = skipTileByArg; }
+
   void runOnOperation() override {
     ModuleOp module = getOperation();
     MLIRContext *context = &getContext();
 
     RewritePatternSet patterns(context);
-    patterns.add<TileByIdentityRewrite, TileByOpRewrite, RowOpRewrite, ColOpRewrite,
+    // TileByIdentityRewrite is always safe — it just removes no-op TileBys.
+    patterns.add<TileByIdentityRewrite, RowOpRewrite, ColOpRewrite,
                  AssumeBoundsOpRewrite>(context);
+    if (!skipTileBy)
+      patterns.add<TileByOpRewrite>(context);
 
     if (failed(applyPatternsGreedily(module, std::move(patterns)))) {
       signalPassFailure();
     }
   }
+
+private:
+  bool skipTileBy = false;
 };
 
 } // namespace
 
 namespace mlir {
 namespace lego {
-std::unique_ptr<Pass> createLegoNormalizationPass() {
-  return std::make_unique<LegoNormalizationPassImpl>();
+std::unique_ptr<Pass> createLegoNormalizationPass(bool skipTileBy) {
+  return std::make_unique<LegoNormalizationPassImpl>(skipTileBy);
 }
 } // namespace lego
 } // namespace mlir

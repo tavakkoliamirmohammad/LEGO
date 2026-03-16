@@ -184,13 +184,60 @@ struct ReconstructId : public OpRewritePattern<arith::AddIOp> {
 };
 
 
+// Pattern: divui(remui(x, d), d) -> 0
+// Always true: x % d is in [0, d-1], so (x % d) / d = 0.
+struct SimplifyDivOfRem : public OpRewritePattern<arith::DivUIOp> {
+  using OpRewritePattern<arith::DivUIOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::DivUIOp op,
+                                PatternRewriter &rewriter) const override {
+    Value numerator = op.getLhs();
+    Value divisor = op.getRhs();
+
+    auto remOp = numerator.getDefiningOp<arith::RemUIOp>();
+    if (!remOp)
+      return failure();
+
+    if (remOp.getRhs() != divisor)
+      return failure();
+
+    // (x % d) / d -> 0
+    rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(op, 0);
+    return success();
+  }
+};
+
+// Pattern: remui(remui(x, d), d) -> remui(x, d)
+// Always true: x % d is in [0, d-1], so (x % d) % d = x % d.
+struct SimplifyRemOfRem : public OpRewritePattern<arith::RemUIOp> {
+  using OpRewritePattern<arith::RemUIOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::RemUIOp op,
+                                PatternRewriter &rewriter) const override {
+    Value numerator = op.getLhs();
+    Value divisor = op.getRhs();
+
+    auto innerRem = numerator.getDefiningOp<arith::RemUIOp>();
+    if (!innerRem)
+      return failure();
+
+    if (innerRem.getRhs() != divisor)
+      return failure();
+
+    // (x % d) % d -> x % d
+    rewriter.replaceOp(op, numerator);
+    return success();
+  }
+};
+
 struct LegoArithSimplificationPass
     : public mlir::lego::impl::LegoArithSimplificationPassBase<
           LegoArithSimplificationPass> {
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<SimplifyRemId, SimplifyDivId, SimplifyDivConst,
-                 ReconstructId>(&getContext());
+                 ReconstructId, SimplifyDivOfRem, SimplifyRemOfRem>(
+                     &getContext());
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();

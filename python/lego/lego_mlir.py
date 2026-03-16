@@ -695,14 +695,27 @@ def arith_to_sympy(value, val_to_sym, memo=None):
             pred = int(ir.IntegerAttr(pred_attr).value)
             cmp_lhs = arith_to_sympy(cond_op.operands[0], val_to_sym, memo)
             cmp_rhs = arith_to_sympy(cond_op.operands[1], val_to_sym, memo)
-            # sge(a,b) select a,b => Max(a,b)
-            # sle(a,b) select a,b => Min(a,b)
-            if pred == 5 and true_val == cmp_lhs and false_val == cmp_rhs:  # sge
-                result = sp.Max(cmp_lhs, cmp_rhs)
-                memo[value] = result
-                return result
-            if pred == 3 and true_val == cmp_lhs and false_val == cmp_rhs:  # sle
-                result = sp.Min(cmp_lhs, cmp_rhs)
+            # (predicate, lhs_is_true_val) -> sympy function
+            # select(sge(a,b), a, b) => Max(a,b)
+            # select(sge(a,b), b, a) => Min(a,b)
+            # select(sle(a,b), a, b) => Min(a,b)
+            # select(sle(a,b), b, a) => Max(a,b)
+            select_patterns = {
+                (5, True): sp.Max,   # sge, true_val==cmp_lhs
+                (5, False): sp.Min,  # sge, true_val==cmp_rhs
+                (3, True): sp.Min,   # sle, true_val==cmp_lhs
+                (3, False): sp.Max,  # sle, true_val==cmp_rhs
+            }
+
+            if true_val == cmp_lhs and false_val == cmp_rhs:
+                key = (pred, True)
+            elif true_val == cmp_rhs and false_val == cmp_lhs:
+                key = (pred, False)
+            else:
+                key = None
+
+            if key and key in select_patterns:
+                result = select_patterns[key](cmp_lhs, cmp_rhs)
                 memo[value] = result
                 return result
         # Fallback: Piecewise
