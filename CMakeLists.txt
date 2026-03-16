@@ -65,6 +65,12 @@ if(LEGO_MONOLITHIC_LLVM)
   set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
   set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
 
+  # Enable GPU dialect + CUDA runner when the NVPTX backend is requested
+  if("${LEGO_LLVM_TARGETS}" MATCHES "NVPTX")
+    set(MLIR_ENABLE_CUDA_RUNNER ON CACHE BOOL "" FORCE)
+    message(STATUS "NVPTX backend detected — enabling MLIR CUDA runner")
+  endif()
+
   # Minimal LLVM/MLIR build: disable components LEGO does not need
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
@@ -114,6 +120,16 @@ else()
   list(APPEND MLIR_TABLEGEN_FLAGS -I${LLVM_INCLUDE_DIRS})
 endif()
 
+# --- GPU / NVPTX detection (works for both monolithic and decoupled) ---
+# In monolithic mode LLVM_TARGETS_TO_BUILD is set from LEGO_LLVM_TARGETS above.
+# In decoupled mode find_package(LLVM) exports LLVM_TARGETS_TO_BUILD.
+set(LEGO_HAS_NVPTX OFF)
+if("${LLVM_TARGETS_TO_BUILD}" MATCHES "NVPTX")
+  set(LEGO_HAS_NVPTX ON)
+  add_definitions(-DLEGO_HAS_NVPTX)
+  message(STATUS "NVPTX backend available — enabling GPU dialect support")
+endif()
+
 set(MLIR_TABLEGEN_EXE mlir-tblgen)
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
@@ -155,11 +171,15 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     DIALECT_NAME lego)
 
   # Build the nanobind extension for dialect registration
+  set(_lego_extension_capi_libs MLIRLegoCAPI)
+  if(LEGO_HAS_NVPTX)
+    list(APPEND _lego_extension_capi_libs MLIRCAPIGPU)
+  endif()
   declare_mlir_python_extension(LegoPythonSources.Extension
     MODULE_NAME _legoDialects
     ADD_TO_PARENT LegoPythonSources
     SOURCES python/cpp/LegoDialectPybind.cpp
-    EMBED_CAPI_LINK_LIBS MLIRLegoCAPI)
+    EMBED_CAPI_LINK_LIBS ${_lego_extension_capi_libs})
 
   # Override the global MLIR_BINDINGS_PYTHON_NB_DOMAIN so that the buggy
   # ${MLIR_BINDINGS_PYTHON_NB_DOMAIN} (without ARG_ prefix) reference in
@@ -181,6 +201,13 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     # LEGO dialect Python bindings
     LegoPythonSources
   )
+
+  # GPU dialect Python bindings (only when NVPTX backend is available)
+  if(LEGO_HAS_NVPTX)
+    list(APPEND _lego_python_sources
+      MLIRPythonSources.Dialects.gpu
+    )
+  endif()
 
   # Create a unified CAPI shared library.  Embeds all EMBED_CAPI_LINK_LIBS
   # collected from the declared sources plus explicit per-dialect CAPI libs
