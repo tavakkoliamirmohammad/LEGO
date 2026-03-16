@@ -65,10 +65,10 @@ if(LEGO_MONOLITHIC_LLVM)
   set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
   set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
 
-  option(LEGO_ENABLE_CUDA_RUNNER "Enable MLIR CUDA runner (requires CUDA)" OFF)
-  if(LEGO_ENABLE_CUDA_RUNNER)
+  option(LEGO_ENABLE_RUNNERS "Enable MLIR execution engine runners (CUDA, ROCm, etc.)" OFF)
+  if(LEGO_ENABLE_RUNNERS)
     set(MLIR_ENABLE_CUDA_RUNNER ON CACHE BOOL "" FORCE)
-    message(STATUS "LEGO_ENABLE_CUDA_RUNNER=ON — enabling MLIR CUDA runner")
+    message(STATUS "LEGO_ENABLE_RUNNERS=ON — enabling MLIR runners")
   endif()
 
   # Minimal LLVM/MLIR build: disable components LEGO does not need
