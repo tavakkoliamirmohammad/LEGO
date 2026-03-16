@@ -5,9 +5,12 @@ import sys
 
 from mlir.dialects import arith, scf, func, memref
 try:
-    from mlir.dialects import affine, gpu
+    from mlir.dialects import affine
 except ImportError:
     affine = None
+try:
+    from mlir.dialects import gpu
+except ImportError:
     gpu = None
 from mlir.ir import (
     Context,
@@ -30,32 +33,22 @@ class MemorySpace(Enum):
     PRIVATE_MEMORY = 5
 
 
-class SympyMLIRPrinter:
+class MLIRPrinter:
+    """MLIR code generation helper for GPU kernels.
 
-    def __init__(self, ctx=Context(), int_width=32):
-        # 1) Create a context and register any dialects you need.
+    Provides module wrapping, GPU kernel launch boilerplate, and barriers.
+    All index computation goes through LEGO dialect ops (see mlir_apply,
+    mlir_apply_inverse, mlir_load, mlir_store, mlir_loop below).
+    """
+
+    def __init__(self, ctx=Context()):
         self.ctx = ctx
         self.ctx.allow_unregistered_dialects = True
-
-        # 2) Pre-build your integer type.
-        self.int_type = IntegerType.get_signless(int_width, self.ctx)
-        self.bool_type = IntegerType.get_signless(1, self.ctx)
-
-        # top-level MLIR module
-        with self.ctx, Location.unknown(self.ctx):
-            self.module = Module.create()
-
-        # symbol→Value map
-        self.sym_map = {}
-        self.sym_i = 0
-
-    def get_unique_symbol_name(self):
-        self.sym_i += 1
-        return sp.Symbol(f"tmp_{self.sym_i}")
-
-    @staticmethod
-    def get_int_from_index(val):
-        return arith.index_cast(T.i32(), val)
+        try:
+            from lego.dialects.lego_dialect import register as _reg
+            _reg(self.ctx)
+        except Exception:
+            pass
 
     def generate_mlir(self, schedule=None):
         def decorator_body(body):
@@ -67,52 +60,16 @@ class SympyMLIRPrinter:
                         @func.FuncOp.from_py_func()
                         def main():
                             return body()
-                        # If a schedule is provided, parse and insert it
                     if schedule:
-                        # Parse the transform module
                         transform_module = Module.parse(schedule)
                         print(transform_module)
                     print(module)
             return wrapper()
         return decorator_body
 
-    def from_ssa_to_sym(self, val):
-        # if the value is present in the map find the key and return the key
-        for key, value in self.sym_map.items():
-            if value == val:
-                return key
-        val_sym = self.get_unique_symbol_name()
-        self.sym_map[val_sym] = val
-        return val_sym
-
-    def insert_barrier(self):
+    @staticmethod
+    def insert_barrier():
         gpu.barrier()
-
-
-    def generate_loop(self, l: 'GroupBy', step=1, iter_args=[]):
-        def decorator_body(body):
-            @functools.wraps(body)
-            def wrapper(*args, **kwargs):
-                for_op = affine.AffineForOp(
-                    0, product(l.dims()), step, iter_args=iter_args)
-                idx = for_op.induction_variable
-                with InsertionPoint(for_op.body):
-                    idx = self.get_int_from_index(idx)
-                    idx_sym = self.from_ssa_to_sym(idx)
-                    pargs = l.inv(idx_sym)
-                    if len(iter_args) > 0:
-                        res = body(pargs, idx, tuple(
-                            for_op.inner_iter_args))
-                        affine.yield_(res)
-                    else:
-                        body(pargs, idx)
-                        affine.yield_([])
-                if len(iter_args) > 0:
-                    return for_op.results
-            if len(iter_args) > 0:
-                return wrapper
-            return wrapper()
-        return decorator_body
 
     @staticmethod
     def get_token_type():
@@ -123,17 +80,14 @@ class SympyMLIRPrinter:
         def decorator_body(body):
             @functools.wraps(body)
             def wrapper():
-                token_ty = SympyMLIRPrinter.get_token_type()
+                token_ty = MLIRPrinter.get_token_type()
                 token = gpu.wait([])
-                # allocate input
                 for i in set(ins + outs):
                     token = i.gpu_allocate(token)
                     i.host_allocate()
-
                 for i in ins:
                     i.fill_host()
                     token = i.copy_to_device(token)
-
                 gpu.wait([token])
 
                 launch_op = gpu.LaunchOp(
@@ -143,10 +97,8 @@ class SympyMLIRPrinter:
                 )
                 launch_op.attributes["workgroup_attributions"] = IntegerAttr.get(
                     T.i64(), len(workgroup_memory))
-                
-                # Use the existing block created by LaunchOp
+
                 block = launch_op.body.blocks[0]
-                # The block already has 12 arguments (indices). We append workgroup and private memory arguments.
                 for w in workgroup_memory:
                     block.add_argument(w.get_memref_type_address_space(3), Location.unknown())
                 for p in private_memory:
@@ -156,11 +108,9 @@ class SympyMLIRPrinter:
                     for i in set(ins + outs):
                         i.set_memory_space(MemorySpace.GLOBAL_MEMORY)
                         memref.assume_alignment(i.gpu_alloc_ref, 128)
-
                     for i in range(len(workgroup_memory)):
                         workgroup_memory[i].shared_memory_ref = launch_op.body.blocks[0].arguments[12 + i]
-                        workgroup_memory[i].set_memory_space(
-                            MemorySpace.SHARED_MEMORY)
+                        workgroup_memory[i].set_memory_space(MemorySpace.SHARED_MEMORY)
                     for i in private_memory:
                         i.set_memory_space(MemorySpace.PRIVATE_MEMORY)
                     body(launch_op.body.blocks[0].arguments)
@@ -171,114 +121,13 @@ class SympyMLIRPrinter:
             return wrapper()
         return decorator_body
 
-    def get_block_linear_index(self,):
-        return self.from_ssa_to_sym(arith.index_cast(T.i32(), gpu.block_id(gpu.Dimension.x)))
-
-    def get_thread_linear_index(self, ):
-        return self.from_ssa_to_sym(arith.index_cast(T.i32(), gpu.thread_id(gpu.Dimension.x)))
-
-    def translate(self, expr):
-        # 4) Every time we lower, re-enter the context, location, and insertion point.
-        # with self.ctx:
-        #     with Location.unknown(self.ctx):
-        #         with InsertionPoint(self.module.body):
-        return self._lower(expr)
-
-    def _lower(self, expr):
-        if isinstance(expr, sp.Symbol):
-            if expr not in self.sym_map:
-                raise KeyError(f"No MLIR SSA value for symbol {expr}")
-            return self.sym_map[expr]
-        # 0) Relational → arith.cmpi producing an i1
-        if isinstance(expr, sp.core.relational.Relational):
-            lhs_v = self._lower(expr.lhs)
-            rhs_v = self._lower(expr.rhs)
-            # pick the unsigned predicate (UGT, ULE, etc.)
-            if isinstance(expr, sp.StrictGreaterThan):
-                pred = arith.CmpIPredicate.ugt
-            elif isinstance(expr, sp.GreaterThan):
-                pred = arith.CmpIPredicate.uge
-            elif isinstance(expr, sp.StrictLessThan):
-                pred = arith.CmpIPredicate.ult
-            elif isinstance(expr, sp.LessThan):
-                pred = arith.CmpIPredicate.ule
-            elif isinstance(expr, sp.Equality):
-                pred = arith.CmpIPredicate.eq
-            elif isinstance(expr, sp.Unequality):
-                pred = arith.CmpIPredicate.ne
-            else:
-                raise NotImplementedError(f"Unsupported relational: {expr}")
-            op = arith.CmpIOp(pred, lhs_v, rhs_v)
-            return op.result
-
-        # Integer constants
-        if isinstance(expr, sp.Integer) or isinstance(expr, int):
-            val = int(expr)
-            op = arith.ConstantOp(self.int_type, val)
-            return op.result
-
-        # Add -> nested addui.extended ops
-        if isinstance(expr, sp.Add):
-            results = [self._lower(a) for a in expr.args]
-            acc = results[0]
-            for r in results[1:]:
-                op = arith.addi(acc, r)
-                acc = op
-            return acc
-
-        # Mul -> muli (works for unsigned)
-        if isinstance(expr, sp.Mul):
-            results = [self._lower(a) for a in expr.args]
-            acc = results[0]
-            for r in results[1:]:
-                op = arith.muli(acc, r)
-                acc = op
-            return acc
-
-        # FloorDiv or Div -> unsigned div
-        if isinstance(expr, sp.floor):
-            inner = expr.args[0]              # this is “x/y”
-            num, den = inner.as_numer_denom()  # split into numerator & denominator
-            a = self._lower(num)
-            b = self._lower(den)
-            op = arith.divui(a, b)
-            return op
-
-        if getattr(expr, 'is_Div', False):
-            a, b = (self._lower(a) for a in expr.args)
-            op = arith.divui(a, b)
-            return op
-
-        # Mod -> unsigned remainder
-        if isinstance(expr, sp.Mod):
-            a, b = (self._lower(a) for a in expr.args)
-            op = arith.remui(a, b)
-            return op
-
-        # Piecewise -> nested scf.if chains
-        if isinstance(expr, sp.Piecewise):
-            return self._lower_piecewise(expr)
-
-        raise NotImplementedError(f"Unsupported Sympy node: {expr}")
-
-    def _lower_piecewise(self, pw):
-        def recurse(i):
-            val, cond = pw.args[i]
-            then_val = self._lower(val)
-            # last clause is the “else”
-            if i == len(pw.args) - 1:
-                return then_val
-            cond_val = self._lower(cond)
-            ifop = scf.IfOp(cond_val, [self.int_type], has_else_region=True)
-            with InsertionPoint(ifop.then_block):
-                scf.YieldOp(then_val)
-            with InsertionPoint(ifop.else_block):
-                scf.YieldOp(recurse(i+1))
-            return ifop.results[0]
-
-        return recurse(0)
 
 class MLIRTensor:
+    """Tensor backed by a memref with a LEGO layout.
+
+    Use mlir_load / mlir_store for indexed access (no SymPy).
+    """
+
     def __init__(self, layout: 'GroupBy', dtype="", is_dim_shape=False) -> None:
         self.layout = layout
         self.alloc_ref = None
@@ -301,9 +150,6 @@ class MLIRTensor:
         return product(self.layout.dims())
 
     def get_memref_type_address_space(self, address_space) -> memref.MemRefType:
-        physical_shape = self.layout.objects[0].dims()
-        if self.is_dim_shape:
-            return T.memref(*physical_shape, self.data_type, memory_space=Attribute.parse("#gpu.address_space<workgroup>") if address_space == 3 else address_space)
         return T.memref(self.get_flattend_shape(), self.data_type, memory_space=address_space)
 
     def host_allocate(self):
@@ -315,9 +161,8 @@ class MLIRTensor:
         if tokens is None:
             gpu.dealloc(self.gpu_alloc_ref)
             return None
-        else:
-            token_ty = Type.parse("!gpu.async.token")
-            return gpu.dealloc(token_ty, list(tokens), self.gpu_alloc_ref)
+        token_ty = Type.parse("!gpu.async.token")
+        return gpu.dealloc(token_ty, list(tokens), self.gpu_alloc_ref)
 
     def set_memory_space(self, memory_space: MemorySpace):
         self.memory_space = memory_space
@@ -328,18 +173,23 @@ class MLIRTensor:
             self.gpu_alloc_ref = gpu.alloc(
                 self.get_memref_type(), [], [], [], [])
             return None
-        else:
-            token_ty = Type.parse("!gpu.async.token")
-            tmp = gpu.alloc(
-                self.get_memref_type_address_space(0), token_ty, list(tokens), [], [])
-            self.gpu_alloc_ref = tmp[0]
+        token_ty = Type.parse("!gpu.async.token")
+        tmp = gpu.alloc(
+            self.get_memref_type_address_space(0), token_ty, list(tokens), [], [])
+        self.gpu_alloc_ref = tmp[0]
         return tmp[1]
 
     def fill_host(self):
-        for i in affine.for_(0, self.get_flattend_shape(), step=1):
+        from mlir.dialects import scf as _scf
+        for_op = _scf.ForOp(
+            _index_const(0),
+            _index_const(int(self.get_flattend_shape())),
+            _index_const(1))
+        with InsertionPoint(for_op.body):
+            i = for_op.induction_variable
             f_i = arith.sitofp(self.data_type, arith.index_cast(T.i32(), i))
             self.store_physical_1d([i], f_i)
-            affine.yield_([])
+            _scf.YieldOp([])
         return self
 
     def store_physical_1d(self, coords, value):
@@ -350,54 +200,136 @@ class MLIRTensor:
         if token is None:
             gpu.memcpy(None, [], self.gpu_alloc_ref, self.alloc_ref)
             return None
-        else:
-            return gpu.memcpy(token_ty, [token], self.gpu_alloc_ref, self.alloc_ref)
+        return gpu.memcpy(token_ty, [token], self.gpu_alloc_ref, self.alloc_ref)
 
     def get_memory_ref_address_space(self):
         memory_space = self.memory_space
         if memory_space == MemorySpace.SHARED_MEMORY:
-            # return memref.get_global(self.get_memref_type_address_space(3), self.shared_memory_symbol)
             return self.shared_memory_ref
         if memory_space == MemorySpace.PRIVATE_MEMORY:
-            # return memref.get_global(self.get_memref_type_address_space(3), self.shared_memory_symbol)
             return self.private_memory_ref
         if memory_space == MemorySpace.GLOBAL_MEMORY:
             return self.gpu_alloc_ref
-        if memory_space == MemorySpace.HOST_MEMORY:
-            return self.alloc_ref
         return self.alloc_ref
 
-    def __getitem__(self, key):
-        dummy_to_tr = {}
-        result = []
-        i = 0
-        for x in key:
-            sym = sp.symbols(f"_tr{i}", integer=True)
-            dummy_to_tr[sym] = x
-            i += 1
-            result.append(sym)
-        apply_map = self.layout[tuple(result)]
-        apply_map = apply_map.xreplace(dummy_to_tr)
-        apply_map = [arith.index_cast(T.index(), printer.translate(apply_map))]
-        return memref.load(self.get_memory_ref_address_space(), apply_map)
 
-    def __setitem__(self, key, value):
-        dummy_to_tr = {}
-        result = []
-        i = 0
-        for x in key:
-            sym = sp.symbols(f"_tr{i}", integer=True)
-            dummy_to_tr[sym] = x
-            i += 1
-            result.append(sym)
-        apply_map = self.layout[tuple(result)]
-        apply_map = apply_map.xreplace(dummy_to_tr)
-        apply_map = [arith.index_cast(
-            T.index(),  printer.translate(apply_map))]
-        return memref.store(value, self.get_memory_ref_address_space(), apply_map)
+printer = MLIRPrinter()
 
 
-printer = SympyMLIRPrinter()
+# ============================================================================
+# Pure-MLIR layout helpers (no SymPy dependency)
+#
+# For use in GPU kernels and benchmarks where all dimensions are concrete
+# integers and index computation can go directly through LEGO dialect ops.
+# ============================================================================
+
+def mlir_layout(layout):
+    """Emit a Python layout object as MLIR LEGO dialect ops.
+
+    Only works when all dimensions are concrete (int / sp.Integer).
+    Returns an MLIR Value of !lego.layout type.
+    """
+    return emit_layout_from_python(layout, {})
+
+
+def mlir_apply(layout, indices):
+    """Forward-apply a layout to MLIR index values.
+
+    Args:
+        layout: Python LayoutBlock (OrderBy, TileByLayout, GroupBy, ...)
+        indices: list of MLIR Values (index type)
+    Returns:
+        MLIR Value (index type) — the flat index
+    """
+    from lego.dialects.lego_dialect import ApplyOp as _ApplyOp
+    layout_val = mlir_layout(layout)
+    return _ApplyOp(
+        flat_index=ir.IndexType.get(),
+        layout=layout_val,
+        indices=indices,
+    ).result
+
+
+def mlir_apply_inverse(layout, flat_idx):
+    """Inverse-apply a layout to an MLIR flat index.
+
+    Args:
+        layout: Python LayoutBlock
+        flat_idx: MLIR Value (index type)
+    Returns:
+        list of MLIR Values (index type) — the multi-dim indices
+    """
+    from lego.dialects.lego_dialect import ApplyInverseOp as _ApplyInverseOp
+    layout_val = mlir_layout(layout)
+    dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
+    rank = len(dims)
+    inv = _ApplyInverseOp(
+        indices=[ir.IndexType.get()] * rank,
+        layout=layout_val,
+        flat_index=flat_idx,
+    )
+    return list(inv.results)
+
+
+def mlir_cast_view(tensor):
+    """Create a lego.view from an MLIRTensor's memref and layout.
+
+    Returns an MLIR Value of !lego.view type.
+    """
+    from lego.dialects.lego_dialect import CastViewOp as _CastViewOp
+    layout_val = mlir_layout(tensor.layout)
+    view_ty = ir.Type.parse(f"!lego.view<{tensor.data_type}>")
+    return _CastViewOp(
+        view=view_ty,
+        memref=tensor.get_memory_ref_address_space(),
+        layout=layout_val,
+    ).result
+
+
+def mlir_load(tensor, indices):
+    """Load from an MLIRTensor using lego.cast_view + lego.load.
+
+    Args:
+        tensor: MLIRTensor instance
+        indices: list of MLIR Values (index type)
+    Returns:
+        MLIR Value — the loaded element
+    """
+    from lego.dialects.lego_dialect import LoadOp as _LoadOp
+    view = mlir_cast_view(tensor)
+    return _LoadOp(result=tensor.data_type, view=view, indices=indices).result
+
+
+def mlir_store(value, tensor, indices):
+    """Store to an MLIRTensor using lego.cast_view + lego.store.
+
+    Args:
+        value: MLIR Value to store
+        tensor: MLIRTensor instance
+        indices: list of MLIR Values (index type)
+    """
+    from lego.dialects.lego_dialect import StoreOp as _StoreOp
+    view = mlir_cast_view(tensor)
+    _StoreOp(value=value, view=view, indices=indices)
+
+
+def mlir_loop(layout, body_fn):
+    """Generate an scf.for loop with LEGO apply_inverse (no SymPy).
+
+    The body_fn receives (indices, induction_var) where indices is
+    a list of MLIR Values from the layout inverse.
+    """
+    from mlir.dialects import scf
+    total = 1
+    dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
+    for d in dims:
+        total *= int(d)
+    for_op = scf.ForOp(_index_const(0), _index_const(total), _index_const(1))
+    with InsertionPoint(for_op.body):
+        idx = for_op.induction_variable
+        indices = mlir_apply_inverse(layout, idx)
+        body_fn(indices, idx)
+        scf.YieldOp([])
 
 
 # ============================================================================
@@ -624,43 +556,22 @@ def arith_to_sympy(value, val_to_sym, memo=None):
 
     if op_name == "arith.constant":
         attr = op.attributes["value"]
-        val = int(ir.IntegerAttr(attr).value)
-        result = sp.Integer(val)
+        result = sp.Integer(int(ir.IntegerAttr(attr).value))
         memo[value] = result
         return result
 
-    if op_name == "arith.addi":
+    # Binary arith ops → SymPy
+    _BINARY_OPS = {
+        "arith.addi": lambda a, b: a + b,
+        "arith.muli": lambda a, b: a * b,
+        "arith.subi": lambda a, b: a - b,
+        "arith.divui": lambda a, b: sp.floor(a / b),
+        "arith.remui": lambda a, b: sp.Mod(a, b),
+    }
+    if op_name in _BINARY_OPS:
         a = arith_to_sympy(op.operands[0], val_to_sym, memo)
         b = arith_to_sympy(op.operands[1], val_to_sym, memo)
-        result = a + b
-        memo[value] = result
-        return result
-
-    if op_name == "arith.muli":
-        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
-        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
-        result = a * b
-        memo[value] = result
-        return result
-
-    if op_name == "arith.subi":
-        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
-        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
-        result = a - b
-        memo[value] = result
-        return result
-
-    if op_name == "arith.divui":
-        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
-        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
-        result = sp.floor(a / b)
-        memo[value] = result
-        return result
-
-    if op_name == "arith.remui":
-        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
-        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
-        result = sp.Mod(a, b)
+        result = _BINARY_OPS[op_name](a, b)
         memo[value] = result
         return result
 
