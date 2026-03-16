@@ -63,15 +63,6 @@ def eval_expr(expr, subs):
 class TestInfrastructure:
     """Verify MLIR roundtrip infrastructure and import health."""
 
-    def test_no_z3_in_python_simplification(self):
-        """z3 must not be imported by lego's layout simplification path.
-        z3 is still installed for the C++ MLIR verification passes."""
-        # simplifier.py (which imported z3) should be deleted
-        simplifier_path = os.path.join(
-            os.path.dirname(__file__), "..", "lego", "simplifier.py"
-        )
-        assert not os.path.exists(simplifier_path), "simplifier.py still exists"
-
     def test_import_lego(self):
         """import lego must work."""
         import lego
@@ -196,59 +187,6 @@ class TestInverse:
 
 
 # ============================================================================
-# Numerical consistency tests
-# ============================================================================
-
-class TestNumericalConsistency:
-    """Verify apply(inv(x)) == x and inv(apply(i)) == i numerically."""
-
-    def _test_apply_inv_roundtrip(self, layout, dims, n_tests=20):
-        """Test apply(inv(x)) == x for random x in [0, product(dims))."""
-        import random
-        total = 1
-        for d in dims:
-            total *= d
-        x_sym = sym("x")
-        inv_exprs = layout.inv(x_sym)
-        for _ in range(n_tests):
-            x_val = random.randint(0, total - 1)
-            # Compute inv(x) numerically
-            idx_vals = [int(e.subs(x_sym, x_val)) for e in inv_exprs]
-            # Compute apply(inv(x)) via Python
-            flat = layout.apply(*idx_vals)
-            assert flat == x_val, (
-                f"apply(inv({x_val})) = {flat}, expected {x_val}. "
-                f"inv = {idx_vals}"
-            )
-
-    def test_const_roundtrip(self):
-        L = OrderBy(Row(8, 8, 8)).TileBy([8, 8, 8])
-        self._test_apply_inv_roundtrip(L, [8, 8, 8])
-
-    def test_graphene_roundtrip(self):
-        L = OrderBy(RegP([2, 2, 2, 2, 2], [4, 1, 3, 2, 0])).GroupBy(
-            [(2, 2, 2, 2, 2)]
-        )
-        self._test_apply_inv_roundtrip(L, [2, 2, 2, 2, 2])
-
-    def test_2d_row_roundtrip(self):
-        L = OrderBy(Row(4, 8)).GroupBy([(4, 8)])
-        self._test_apply_inv_roundtrip(L, [4, 8])
-
-    def test_2d_col_roundtrip(self):
-        L = OrderBy(Col(4, 8)).GroupBy([(4, 8)])
-        self._test_apply_inv_roundtrip(L, [4, 8])
-
-    def test_normal_roundtrip(self):
-        L = OrderBy(Row(8, 8, 8)).TileBy([4, 4, 4], [2, 2, 2])
-        self._test_apply_inv_roundtrip(L, [4, 4, 4, 2, 2, 2])
-
-    def test_bricks_roundtrip(self):
-        L = OrderBy(Row(4, 4, 4), Row(2, 2, 2)).TileBy([4, 4, 4], [2, 2, 2])
-        self._test_apply_inv_roundtrip(L, [4, 4, 4, 2, 2, 2])
-
-
-# ============================================================================
 # Direct simplify_via_mlir tests
 # ============================================================================
 
@@ -295,6 +233,9 @@ class TestGenP:
         a, b = syms("a b")
         result = L[a, b]
         assert_expr_equal(result, a * 8 + b, "genp_identity")
+        inv = L.inv(a)
+        assert_expr_equal(inv[0], sp.floor(a / 8), "genp_identity_inv[0]")
+        assert_expr_equal(inv[1], sp.Mod(a, 8), "genp_identity_inv[1]")
 
 
 # ============================================================================

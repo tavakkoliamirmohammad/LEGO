@@ -4,7 +4,6 @@ from sympy import Symbol, symbols, Piecewise, Function
 from typing import List, Tuple, Callable
 import sympy as sp
 from functools import reduce
-# simplifier.py (z3) no longer needed — using MLIR roundtrip
 
 
 class TritonRange(Function):
