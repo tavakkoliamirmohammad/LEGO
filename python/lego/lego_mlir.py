@@ -1,6 +1,7 @@
 from .lego import *
 import functools
 import os
+import sys
 
 from mlir.dialects import arith, scf, func, memref
 try:
@@ -403,19 +404,19 @@ printer = SympyMLIRPrinter()
 # MLIR Roundtrip: replace simplify_ops (SymPy+z3) with MLIR pipeline
 # ============================================================================
 
-from mlir.ir import IndexType, FunctionType, StringAttr, UnitAttr
-from mlir.passmanager import PassManager
-from mlir.dialects import func as func_dialect
+from mlir.passmanager import PassManager as _PassManager
+from mlir.dialects import func as _func_dialect
 from lego.dialects.lego_dialect import (
-    register as register_lego,
+    register as _register_lego,
     RegPOp, RowOp, ColOp, OrderByOp, GroupByOp, ApplyOp,
     ApplyInverseOp, TileByOp, GenPOp, YieldOp,
 )
-from lego.dialects._lego_ops_gen import assume_bounds as _assume_bounds
+from lego.dialects._lego_ops_gen import assume_bounds as _assume_bounds_fn
 
 
 def _index_const(val):
     """Emit arith.constant with index type."""
+    from mlir.ir import IndexType, IntegerAttr
     idx_ty = IndexType.get()
     return arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(val))).result
 
@@ -458,7 +459,14 @@ def _lower_sympy_to_index(expr, sym_to_val):
         return acc
 
     if isinstance(expr, sp.Mul):
-        # Separate integer coefficient from rest
+        # Check for division: SymPy represents a/b as a * b^(-1)
+        num, den = expr.as_numer_denom()
+        if den != sp.S.One:
+            # This is a division — lower as divui
+            a = _lower_sympy_to_index(num, sym_to_val)
+            b = _lower_sympy_to_index(den, sym_to_val)
+            return arith.divui(a, b)
+        # Pure multiplication
         coeff, rest = expr.as_coeff_Mul()
         if rest == sp.S.One:
             return _index_const(int(coeff))
@@ -485,7 +493,6 @@ def _lower_sympy_to_index(expr, sym_to_val):
     if isinstance(expr, sp.Pow):
         base, exp = expr.args
         if exp == sp.S.NegativeOne:
-            # x^-1 shouldn't appear at index level; skip
             raise NotImplementedError(f"Negative power in index expr: {expr}")
         if exp.is_Integer and int(exp) >= 0:
             b = _lower_sympy_to_index(base, sym_to_val)
@@ -493,6 +500,20 @@ def _lower_sympy_to_index(expr, sym_to_val):
             for _ in range(int(exp)):
                 result = arith.muli(result, b)
             return result
+
+    # Max(a, b) -> select(a >= b, a, b)
+    if expr.func == sp.Max:
+        a = _lower_sympy_to_index(expr.args[0], sym_to_val)
+        b = _lower_sympy_to_index(expr.args[1], sym_to_val)
+        cmp = arith.cmpi(arith.CmpIPredicate.sge, a, b)
+        return arith.select(cmp, a, b)
+
+    # Min(a, b) -> select(a <= b, a, b)
+    if expr.func == sp.Min:
+        a = _lower_sympy_to_index(expr.args[0], sym_to_val)
+        b = _lower_sympy_to_index(expr.args[1], sym_to_val)
+        cmp = arith.cmpi(arith.CmpIPredicate.sle, a, b)
+        return arith.select(cmp, a, b)
 
     raise NotImplementedError(f"Cannot lower SymPy expr to index: {expr}")
 
@@ -506,6 +527,7 @@ def emit_layout_from_python(layout, sym_to_val):
     Returns:
         MLIR Value of !lego.layout type
     """
+    from mlir.ir import IndexType
     lt = _layout_type()
 
     if isinstance(layout, RegP):
@@ -518,6 +540,18 @@ def emit_layout_from_python(layout, sym_to_val):
         for p in layout.perms:
             perm_vals.append(emit_layout_from_python(p, sym_to_val))
         return OrderByOp(result=lt, perms=perm_vals).result
+
+    if isinstance(layout, TileByLayout):
+        all_perm_vals = []
+        for orderby in layout._input_chain:
+            for p in orderby.perms:
+                all_perm_vals.append(emit_layout_from_python(p, sym_to_val))
+        input_val = OrderByOp(result=lt, perms=all_perm_vals).result
+        tile_dim_vals = [_resolve_dim(d, sym_to_val)
+                         for g in layout._tile_groups for d in g]
+        return TileByOp(result=lt, input=input_val,
+                        tile_dims=tile_dim_vals,
+                        tile_shape=layout.tile_shape).result
 
     if isinstance(layout, GroupBy):
         dim_vals = [_resolve_dim(d, sym_to_val) for d in layout._dims]
@@ -535,7 +569,6 @@ def emit_layout_from_python(layout, sym_to_val):
         rank = len(layout._dims)
         apply_block = gen_p_op.body.blocks.append(*([idx_ty] * rank))
         with InsertionPoint(apply_block):
-            # Create temp SymPy symbols and call the Python f_apply
             temp_syms = [sp.Symbol(f"_genp_arg_{k}", integer=True) for k in range(rank)]
             local_map = dict(sym_to_val)
             for s, arg in zip(temp_syms, apply_block.arguments):
@@ -631,6 +664,53 @@ def arith_to_sympy(value, val_to_sym, memo=None):
         memo[value] = result
         return result
 
+    if op_name == "arith.cmpi":
+        pred_attr = op.attributes["predicate"]
+        pred = int(ir.IntegerAttr(pred_attr).value)
+        a = arith_to_sympy(op.operands[0], val_to_sym, memo)
+        b = arith_to_sympy(op.operands[1], val_to_sym, memo)
+        # MLIR CmpIPredicate: eq=0, ne=1, slt=2, sle=3, sgt=4, sge=5, ult=6, ule=7, ugt=8, uge=9
+        pred_map = {
+            0: sp.Eq, 1: sp.Ne,
+            2: sp.StrictLessThan, 3: sp.LessThan,
+            4: sp.StrictGreaterThan, 5: sp.GreaterThan,
+            6: sp.StrictLessThan, 7: sp.LessThan,
+            8: sp.StrictGreaterThan, 9: sp.GreaterThan,
+        }
+        rel_cls = pred_map.get(pred)
+        if rel_cls:
+            result = rel_cls(a, b, evaluate=False)
+            memo[value] = result
+            return result
+        raise NotImplementedError(f"Unknown cmpi predicate: {pred}")
+
+    if op_name == "arith.select":
+        # operands: condition, true_val, false_val
+        true_val = arith_to_sympy(op.operands[1], val_to_sym, memo)
+        false_val = arith_to_sympy(op.operands[2], val_to_sym, memo)
+        # Try to recover Max/Min from the cmpi pattern
+        cond_op = op.operands[0].owner
+        if cond_op.name == "arith.cmpi":
+            pred_attr = cond_op.attributes["predicate"]
+            pred = int(ir.IntegerAttr(pred_attr).value)
+            cmp_lhs = arith_to_sympy(cond_op.operands[0], val_to_sym, memo)
+            cmp_rhs = arith_to_sympy(cond_op.operands[1], val_to_sym, memo)
+            # sge(a,b) select a,b => Max(a,b)
+            # sle(a,b) select a,b => Min(a,b)
+            if pred == 5 and true_val == cmp_lhs and false_val == cmp_rhs:  # sge
+                result = sp.Max(cmp_lhs, cmp_rhs)
+                memo[value] = result
+                return result
+            if pred == 3 and true_val == cmp_lhs and false_val == cmp_rhs:  # sle
+                result = sp.Min(cmp_lhs, cmp_rhs)
+                memo[value] = result
+                return result
+        # Fallback: Piecewise
+        cond = arith_to_sympy(op.operands[0], val_to_sym, memo)
+        result = sp.Piecewise((true_val, cond), (false_val, True))
+        memo[value] = result
+        return result
+
     raise NotImplementedError(f"Cannot convert op '{op_name}' to SymPy")
 
 
@@ -643,7 +723,16 @@ def _collect_free_symbols(layout):
                 syms |= d.free_symbols
             elif isinstance(d, sp.Symbol):
                 syms.add(d)
-    if isinstance(layout, OrderBy):
+    if isinstance(layout, TileByLayout):
+        for orderby in layout._input_chain:
+            syms |= _collect_free_symbols(orderby)
+        for g in layout._tile_groups:
+            for d in g:
+                if isinstance(d, sp.Expr):
+                    syms |= d.free_symbols
+                elif isinstance(d, sp.Symbol):
+                    syms.add(d)
+    elif isinstance(layout, OrderBy):
         for p in layout.perms:
             syms |= _collect_free_symbols(p)
     elif isinstance(layout, GroupBy):
@@ -671,6 +760,8 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
         'apply': single SymPy expression (flat index)
         'inv': list of SymPy expressions (N-D indices)
     """
+    from mlir.ir import IndexType, FunctionType, StringAttr
+
     if constraints is None:
         constraints = {}
 
@@ -703,7 +794,7 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
     sym_list = sorted(all_syms, key=lambda s: s.name)
 
     ctx = Context()
-    register_lego(ctx)
+    _register_lego(ctx)
 
     with ctx, Location.unknown():
         module = Module.create()
@@ -715,12 +806,11 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
             rank = len(layout._dims)
             func_ty = FunctionType.get([idx_ty] * n_args, [idx_ty])
         else:
-            # inv returns rank indices
             rank = len(layout._dims)
             func_ty = FunctionType.get([idx_ty] * n_args, [idx_ty] * rank)
 
         with InsertionPoint(module.body):
-            f = func_dialect.FuncOp("roundtrip", func_ty)
+            f = _func_dialect.FuncOp("roundtrip", func_ty)
             f.sym_visibility = StringAttr.get("public")
 
         entry = f.add_entry_block()
@@ -742,7 +832,7 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
                 val = sym_to_val[sym]
                 lb_val = _resolve_dim(lb, sym_to_val) if lb is not None else None
                 ub_val = _resolve_dim(ub, sym_to_val) if ub is not None else None
-                _assume_bounds(val, lb=lb_val, ub=ub_val)
+                _assume_bounds_fn(val, lb=lb_val, ub=ub_val)
 
             # Emit layout
             layout_val = emit_layout_from_python(layout, sym_to_val)
@@ -752,7 +842,7 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
                 arg_vals = [_resolve_dim(a, sym_to_val) for a in args]
                 result = ApplyOp(flat_index=idx_ty, layout=layout_val,
                                  indices=arg_vals).result
-                func_dialect.ReturnOp([result])
+                _func_dialect.ReturnOp([result])
             else:
                 flat_val = _resolve_dim(args, sym_to_val)
                 inv_op = ApplyInverseOp(
@@ -760,31 +850,31 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
                     layout=layout_val,
                     flat_index=flat_val,
                 )
-                func_dialect.ReturnOp(list(inv_op.results))
+                _func_dialect.ReturnOp(list(inv_op.results))
 
         # Run lego-lower pipeline
         if _LEGO_DEBUG:
-            print("=== MLIR input (LEGO dialect) ===")
-            print(module)
-            print()
+            print("=== MLIR input (LEGO dialect) ===", file=sys.stderr)
+            print(module, file=sys.stderr)
+            print(file=sys.stderr)
 
             # Show intermediate: after canonicalize + CSE only (no LEGO passes)
             module_copy = Module.parse(str(module))
-            pm_pre = PassManager.parse(
+            pm_pre = _PassManager.parse(
                 "builtin.module(canonicalize,cse)"
             )
             pm_pre.run(module_copy.operation)
-            print("=== MLIR after canonicalize + CSE ===")
-            print(module_copy)
-            print()
+            print("=== MLIR after canonicalize + CSE ===", file=sys.stderr)
+            print(module_copy, file=sys.stderr)
+            print(file=sys.stderr)
 
-        pm = PassManager.parse("builtin.module(lego-lower)")
+        pm = _PassManager.parse("builtin.module(lego-lower)")
         pm.run(module.operation)
 
         if _LEGO_DEBUG:
-            print("=== MLIR after lego-lower (fully simplified) ===")
-            print(module)
-            print()
+            print("=== MLIR after lego-lower (fully simplified) ===", file=sys.stderr)
+            print(module, file=sys.stderr)
+            print(file=sys.stderr)
 
         # Extract the function after lowering (passes may rebuild ops)
         func_op = None

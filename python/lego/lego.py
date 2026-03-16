@@ -269,22 +269,13 @@ class OrderBy(LayoutBlock):
         return GroupBy(group_dims, self.chain, user_constraints)
 
     def TileBy(self, *group_dims: Tuple[Symbol, ...], user_constraints=[]):
-
         dims = tuple(d for dim_tuple in group_dims for d in dim_tuple)
-        d = len(group_dims[0])
-        q = len(group_dims)
-        sigma_dq = get_sigma_perm(d, q)
-        new_order_by = []
-        for o in self.chain:
-            o_dims = []
-            for p in o.perms:
-                o_dims.extend(p.dims())
-            sigma_o = get_sigma_perm(o.d, o.q)
-            sigma_o_inv = inverse_permutation(sigma_o)
-            new_order_by.append(o)
-            new_order_by.append(
-                OrderBy(RegP(sigma(o_dims, sigma_o), sigma_o_inv)))
-        return GroupBy([dims], new_order_by + [OrderBy(RegP(dims, sigma_dq))], user_constraints)
+        return TileByLayout(
+            input_chain=list(self.chain),
+            tile_groups=list(group_dims),
+            group_dims=[dims],
+            user_constraints=user_constraints,
+        )
 
     def apply(self, idx: Tuple[Symbol, ...]) -> Symbol:
         """
@@ -579,6 +570,48 @@ class GroupBy(LayoutBlock):
         simplified = simplify_via_mlir(self, 'apply', list(result),
                                        constraints)
         return simplified.xreplace(dummy_to_tr)
+
+
+class TileByLayout(GroupBy):
+    """GroupBy produced by OrderBy.TileBy().
+
+    Preserves the original OrderBy input and tile groups so that the MLIR
+    emitter can emit a ``lego.tile_by`` op instead of the expanded
+    ``lego.group_by``, letting the MLIR pass pipeline handle the lowering.
+    """
+
+    def __init__(self, input_chain, tile_groups, group_dims, user_constraints=[]):
+        self._dims = tuple(d for dim_tuple in group_dims for d in dim_tuple)
+        self.d = len(group_dims[0])
+        self.user_constraints = user_constraints
+        self._input_chain = input_chain
+        self._tile_groups = tile_groups
+
+    def _get_all_dim_symbols(self):
+        syms = set()
+        for d in self._dims:
+            if isinstance(d, sp.Expr):
+                syms |= d.free_symbols
+        for orderby in self._input_chain:
+            for p in orderby.perms:
+                for d in p.dims():
+                    if isinstance(d, sp.Expr):
+                        syms |= d.free_symbols
+        return syms
+
+    def _get_input_constraints(self):
+        all_dims = list(self.dims())
+        for orderby in self._input_chain:
+            for p in orderby.perms:
+                all_dims.extend(p.dims())
+        return list(map(lambda x: sp.Gt(x, 0, evaluate=False),
+                        set().union(*(e.free_symbols for e in all_dims if isinstance(e, sp.Expr)))))
+
+    @property
+    def tile_shape(self):
+        d = len(self._tile_groups[0])
+        q = len(self._tile_groups)
+        return [d] * q
 
 
 def antidiag(n, args: Tuple[Symbol, ...]):
