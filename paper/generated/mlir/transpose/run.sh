@@ -106,6 +106,6 @@ process_file() {
 }
 
 # Loop through powers of 2 from 256 to 8192
-for (( size=2048; size<=8192; size*=2 )); do
+for (( size=256; size<=8192; size*=2 )); do
     process_file "$size"
 done

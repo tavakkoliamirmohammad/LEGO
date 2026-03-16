@@ -39,14 +39,15 @@ B = OrderBy(Row(N, N)).TileBy(
     [BLOCK_ROWS_X, BLOCK_ROWS_Y])
 smem = OrderBy(Row(TILE_DIM, TILE_DIM)).TileBy([TILE_DIM, TILE_DIM])
 
-TA = MLIRTensor(A, "f32")
-TB = MLIRTensor(B, "f32")
-TSmem = MLIRTensor(smem, "f32")
-
 
 @printer.generate_mlir()
 def main():
-    @printer.generate_loop(OrderBy(Row(NUM_REPETITION)).TileBy([NUM_REPETITION]))
+    TA = MLIRTensor(A, "f32")
+    TB = MLIRTensor(B, "f32")
+    TSmem = MLIRTensor(smem, "f32")
+
+    rep_layout = OrderBy(Row(NUM_REPETITION)).TileBy([NUM_REPETITION])
+
     def main_body(_, __):
         @printer.generate_gpu_kernel([TA], [TB], dimGrid, dimBlock, workgroup_memory=[TSmem])
         def kernel(args):
@@ -99,3 +100,5 @@ def main():
                            TB, [wby, wbx, i, j, rty, rtx])
 
             mlir_loop(write_tile_loop, write_body)
+
+    mlir_loop(rep_layout, main_body)
