@@ -374,6 +374,31 @@ def _resolve_dim(dim, sym_to_val):
     raise TypeError(f"Cannot resolve dim of type {type(dim)}: {dim}")
 
 
+def _lower_sympy_cond_to_i1(cond, sym_to_val):
+    """Lower a SymPy relational to an MLIR i1 value."""
+    if cond is sp.true or cond == True:
+        return arith.ConstantOp(ir.IntegerType.get_signless(1),
+                                ir.IntegerAttr.get(ir.IntegerType.get_signless(1), 1)).result
+    if cond is sp.false or cond == False:
+        return arith.ConstantOp(ir.IntegerType.get_signless(1),
+                                ir.IntegerAttr.get(ir.IntegerType.get_signless(1), 0)).result
+
+    _PRED_MAP = {
+        sp.StrictGreaterThan: arith.CmpIPredicate.sgt,
+        sp.GreaterThan: arith.CmpIPredicate.sge,
+        sp.StrictLessThan: arith.CmpIPredicate.slt,
+        sp.LessThan: arith.CmpIPredicate.sle,
+        sp.Equality: arith.CmpIPredicate.eq,
+        sp.Unequality: arith.CmpIPredicate.ne,
+    }
+    pred = _PRED_MAP.get(type(cond))
+    if pred is None:
+        raise NotImplementedError(f"Unsupported condition: {cond}")
+    lhs = _lower_sympy_to_index(cond.lhs, sym_to_val)
+    rhs = _lower_sympy_to_index(cond.rhs, sym_to_val)
+    return arith.cmpi(pred, lhs, rhs)
+
+
 def _lower_sympy_to_index(expr, sym_to_val):
     """Lower a SymPy expression to MLIR index-typed arith ops."""
     if isinstance(expr, sp.Integer) or isinstance(expr, int):
@@ -447,6 +472,32 @@ def _lower_sympy_to_index(expr, sym_to_val):
         cmp = arith.cmpi(arith.CmpIPredicate.sle, a, b)
         return arith.select(cmp, a, b)
 
+    # Relational -> arith.cmpi producing i1
+    if isinstance(expr, sp.core.relational.Relational):
+        return _lower_sympy_cond_to_i1(expr, sym_to_val)
+
+    # Piecewise((val1, cond1), (val2, cond2), ..., (valN, True))
+    # -> nested scf.if chains
+    if isinstance(expr, sp.Piecewise):
+        from mlir.dialects import scf as _scf
+        idx_ty = ir.IndexType.get()
+
+        def _recurse(i):
+            val_expr, cond_expr = expr.args[i]
+            then_val = _lower_sympy_to_index(val_expr, sym_to_val)
+            # Last clause is the "else" (cond is True)
+            if i == len(expr.args) - 1:
+                return then_val
+            cond_val = _lower_sympy_cond_to_i1(cond_expr, sym_to_val)
+            ifop = _scf.IfOp(cond_val, [idx_ty], has_else=True)
+            with InsertionPoint(ifop.then_block):
+                _scf.YieldOp([then_val])
+            with InsertionPoint(ifop.else_block):
+                _scf.YieldOp([_recurse(i + 1)])
+            return ifop.results[0]
+
+        return _recurse(0)
+
     raise NotImplementedError(f"Cannot lower SymPy expr to index: {expr}")
 
 
@@ -510,14 +561,16 @@ def emit_layout_from_python(layout, sym_to_val):
             YieldOp(values=[mlir_result])
 
         # Inverse region: block arg = single flat index -> yield N indices
-        inv_block = gen_p_op.inv_body.blocks.append(idx_ty)
-        with InsertionPoint(inv_block):
-            temp_flat = sp.Symbol("_genp_flat", integer=True)
-            local_map = dict(sym_to_val)
-            local_map[temp_flat] = inv_block.arguments[0]
-            sympy_inv = layout.f_inv(temp_flat)
-            inv_results = [_lower_sympy_to_index(r, local_map) for r in sympy_inv]
-            YieldOp(values=inv_results)
+        # (skip if f_inv is not provided — forward-only GenP)
+        if layout.f_inv is not None:
+            inv_block = gen_p_op.inv_body.blocks.append(idx_ty)
+            with InsertionPoint(inv_block):
+                temp_flat = sp.Symbol("_genp_flat", integer=True)
+                local_map = dict(sym_to_val)
+                local_map[temp_flat] = inv_block.arguments[0]
+                sympy_inv = layout.f_inv(temp_flat)
+                inv_results = [_lower_sympy_to_index(r, local_map) for r in sympy_inv]
+                YieldOp(values=inv_results)
 
         return gen_p_op.result
 
@@ -632,6 +685,20 @@ def arith_to_sympy(value, val_to_sym, memo=None):
         # Fallback: Piecewise
         cond = arith_to_sympy(op.operands[0], val_to_sym, memo)
         result = sp.Piecewise((true_val, cond), (false_val, True))
+        memo[value] = result
+        return result
+
+    if op_name == "scf.if":
+        # scf.if has two regions: then and else.
+        # Reconstruct as Piecewise(then_val, cond), (else_val, True)).
+        cond = arith_to_sympy(op.operands[0], val_to_sym, memo)
+        then_block = op.regions[0].blocks[0]
+        else_block = op.regions[1].blocks[0]
+        then_yield = list(then_block)[-1]  # scf.yield
+        else_yield = list(else_block)[-1]
+        then_val = arith_to_sympy(then_yield.operands[0], val_to_sym, memo)
+        else_val = arith_to_sympy(else_yield.operands[0], val_to_sym, memo)
+        result = sp.Piecewise((then_val, cond), (else_val, True))
         memo[value] = result
         return result
 

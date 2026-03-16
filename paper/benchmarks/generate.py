@@ -4,9 +4,21 @@ import sys
 
 # Define base paths relative to this script's directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "../.."))
 TRITON_DIR = os.path.join(SCRIPT_DIR, "triton")
 CUDA_DIR = os.path.join(SCRIPT_DIR, "cuda")
 MLIR_DIR = os.path.join(SCRIPT_DIR, "mlir")
+
+def _lego_env():
+    """Return an env dict with PYTHONPATH set for LEGO imports."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join([
+        os.path.join(REPO_ROOT, "python"),
+        os.path.join(REPO_ROOT, "build", "python_packages", "lego"),
+        os.path.join(REPO_ROOT, "build", "python"),
+        env.get("PYTHONPATH", ""),
+    ])
+    return env
 
 def run_script(script_path, *args):
     """Executes a python script using the current python executable."""
@@ -39,7 +51,7 @@ def generate_cuda():
     os.chdir(CUDA_DIR)
     
     # Generate directly into the paper/generated/cuda folder
-    env = os.environ.copy()
+    env = _lego_env()
     
     with open('../../generated/cuda/nw/needle_kernel.cu', 'w') as f:
         subprocess.run([sys.executable, "nw_sympy.py"], env=env, stdout=f, check=True)

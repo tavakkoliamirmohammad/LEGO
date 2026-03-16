@@ -237,6 +237,25 @@ class TestGenP:
         assert_expr_equal(inv[0], sp.floor(a / 8), "genp_identity_inv[0]")
         assert_expr_equal(inv[1], sp.Mod(a, 8), "genp_identity_inv[1]")
 
+    def test_antidiag_symbolic(self):
+        """Antidiagonal GenP with symbolic n — Needleman-Wunsch layout.
+
+        Verifies the Piecewise roundtrip (SymPy → MLIR scf.if → SymPy)
+        produces a symbolically correct expression matching the Python
+        antidiag reference.
+        """
+        from lego.lego import antidiag
+
+        i, j = syms("i j")
+        n = sp.Symbol("n", integer=True, positive=True)
+
+        L = OrderBy(GenP([n, n], lambda x: antidiag(n, x), None)).TileBy((n, n))
+        result = L[i, j]
+        expected = antidiag(n, (i, j))
+        assert sp.simplify(result - expected) == 0, (
+            f"Symbolic mismatch:\n  got:      {result}\n  expected: {expected}"
+        )
+
 
 # ============================================================================
 # Emit layout tests (unit testing the converter)
