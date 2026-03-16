@@ -179,11 +179,13 @@ jobs:
           )
           SETUP
 
-          PLAT_NAME=""
+          python setup.py bdist_wheel
           if [ "$RUNNER_OS" = "Linux" ]; then
-            PLAT_NAME="--plat-name manylinux_2_35_x86_64"
+            pip install wheel
+            for whl in dist/*.whl; do
+              python -m wheel tags --platform-tag manylinux_2_35_x86_64 --remove "$whl"
+            done
           fi
-          python setup.py bdist_wheel $PLAT_NAME
           ls -lh dist/
 
       - name: Verify wheel installs
