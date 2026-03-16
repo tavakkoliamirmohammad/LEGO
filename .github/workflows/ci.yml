@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     tags: ["v*"]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -76,6 +77,7 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLEGO_MONOLITHIC_LLVM=ON \
             -DLEGO_LLVM_TARGETS="${{ contains(matrix.os, 'macos') && 'AArch64' || 'X86;NVPTX' }}" \
+            -DMLIR_ENABLE_CUDA_RUNNER=OFF \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DLEGO_BUILD_TESTS=ON \
             ${{ runner.os == 'Linux' && '-DLLVM_USE_LINKER=lld' || '' }} \
