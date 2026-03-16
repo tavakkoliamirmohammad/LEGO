@@ -17,6 +17,9 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#ifdef LEGO_HAS_NVPTX
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#endif
 #include "mlir/Transforms/Passes.h"
 
 #include "Lego/LegoDialect.h"
@@ -63,6 +66,9 @@ int main(int argc, char **argv) {
   registry.insert<mlir::lego::LegoDialect, mlir::smt::SMTDialect>();
   // Dialects needed for lego-to-llvm pipeline
   registry.insert<mlir::cf::ControlFlowDialect, mlir::LLVM::LLVMDialect>();
+#ifdef LEGO_HAS_NVPTX
+  registry.insert<mlir::gpu::GPUDialect>();
+#endif
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "LEGO Magic Optimizer Driver", registry));

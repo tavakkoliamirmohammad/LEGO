@@ -12,6 +12,9 @@
 #include "mlir-c/Dialect/Func.h"
 #include "mlir-c/Dialect/SCF.h"
 #include "mlir-c/Dialect/MemRef.h"
+#ifdef LEGO_HAS_NVPTX
+#include "mlir-c/Dialect/GPU.h"
+#endif
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 #include "Lego/CAPI/Dialects.h"
 
@@ -42,6 +45,9 @@ NB_MODULE(_legoDialects, m) {
         registerAndLoad(mlirGetDialectHandle__func__(), ctx);
         registerAndLoad(mlirGetDialectHandle__scf__(), ctx);
         registerAndLoad(mlirGetDialectHandle__memref__(), ctx);
+#ifdef LEGO_HAS_NVPTX
+        registerAndLoad(mlirGetDialectHandle__gpu__(), ctx);
+#endif
       },
       nb::arg("context"),
       "Register and load the LEGO dialect and required standard dialects.");

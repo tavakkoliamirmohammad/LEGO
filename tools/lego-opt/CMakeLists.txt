@@ -14,6 +14,9 @@ set(LIBS
   MLIRMathDialect
   MLIRArithTransforms
 )
+if(LEGO_HAS_NVPTX)
+  list(APPEND LIBS MLIRGPUDialect)
+endif()
 
 add_llvm_executable(lego-opt lego-opt.cpp)
 llvm_update_compile_flags(lego-opt)

@@ -39,6 +39,11 @@ if(TARGET LegoPythonModules)
   list(APPEND LEGO_TEST_DEPENDS LegoPythonModules)
 endif()
 
+# CUDA runner tools (only needed during monolithic build)
+if(LEGO_MONOLITHIC_LLVM AND LEGO_HAS_NVPTX)
+  list(APPEND LEGO_TEST_DEPENDS mlir-opt mlir_cuda_runtime mlir_c_runner_utils mlir-runner)
+endif()
+
 add_lit_testsuite(check-lego "Running the Lego regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS
