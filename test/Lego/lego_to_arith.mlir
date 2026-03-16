@@ -254,12 +254,10 @@ func.func @orderby_simple(%i: index, %j: index) -> index {
 
 // CHECK-LABEL: func.func @orderby_simple_inv
 // CHECK-SAME:  (%[[F:.*]]: index)
-// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
 // CHECK:       %[[R8:.*]] = arith.remui %[[F]], %[[C8]] : index
 // CHECK:       %[[D8:.*]] = arith.divui %[[F]], %[[C8]] : index
-// CHECK:       %[[R4:.*]] = arith.remui %[[D8]], %[[C4]] : index
-// CHECK:       return %[[R4]], %[[R8]] : index, index
+// CHECK:       return %[[D8]], %[[R8]] : index, index
 func.func @orderby_simple_inv(%f: index) -> (index, index) {
   %c4 = arith.constant 4 : index
   %p1 = lego.reg_p perm [0] dims [%c4] : !lego.layout
@@ -364,12 +362,10 @@ func.func @groupby_transpose(%i: index, %j: index) -> index {
 
 // CHECK-LABEL: func.func @groupby_transpose_inv
 // CHECK-SAME:  (%[[F:.*]]: index)
-// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK-DAG:   %[[C32:.*]] = arith.constant 32 : index
-// CHECK:       %[[R32:.*]] = arith.remui %[[F]], %[[C32]] : index
-// CHECK:       %[[D4:.*]] = arith.divui %[[R32]], %[[C4]] : index
-// CHECK:       %[[R4:.*]] = arith.remui %[[R32]], %[[C4]] : index
+// CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
+// CHECK:       %[[D4:.*]] = arith.divui %[[F]], %[[C4]] : index
+// CHECK:       %[[R4:.*]] = arith.remui %[[F]], %[[C4]] : index
 // CHECK:       %[[M8:.*]] = arith.muli %[[R4]], %[[C8]] : index
 // CHECK:       %[[A:.*]] = arith.addi %[[D4]], %[[M8]] : index
 // CHECK:       %[[RI:.*]] = arith.divui %[[A]], %[[C8]] : index
@@ -445,11 +441,13 @@ func.func @tileby_1d_apply(%it: index, %ib: index) -> index {
 // CHECK-LABEL: func.func @tileby_1d_inv
 // CHECK-SAME:  (%[[F:.*]]: index)
 // CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
-// CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK:       arith.remui %[[F]], %[[C64]] : index
-// CHECK:       arith.divui %{{.*}}, %[[C16]] : index
-// CHECK:       arith.remui %{{.*}}, %[[C16]] : index
-// CHECK:       return %{{.*}}, %{{.*}} : index, index
+// CHECK:       %[[D0:.*]] = arith.divui %[[F]], %[[C16]] : index
+// CHECK:       %[[R0:.*]] = arith.remui %[[F]], %[[C16]] : index
+// CHECK:       %[[M:.*]] = arith.muli %[[D0]], %[[C16]] : index
+// CHECK:       %[[A:.*]] = arith.addi %[[R0]], %[[M]] : index
+// CHECK:       %[[D1:.*]] = arith.divui %[[A]], %[[C16]] : index
+// CHECK:       %[[R1:.*]] = arith.remui %[[A]], %[[C16]] : index
+// CHECK:       return %[[D1]], %[[R1]] : index, index
 func.func @tileby_1d_inv(%f: index) -> (index, index) {
   %c64 = arith.constant 64 : index
   %inner = lego.row [%c64] : !lego.layout

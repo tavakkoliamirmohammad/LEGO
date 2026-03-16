@@ -8,6 +8,7 @@
 #include "Lego/Passes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "Lego/LegoUtils.h"
 
@@ -57,18 +58,32 @@ Value flattenIndex(OpBuilder &b, Location loc, ValueRange indices,
 
 SmallVector<Value> unflattenIndex(OpBuilder &b, Location loc, Value flatIndex,
                                   ValueRange dims) {
-  SmallVector<Value> indices;
   int rank = dims.size();
+
+  // Pre-compute strides right-to-left so the multiplication tree matches
+  // flattenIndex exactly.  After CSE the stride SSA values are shared,
+  // enabling SimplifyDivId / Extended-SimplifyDivId to fire.
+  SmallVector<Value> strides(rank);
+  strides[rank - 1] = getConstantIndex(b, loc, 1);
+  for (int k = rank - 2; k >= 0; --k)
+    strides[k] = arith::MulIOp::create(b, loc, strides[k + 1], dims[k + 1]);
+
+  SmallVector<Value> indices;
   Value current = flatIndex;
 
   for (int k = 0; k < rank; ++k) {
-    Value strideVal = getConstantIndex(b, loc, 1);
-    for (int j = k + 1; j < rank; ++j) {
-      strideVal = arith::MulIOp::create(b, loc, strideVal, dims[j]);
+    // When a dim is constant 1, the index is always 0 and the remainder
+    // is unchanged.  This avoids emitting redundant div/rem ops that
+    // would be hard to simplify away for symbolic expressions.
+    APInt dimVal;
+    if (matchPattern(dims[k], m_ConstantInt(&dimVal)) && dimVal == 1) {
+      indices.push_back(getConstantIndex(b, loc, 0));
+      continue;  // current stays the same
     }
-    Value idx = arith::DivUIOp::create(b, loc, current, strideVal);
+
+    Value idx = arith::DivUIOp::create(b, loc, current, strides[k]);
     indices.push_back(idx);
-    current = arith::RemUIOp::create(b, loc, current, strideVal);
+    current = arith::RemUIOp::create(b, loc, current, strides[k]);
   }
   return indices;
 }
@@ -192,8 +207,18 @@ SmallVector<Value> applyInverseOrderBy(OpBuilder &b, Location loc,
     for (auto d : pDims)
       sizeVal = arith::MulIOp::create(b, loc, sizeVal, d);
 
-    Value innerFlat = arith::RemUIOp::create(b, loc, flatIndex, sizeVal);
-    flatIndex = arith::DivUIOp::create(b, loc, flatIndex, sizeVal);
+    Value innerFlat;
+    bool isFirstPerm = (std::next(it) == permsVec.rend());
+    if (isFirstPerm) {
+      // For the first (outermost) perm, flatIndex is already in
+      // [0, sizeVal) because all subsequent perm sizes have been
+      // divided out.  Skipping the remui avoids a redundant modulo
+      // that is hard to simplify away for symbolic dimensions.
+      innerFlat = flatIndex;
+    } else {
+      innerFlat = arith::RemUIOp::create(b, loc, flatIndex, sizeVal);
+      flatIndex = arith::DivUIOp::create(b, loc, flatIndex, sizeVal);
+    }
 
     SmallVector<Value> innerIndices =
         applyInverseLayout(b, loc, perm, innerFlat);
@@ -255,6 +280,133 @@ SmallVector<Value> applyInverseGroupBy(OpBuilder &b, Location loc,
 
 
 // ============================================================================
+// TileBy apply/inv — direct lowering without GroupBy intermediaries
+//
+// Operates per-dimension using flattenIndex / unflattenIndex, then
+// delegates to the inner layout's apply / inv.
+// ============================================================================
+
+/// Collect the k-th dim from each inner perm → [P0.dim[k], P1.dim[k], ...].
+static SmallVector<Value> getPerPermDimsAtK(OrderByOp ob, int k) {
+  SmallVector<Value> dims;
+  for (Value perm : ob.getPerms())
+    dims.push_back(getLayoutInputDims(perm)[k]);
+  return dims;
+}
+
+/// Collect the k-th tile dim from each level → [T[0][k], T[1][k], ...].
+static SmallVector<Value> getTileDimsAtK(ValueRange tileDims, int d,
+                                          int q_tile, int k) {
+  SmallVector<Value> dims;
+  for (int l = 0; l < q_tile; l++)
+    dims.push_back(tileDims[l * d + k]);
+  return dims;
+}
+
+/// Check if TileBy is identity (tile dims match inner perm dims exactly).
+static bool isTileByIdentity(TileByOp op, OrderByOp innerOB,
+                              int d, int q_tile) {
+  if (!innerOB || q_tile != (int)innerOB.getPerms().size())
+    return false;
+  auto tileDims = op.getTileDims();
+  for (int h = 0; h < q_tile; h++) {
+    auto permDims = getLayoutInputDims(innerOB.getPerms()[h]);
+    for (int k = 0; k < d; k++)
+      if (tileDims[h * d + k] != permDims[k])
+        return false;
+  }
+  return true;
+}
+
+Value applyTileBy(OpBuilder &b, Location loc, TileByOp op,
+                  ValueRange indices) {
+  auto tileShape = extractI64Array(op.getTileShape());
+  int64_t d = tileShape[0];
+  int64_t q_tile = tileShape.size();
+  auto tileDims = op.getTileDims();
+  Value inner = op.getInput();
+  auto innerOB = inner.getDefiningOp<OrderByOp>();
+  int q_inner = innerOB ? (int)innerOB.getPerms().size() : 1;
+
+  if (isTileByIdentity(op, innerOB, d, q_tile))
+    return applyLayout(b, loc, inner, indices);
+
+  // Step 1: Per dimension k, combine tile levels via flattenIndex.
+  SmallVector<Value> combined(d);
+  for (int k = 0; k < d; k++) {
+    SmallVector<Value> levelsAtK, dimsAtK = getTileDimsAtK(tileDims, d, q_tile, k);
+    for (int l = 0; l < q_tile; l++)
+      levelsAtK.push_back(indices[l * d + k]);
+    combined[k] = flattenIndex(b, loc, levelsAtK, dimsAtK);
+  }
+
+  // Step 2: If q_inner > 1, decompose each combined[k] into per-perm
+  // sub-indices via unflattenIndex, then reorder to perm-grouped.
+  SmallVector<Value> innerIndices;
+  if (!innerOB || q_inner == 1) {
+    innerIndices.assign(combined.begin(), combined.end());
+  } else {
+    SmallVector<SmallVector<Value>> perPerm(q_inner);
+    for (int k = 0; k < d; k++) {
+      auto sub = unflattenIndex(b, loc, combined[k], getPerPermDimsAtK(innerOB, k));
+      for (int h = 0; h < q_inner; h++)
+        perPerm[h].push_back(sub[h]);
+    }
+    for (int h = 0; h < q_inner; h++)
+      innerIndices.append(perPerm[h].begin(), perPerm[h].end());
+  }
+
+  // Step 3: Apply inner layout.
+  return applyLayout(b, loc, inner, innerIndices);
+}
+
+SmallVector<Value> applyInverseTileBy(OpBuilder &b, Location loc, TileByOp op,
+                                      Value flatIndex) {
+  auto tileShape = extractI64Array(op.getTileShape());
+  int64_t d = tileShape[0];
+  int64_t q_tile = tileShape.size();
+  auto tileDims = op.getTileDims();
+  Value inner = op.getInput();
+  auto innerOB = inner.getDefiningOp<OrderByOp>();
+  int q_inner = innerOB ? (int)innerOB.getPerms().size() : 1;
+
+  if (isTileByIdentity(op, innerOB, d, q_tile))
+    return applyInverseLayout(b, loc, inner, flatIndex);
+
+  // Step 1: Apply inner layout inverse.
+  SmallVector<Value> innerIndices = applyInverseLayout(b, loc, inner, flatIndex);
+  if (innerIndices.empty())
+    return {};
+
+  // Step 2: If q_inner > 1, recombine per-perm sub-indices per dimension
+  // via flattenIndex.
+  SmallVector<Value> combined(d);
+  if (!innerOB || q_inner == 1) {
+    for (int k = 0; k < d; k++)
+      combined[k] = innerIndices[k];
+  } else {
+    for (int k = 0; k < d; k++) {
+      SmallVector<Value> subAtK, dimsAtK = getPerPermDimsAtK(innerOB, k);
+      for (int h = 0; h < q_inner; h++)
+        subAtK.push_back(innerIndices[h * d + k]);
+      combined[k] = flattenIndex(b, loc, subAtK, dimsAtK);
+    }
+  }
+
+  // Step 3: Decompose each combined[k] into tile-level indices
+  // via unflattenIndex.
+  SmallVector<Value> result(d * q_tile);
+  for (int k = 0; k < d; k++) {
+    auto tileAtK = unflattenIndex(b, loc, combined[k],
+                                  getTileDimsAtK(tileDims, d, q_tile, k));
+    for (int l = 0; l < q_tile; l++)
+      result[l * d + k] = tileAtK[l];
+  }
+
+  return result;
+}
+
+// ============================================================================
 // Dispatcher — applyLayout / applyInverseLayout
 // ============================================================================
 
@@ -276,6 +428,9 @@ Value applyLayout(OpBuilder &b, Location loc, Value layout,
   if (auto groupByOp = dyn_cast<GroupByOp>(defOp))
     return applyGroupBy(b, loc, groupByOp, indices);
 
+  if (auto tileByOp = dyn_cast<TileByOp>(defOp))
+    return applyTileBy(b, loc, tileByOp, indices);
+
   return nullptr;
 }
 
@@ -296,6 +451,9 @@ SmallVector<Value> applyInverseLayout(OpBuilder &b, Location loc, Value layout,
 
   if (auto groupByOp = dyn_cast<GroupByOp>(defOp))
     return applyInverseGroupBy(b, loc, groupByOp, flatIndex);
+
+  if (auto tileByOp = dyn_cast<TileByOp>(defOp))
+    return applyInverseTileBy(b, loc, tileByOp, flatIndex);
 
   return {};
 }

@@ -57,7 +57,13 @@ namespace lego {
 /// Populates the standard lego-lower pipeline (LEGO → Arith).
 static void buildLegoLowerPipeline(OpPassManager &pm) {
   pm.addPass(createLegoMaterializeAssumeBoundsPass());
+  // Normalize Row/Col to RegP first so LegoToArith sees uniform ops.
+  pm.addPass(createLegoNormalizationPass(/*skipTileBy=*/true));
+  // Lower TileBy/Apply/ApplyInverse directly to arith.
+  pm.addPass(createLegoToArithPass());
+  // Normalize remaining TileBy→GroupBy for any ops not handled above.
   pm.addPass(createLegoNormalizationPass());
+  // Lower any GroupBy ops produced by normalization.
   pm.addPass(createLegoToArithPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());

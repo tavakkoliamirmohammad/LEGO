@@ -7,10 +7,10 @@
 __host__ __device__ int 
 antiDiagPermLEGO(int n, int i, int j) {
   return ((i + j - n <= -1) ? (
-   i*j + i + ((i*i + i + j*j + j)/(2))
+   i + (((i + j)*(i + j + 1))/(2))
 )
 : (
-   -i*j + 2*i*n + i + 2*j*n - n*n + 2*n - ((i*i + 3*i + j*j + 3*j)/(2)) - 1
+   i + n*n - n - (((i + j - 2*n + 1)*(i + j - 2*n + 2))/(2))
 ));
 }
 

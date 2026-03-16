@@ -309,9 +309,9 @@ def jit(fn=None, **kwargs):
         
         # Print generated source if LEGO_DEBUG is set
         if _debug:
-            print(f"=== LEGO Generated Kernel ({temp_file}) ===")
-            print(new_source)
-            print("=== End Generated Kernel ===")
+            print(f"=== LEGO Generated Kernel ({temp_file}) ===", file=sys.stderr)
+            print(new_source, file=sys.stderr)
+            print("=== End Generated Kernel ===", file=sys.stderr)
         
         if return_source:
             # If the user just wants the generated Triton code, return it as a string

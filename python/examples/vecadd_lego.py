@@ -18,7 +18,7 @@ def vecadd_kernel(x_ptr, y_ptr, z_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     # 1. OrderBy(Row(n_elements)): represents a linear row of elements.
     # 2. TileBy([n_elements / BLOCK_SIZE, BLOCK_SIZE]): tiles the linear row into
     #    'n_elements / BLOCK_SIZE' tiles, each of size 'BLOCK_SIZE'.
-    L = OrderBy(Row(n_elements)).TileBy([n_elements / BLOCK_SIZE, BLOCK_SIZE])
+    L = OrderBy(Row(n_elements)).TileBy([n_elements / BLOCK_SIZE], [BLOCK_SIZE])
 
     # Use the layout to get the memory offsets for the 'pid'-th tile.
     # L[pid, :] selects all elements in the pid-th tile.

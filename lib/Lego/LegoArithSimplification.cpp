@@ -9,180 +9,294 @@ using namespace mlir;
 
 namespace {
 
-// Pattern A1: (q * d + r) % d -> r % d
-struct SimplifyRemId : public OpRewritePattern<arith::RemUIOp> {
-  using OpRewritePattern<arith::RemUIOp>::OpRewritePattern;
+// ============================================================================
+// Shared matchers — extract the common structure from div/rem pattern pairs.
+// ============================================================================
 
+/// Match `addi(muli(q, d), r)` where one mul operand equals `divisor`.
+/// Returns (q, r) on success.  Handles commutativity of both addi and muli.
+static std::optional<std::pair<Value, Value>>
+matchQTimesDPlusR(Value numerator, Value divisor) {
+  auto addOp = numerator.getDefiningOp<arith::AddIOp>();
+  if (!addOp)
+    return std::nullopt;
+
+  Value terms[2] = {addOp.getLhs(), addOp.getRhs()};
+  for (int i = 0; i < 2; ++i) {
+    auto mulOp = terms[i].getDefiningOp<arith::MulIOp>();
+    if (!mulOp)
+      continue;
+    if (mulOp.getLhs() == divisor)
+      return std::make_pair(mulOp.getRhs(), terms[1 - i]);
+    if (mulOp.getRhs() == divisor)
+      return std::make_pair(mulOp.getLhs(), terms[1 - i]);
+  }
+  return std::nullopt;
+}
+
+/// In `addi(muli(q, s), r)` with divisor `muli(k, s)`, find the shared
+/// factor `s` between the numerator term and divisor.
+/// Returns (q, s, k, r) on success.
+struct SharedFactorMatch {
+  Value q, s, k, r;
+};
+
+static std::optional<SharedFactorMatch>
+matchSharedFactor(Value numerator, Value divisor) {
+  auto addOp = numerator.getDefiningOp<arith::AddIOp>();
+  auto divMul = divisor.getDefiningOp<arith::MulIOp>();
+  if (!addOp || !divMul)
+    return std::nullopt;
+
+  Value addTerms[2] = {addOp.getLhs(), addOp.getRhs()};
+  Value dm[2] = {divMul.getLhs(), divMul.getRhs()};
+
+  for (int i = 0; i < 2; ++i) {
+    auto termMul = addTerms[i].getDefiningOp<arith::MulIOp>();
+    if (!termMul)
+      continue;
+
+    Value tm[2] = {termMul.getLhs(), termMul.getRhs()};
+    for (int a = 0; a < 2; ++a)
+      for (int b = 0; b < 2; ++b)
+        if (tm[a] == dm[b] && tm[a] != divisor) {
+          Value q = tm[1 - a], s = tm[a], k = dm[1 - b];
+          // Guard: don't fire if q is already remui(_, k) (prevents loops).
+          if (auto rem = q.getDefiningOp<arith::RemUIOp>())
+            if (rem.getRhs() == k)
+              continue;
+          return SharedFactorMatch{q, s, k, addTerms[1 - i]};
+        }
+  }
+  return std::nullopt;
+}
+
+/// Match the mixed-radix structure:
+///   numerator = addi(muli(remui(a, n), m), remui(b, m))
+///   divisor   = muli(n, m)
+/// Returns true on match (the sum is provably < divisor).
+static bool matchMixedRadixBound(Value numerator, Value divisor) {
+  auto divMul = divisor.getDefiningOp<arith::MulIOp>();
+  auto addOp = numerator.getDefiningOp<arith::AddIOp>();
+  if (!divMul || !addOp)
+    return false;
+
+  Value nc[2] = {divMul.getLhs(), divMul.getRhs()};
+  Value at[2] = {addOp.getLhs(), addOp.getRhs()};
+
+  for (int d = 0; d < 2; ++d) {
+    Value n = nc[d], m = nc[1 - d];
+    for (int t = 0; t < 2; ++t) {
+      auto hiMul = at[t].getDefiningOp<arith::MulIOp>();
+      if (!hiMul)
+        continue;
+      Value mo[2] = {hiMul.getLhs(), hiMul.getRhs()};
+      for (int mi = 0; mi < 2; ++mi) {
+        if (mo[mi] != m)
+          continue;
+        auto remA = mo[1 - mi].getDefiningOp<arith::RemUIOp>();
+        if (!remA || remA.getRhs() != n)
+          continue;
+        auto remB = at[1 - t].getDefiningOp<arith::RemUIOp>();
+        if (!remB || remB.getRhs() != m)
+          continue;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// ============================================================================
+// Patterns — thin wrappers over the shared matchers.
+// ============================================================================
+
+// (q * d + r) % d  →  r % d
+struct SimplifyRemId : public OpRewritePattern<arith::RemUIOp> {
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(arith::RemUIOp op,
                                 PatternRewriter &rewriter) const override {
-    Value numerator = op.getLhs();
-    Value divisor = op.getRhs();
-
-    // Match numerator = addi(..., ...)
-    auto addOp = numerator.getDefiningOp<arith::AddIOp>();
-    if (!addOp)
-      return failure();
-
-    Value terms[2] = {addOp.getLhs(), addOp.getRhs()};
-
-    // Check if either term is (q * d)
-    for (int i = 0; i < 2; ++i) {
-      if (auto mulOp = terms[i].getDefiningOp<arith::MulIOp>()) {
-        Value mulLhs = mulOp.getLhs();
-        Value mulRhs = mulOp.getRhs();
-
-        // Check if mul operand matches divisor
-        if (mulLhs == divisor || mulRhs == divisor) {
-          // Found (q * d + r). Rewrite to r % d.
-          Value r = terms[1 - i];
-          rewriter.replaceOpWithNewOp<arith::RemUIOp>(op, r, divisor);
-          return success();
-        }
-      }
+    if (auto m = matchQTimesDPlusR(op.getLhs(), op.getRhs())) {
+      rewriter.replaceOpWithNewOp<arith::RemUIOp>(op, m->second, op.getRhs());
+      return success();
     }
-
     return failure();
   }
 };
 
-// Pattern A2: (q * d + r) / d -> q + (r / d)
-// Since we are in unsigned arithmetic, if r < d, (r/d) -> 0, result -> q.
+// (q * d + r) / d  →  q + r / d
 struct SimplifyDivId : public OpRewritePattern<arith::DivUIOp> {
-  using OpRewritePattern<arith::DivUIOp>::OpRewritePattern;
-
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(arith::DivUIOp op,
                                 PatternRewriter &rewriter) const override {
-    Value numerator = op.getLhs();
-    Value divisor = op.getRhs();
-
-    // Match numerator = addi(..., ...)
-    auto addOp = numerator.getDefiningOp<arith::AddIOp>();
-    if (!addOp)
-      return failure();
-
-    Value terms[2] = {addOp.getLhs(), addOp.getRhs()};
-
-    for (int i = 0; i < 2; ++i) {
-      Value term = terms[i];
-      Value other = terms[1 - i];
-
-      if (auto mulOp = term.getDefiningOp<arith::MulIOp>()) {
-        Value mulLhs = mulOp.getLhs();
-        Value mulRhs = mulOp.getRhs();
-
-        if (mulLhs == divisor || mulRhs == divisor) {
-          // Found (q * d + r) / d
-          Value q = (mulLhs == divisor) ? mulRhs : mulLhs;
-          
-          // Result = q + (r / d)
-          // We let subsequent canonicalizations handle (r / d) -> 0 if simplification is possible.
-          Value rDivD = arith::DivUIOp::create(rewriter, op.getLoc(), other, divisor);
-          rewriter.replaceOpWithNewOp<arith::AddIOp>(op, q, rDivD);
-          return success();
-        }
-      }
+    if (auto m = matchQTimesDPlusR(op.getLhs(), op.getRhs())) {
+      auto [q, r] = *m;
+      Value rDivD = arith::DivUIOp::create(rewriter, op.getLoc(), r, op.getRhs());
+      rewriter.replaceOpWithNewOp<arith::AddIOp>(op, q, rDivD);
+      return success();
     }
     return failure();
   }
 };
 
-// Pattern A6: (x + c) / d -> x/d + c/d  (if c % d == 0)
+// (x + c) / d  →  x/d + c/d   when c % d == 0
 struct SimplifyDivConst : public OpRewritePattern<arith::DivUIOp> {
-  using OpRewritePattern<arith::DivUIOp>::OpRewritePattern;
-
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(arith::DivUIOp op,
                                 PatternRewriter &rewriter) const override {
-    Value numerator = op.getLhs();
-    Value divisor = op.getRhs();
-
-    // Match divisor being a constant
     APInt dVal;
-    if (!matchPattern(divisor, m_ConstantInt(&dVal)) || dVal.isZero())
+    if (!matchPattern(op.getRhs(), m_ConstantInt(&dVal)) || dVal.isZero())
       return failure();
-
-    // Match numerator = addi(x, c)
-    auto addOp = numerator.getDefiningOp<arith::AddIOp>();
+    auto addOp = op.getLhs().getDefiningOp<arith::AddIOp>();
     if (!addOp)
       return failure();
 
     Value x;
     APInt cVal;
-    
-
-    // Check commutativity: x + c or c + x
-    if (matchPattern(addOp.getRhs(), m_ConstantInt(&cVal))) {
+    if (matchPattern(addOp.getRhs(), m_ConstantInt(&cVal)))
       x = addOp.getLhs();
-    } else if (matchPattern(addOp.getLhs(), m_ConstantInt(&cVal))) {
+    else if (matchPattern(addOp.getLhs(), m_ConstantInt(&cVal)))
       x = addOp.getRhs();
-    } else {
+    else
       return failure();
-    }
-
-    // Check if c is a multiple of d
     if (cVal.urem(dVal) != 0)
       return failure();
 
-    // Rewrite to (x / d) + (c / d)
-    Value newDiv = arith::DivUIOp::create(rewriter, op.getLoc(), x, divisor);
-    Value newConst = arith::ConstantOp::create(rewriter, op.getLoc(), rewriter.getIndexAttr(cVal.udiv(dVal).getZExtValue()));
-    
+    Value newDiv = arith::DivUIOp::create(rewriter, op.getLoc(), x, op.getRhs());
+    Value newConst = arith::ConstantOp::create(
+        rewriter, op.getLoc(),
+        rewriter.getIndexAttr(cVal.udiv(dVal).getZExtValue()));
     rewriter.replaceOpWithNewOp<arith::AddIOp>(op, newDiv, newConst);
     return success();
   }
 };
 
-// Pattern B/C: (x / d) * d + (x % d) -> x
+// (x / d) * d + (x % d)  →  x
 struct ReconstructId : public OpRewritePattern<arith::AddIOp> {
-  using OpRewritePattern<arith::AddIOp>::OpRewritePattern;
-
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(arith::AddIOp op,
                                 PatternRewriter &rewriter) const override {
-    Value lhs = op.getLhs();
-    Value rhs = op.getRhs();
-
-    // We look for addi( mul(div(x, d), d), rem(x, d) )
-    // Order doesn't matter.
-
-    auto checkMatch = [&](Value maybeMul, Value maybeRem) -> Value {
+    auto check = [](Value maybeMul, Value maybeRem) -> Value {
       auto mulOp = maybeMul.getDefiningOp<arith::MulIOp>();
       auto remOp = maybeRem.getDefiningOp<arith::RemUIOp>();
       if (!mulOp || !remOp)
         return nullptr;
-
-      Value x = remOp.getLhs();
-      Value d = remOp.getRhs();
-
-      // Check mul = div(x, d) * d
-      Value mulLhs = mulOp.getLhs();
-      Value mulRhs = mulOp.getRhs();
-
-      auto checkDiv = [&](Value val, Value other) {
+      Value x = remOp.getLhs(), d = remOp.getRhs();
+      auto tryDiv = [&](Value v, Value other) -> bool {
         if (other != d) return false;
-        if (auto divOp = val.getDefiningOp<arith::DivUIOp>()) {
-           return divOp.getLhs() == x && divOp.getRhs() == d;
-        }
-        return false;
+        auto div = v.getDefiningOp<arith::DivUIOp>();
+        return div && div.getLhs() == x && div.getRhs() == d;
       };
-
-      if (checkDiv(mulLhs, mulRhs) || checkDiv(mulRhs, mulLhs)) {
+      if (tryDiv(mulOp.getLhs(), mulOp.getRhs()) ||
+          tryDiv(mulOp.getRhs(), mulOp.getLhs()))
         return x;
-      }
       return nullptr;
     };
-
-    if (Value res = checkMatch(lhs, rhs)) {
-      rewriter.replaceOp(op, res);
-      return success();
+    if (Value r = check(op.getLhs(), op.getRhs())) {
+      rewriter.replaceOp(op, r); return success();
     }
-    if (Value res = checkMatch(rhs, lhs)) {
-       rewriter.replaceOp(op, res);
-       return success();
+    if (Value r = check(op.getRhs(), op.getLhs())) {
+      rewriter.replaceOp(op, r); return success();
     }
-
     return failure();
   }
 };
 
+// (x % d) / d  →  0
+struct SimplifyDivOfRem : public OpRewritePattern<arith::DivUIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::DivUIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto rem = op.getLhs().getDefiningOp<arith::RemUIOp>();
+    if (!rem || rem.getRhs() != op.getRhs())
+      return failure();
+    rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(op, 0);
+    return success();
+  }
+};
+
+// (x % d) % d  →  x % d
+struct SimplifyRemOfRem : public OpRewritePattern<arith::RemUIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::RemUIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto inner = op.getLhs().getDefiningOp<arith::RemUIOp>();
+    if (!inner || inner.getRhs() != op.getRhs())
+      return failure();
+    rewriter.replaceOp(op, op.getLhs());
+    return success();
+  }
+};
+
+// ---- Extended: shared-factor decomposition (div/rem pair) -----------------
+//
+//  (q*s + r) / (k*s)  →  q/k + ((q%k)*s + r) / (k*s)
+//  (q*s + r) % (k*s)  →  ((q%k)*s + r) % (k*s)
+
+static Value buildLowPart(PatternRewriter &rewriter, Location loc,
+                           const SharedFactorMatch &m, Value divisor) {
+  Value qRemK = arith::RemUIOp::create(rewriter, loc, m.q, m.k);
+  Value low = arith::MulIOp::create(rewriter, loc, qRemK, m.s);
+  return arith::AddIOp::create(rewriter, loc, low, m.r);
+}
+
+struct ExtendedSimplifyDivId : public OpRewritePattern<arith::DivUIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::DivUIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto m = matchSharedFactor(op.getLhs(), op.getRhs());
+    if (!m) return failure();
+    Location loc = op.getLoc();
+    Value qDivK = arith::DivUIOp::create(rewriter, loc, m->q, m->k);
+    Value lowDiv = arith::DivUIOp::create(
+        rewriter, loc, buildLowPart(rewriter, loc, *m, op.getRhs()), op.getRhs());
+    rewriter.replaceOpWithNewOp<arith::AddIOp>(op, qDivK, lowDiv);
+    return success();
+  }
+};
+
+struct ExtendedSimplifyRemId : public OpRewritePattern<arith::RemUIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::RemUIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto m = matchSharedFactor(op.getLhs(), op.getRhs());
+    if (!m) return failure();
+    rewriter.replaceOpWithNewOp<arith::RemUIOp>(
+        op, buildLowPart(rewriter, op.getLoc(), *m, op.getRhs()), op.getRhs());
+    return success();
+  }
+};
+
+// ---- Mixed-radix bound (div/rem pair) ------------------------------------
+//
+//  divui(remui(a,n)*m + remui(b,m), n*m)  →  0
+//  remui(remui(a,n)*m + remui(b,m), n*m)  →  remui(a,n)*m + remui(b,m)
+
+struct SimplifyMixedRadixDiv : public OpRewritePattern<arith::DivUIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::DivUIOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!matchMixedRadixBound(op.getLhs(), op.getRhs()))
+      return failure();
+    rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(op, 0);
+    return success();
+  }
+};
+
+struct SimplifyMixedRadixRem : public OpRewritePattern<arith::RemUIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::RemUIOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!matchMixedRadixBound(op.getLhs(), op.getRhs()))
+      return failure();
+    rewriter.replaceOp(op, op.getLhs());
+    return success();
+  }
+};
+
+// ============================================================================
+// Pass
+// ============================================================================
 
 struct LegoArithSimplificationPass
     : public mlir::lego::impl::LegoArithSimplificationPassBase<
@@ -190,7 +304,10 @@ struct LegoArithSimplificationPass
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<SimplifyRemId, SimplifyDivId, SimplifyDivConst,
-                 ReconstructId>(&getContext());
+                 ReconstructId, SimplifyDivOfRem, SimplifyRemOfRem,
+                 ExtendedSimplifyDivId, ExtendedSimplifyRemId,
+                 SimplifyMixedRadixDiv, SimplifyMixedRadixRem>(
+                     &getContext());
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();

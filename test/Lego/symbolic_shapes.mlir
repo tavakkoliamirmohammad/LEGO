@@ -55,14 +55,14 @@ func.func @gen_p_symbolic(%i: index, %j: index, %d0: index, %d1: index) -> index
 }
 
 // CHECK-LABEL: func.func @tile_by_symbolic
-// CHECK-SAME:  (%[[TI:.*]]: index, %[[TJ:.*]]: index, %[[TD0:.*]]: index, %[[TD1:.*]]: index, %[[TT0:.*]]: index, %[[TT1:.*]]: index)
-// CHECK:       %[[TMUL:.*]] = arith.muli %[[TI]], %[[TT1]] : index
+// CHECK-SAME:  (%[[TI:.*]]: index, %[[TJ:.*]]: index, %[[TD0:.*]]: index, %[[TD1:.*]]: index)
+// CHECK:       %[[TMUL:.*]] = arith.muli %[[TI]], %[[TD1]] : index
 // CHECK:       %[[TRES:.*]] = arith.addi %[[TJ]], %[[TMUL]] : index
 // CHECK:       return %[[TRES]] : index
-func.func @tile_by_symbolic(%i: index, %j: index, %d0: index, %d1: index, %t0: index, %t1: index) -> index {
+func.func @tile_by_symbolic(%i: index, %j: index, %d0: index, %d1: index) -> index {
   %r = lego.row [%d0, %d1] : !lego.layout
   %ob = lego.order_by(%r) : !lego.layout
-  %tb = lego.tile_by %ob tile_dims [[%t0, %t1]] : !lego.layout
+  %tb = lego.tile_by %ob tile_dims [[%d0, %d1]] : !lego.layout
   %f = lego.apply %tb(%i, %j) : !lego.layout
   return %f : index
 }
