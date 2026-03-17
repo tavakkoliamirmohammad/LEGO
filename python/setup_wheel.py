@@ -18,7 +18,7 @@ for top in ("mlir", "lego"):
 
 setup(
     name="lego-layout",
-    version="0.1.3",
+    version="0.1.4",
     description="LEGO: Layout Expression Language for Code Generation",
     python_requires=">=3.12",
     install_requires=["sympy", "numpy"],

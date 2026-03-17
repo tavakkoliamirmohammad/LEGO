@@ -268,6 +268,36 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     USES_TERMINAL
   )
 
+  # --- Triton GPU example tests (require NVPTX + GPU) ---
+  if(LEGO_HAS_NVPTX)
+    set(_triton_examples
+      vecadd_lego.py
+      matmul_lego.py
+      softmax_lego.py
+      layernorm_lego.py
+      grouped_gemm_lego.py
+    )
+    foreach(_example ${_triton_examples})
+      string(REPLACE ".py" "" _name ${_example})
+      add_custom_target(check-triton-${_name}
+        COMMAND ${CMAKE_COMMAND} -E env
+          "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/python/examples/triton/${_example}"
+        DEPENDS LegoPythonModules
+        COMMENT "Running Triton example: ${_example}"
+        USES_TERMINAL
+      )
+    endforeach()
+
+    add_custom_target(check-triton-examples
+      COMMENT "Running all Triton GPU examples"
+    )
+    foreach(_example ${_triton_examples})
+      string(REPLACE ".py" "" _name ${_example})
+      add_dependencies(check-triton-examples check-triton-${_name})
+    endforeach()
+  endif()
+
   # --- Wheel build + verification target ---
   add_custom_target(check-lego-wheel
     COMMAND ${CMAKE_COMMAND} -E env
@@ -297,4 +327,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   add_dependencies(check-lego-all check-lego-imports)
   add_dependencies(check-lego-all check-lego-wheel)
+  if(LEGO_HAS_NVPTX)
+    add_dependencies(check-lego-all check-triton-examples)
+  endif()
 endif()
