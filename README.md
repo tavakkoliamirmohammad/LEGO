@@ -1,211 +1,170 @@
+# LEGO: Layout Expression Language for Code Generation
 
-# LEGO: A Layout Expression Language for Code Generation of Hierarchical Mapping
+[![CI](https://github.com/tavakkoliamirmohammad/lego/actions/workflows/ci.yml/badge.svg)](https://github.com/tavakkoliamirmohammad/lego/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/lego-layout)](https://pypi.org/project/lego-layout/)
+[![Python](https://img.shields.io/pypi/pyversions/lego-layout)](https://pypi.org/project/lego-layout/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENCE.md)
 
-This repository contains the source code of the **LEGO** framework and the scripts used to execute and evaluate all benchmarks in the paper. LEGO provides an algebraic, compiler-agnostic framework for specifying and transforming memory layouts. Through integrations with Triton, CUDA, and MLIR, we compare LEGO-generated kernels with existing implementations and demonstrate that careful data layout reorganization can achieve state-of-the-art performance or significantly improve performance.
+LEGO is an algebraic, compiler-agnostic framework for specifying and transforming memory layouts. It provides composable layout primitives that lower through a custom MLIR dialect to generate optimized code for CPU and GPU targets.
 
-## Publication
-LEGO is based on the following research work:
+[[LEGO: A Layout Expression Language for Code Generation of Hierarchical Mapping]](https://users.cs.utah.edu/~tavak/assets/pdf/LEGO-CGO26.pdf) [[CGO 2026 Artifact]](https://zenodo.org/records/17633994)
 
-> **LEGO: A Layout Expression Language for Code Generation of Hierarchical Mapping**  
-> Amir Mohammad Tavakkoli, Cosmin Oancea, and Mary Hall.  
-> https://arxiv.org/pdf/2505.08091
-> 
-## Repository
+## Project Structure
 
-- **URL:** https://github.com/tavakkoliamirmohammad/lego
-- **Paper** https://arxiv.org/pdf/2505.08091
+```
+LEGO/
+├── python/                  # Python package (lego-layout)
+│   ├── lego/
+│   │   ├── core.py          # Layout primitives (Row, Col, RegP, GenP, OrderBy, GroupBy, TileByLayout)
+│   │   ├── backend/         # MLIR compilation, JIT, SymPy lowering, PyTorch autograd
+│   │   └── frontends/       # User-facing APIs (Triton @jit, NumPy/PyTorch tensor transforms)
+│   ├── examples/            # Usage examples (triton, python_mlir, symbolic)
+│   └── tests/               # Python tests
+│
+├── include/Lego/           # MLIR dialect headers (ODS definitions, passes)
+├── lib/Lego/               # MLIR dialect implementation (lowering, verification, simplification)
+├── tools/lego-opt/         # MLIR optimizer CLI
+├── test/                   # MLIR lit tests
+│
+├── paper/                  # Paper benchmarks and evaluation scripts
+├── docs/                   # Architecture and dialect documentation
+├── scripts/                # Setup scripts
+└── CMakeLists.txt          # Build system (monolithic and decoupled modes)
+```
 
+## Architecture
 
+All frontends lower through a unified MLIR-based backend:
 
-## Main Contributions
+```
+ ┌─────────────┐ ┌────────────┐ ┌───────────┐
+ │ Triton @jit │ │ Tensor API │ │ Symbolic  │
+ └──────┬──────┘ └─────┬──────┘ └─────┬─────┘
+        │              │              │
+        └──────────────┼──────────────┘
+                       │
+                       v
+        ┌──────────────────────────┐
+        │       lego dialect       │
+        │  ······················  │
+        │  normalization           │
+        │  simplification          │
+        │  verification            │
+        │  lowering                │
+        └────────────┬─────────────┘
+                     │
+                     v
+        ┌──────────────────────────┐
+        │        LLVM / MLIR       │
+        │  ······················  │
+        │  X86 │ AArch64 │ NVPTX  │
+        └──────────────────────────┘
+```
 
-- **C1:** A general, simple, and easy-to-use abstraction for bijective layouts, expressing both computation and data.
-- **C2:** A fully reproducible implementation of the abstraction.
-- **C3:** Demonstration of efficient lowering to MLIR, Triton, and CUDA backends.
-- **C4:** An evaluation showing performance competitive with state-of-the-art implementations.
+### Frontends
+
+- **Triton JIT** (`lego.jit`) -- `@jit` decorator that transforms Triton GPU kernels via AST rewriting ([example](python/examples/triton/hello_world.py))
+- **Tensor API** (`lego.frontends.python_mlir`) -- JIT-compiled layout transforms for NumPy and PyTorch tensors ([example](python/examples/python_mlir/hello_world.py))
+- **Symbolic** (`lego.core`) -- SymPy-based algebraic layout expressions ([example](python/examples/symbolic/hello_world.py))
+
+### MLIR Backend
+
+The `lego` MLIR dialect defines layout operations (`gen_p`, `reg_p`, `row`, `col`, `order_by`, `group_by`, `tile_by`, `apply`, `apply_inverse`) with types `!lego.layout` and `!lego.view<T>`. The dialect includes passes for:
+
+- **Normalization** -- desugar `row`/`col`/`tile_by` to primitive `reg_p`/`order_by`/`group_by`
+- **Lowering** -- `lego` ops to `arith`/`scf`/`affine`
+- **Simplification** -- optimize `divui`/`remui` patterns
+- **Verification** -- bijectivity, GPU bank conflicts, memory coalescing
 
 ## Requirements
 
-### Hardware
-
-- **GPU:** NVIDIA Ampere A100 80GB
-- **Disk space:** ~40 GB free space recommended
-
-### Software
-
-| Package       | Version             | URL                                                        |
-|--------------|---------------------|------------------------------------------------------------|
-| LLVM/MLIR    | commit `48c8c45`    | https://github.com/llvm/llvm-project/commit/48c8c45       |
-| Python       | 3.12.4              | https://www.python.org/                                   |
-| Triton       | 3.2.0               | https://github.com/triton-lang/triton                     |
-| PyTorch      | 2.5.1               | https://pytorch.org/                                      |
-| CUDA Toolkit | 12.4                | https://developer.nvidia.com/cuda-toolkit-archive         |
-| LEGO artifact| latest              | https://github.com/tavakkoliamirmohammad/lego             |
+| Dependency | Version          | Notes                         |
+|-----------|------------------|-------------------------------|
+| Python    | >= 3.12          | Tested with 3.12, 3.13, 3.14 |
+| LLVM/MLIR | commit `a3d8e35` | Included as a submodule       |
+| CMake     | >= 3.20          |                               |
+| Ninja     |                  | Recommended build generator   |
+| NumPy     | 2.1.2            |                               |
+| SymPy     | 1.14.0           |                               |
 
 ## Installation
 
-### 1. Clone the LEGO repository
+### Quick install (Python package only)
+
+```bash
+pip install lego-layout
+```
+
+This installs the core layout algebra and frontends. The MLIR dialect native extensions are included in the wheel when available.
+
+### Development install
+
+#### 1. Clone and set up the environment
 
 ```bash
 git clone https://github.com/tavakkoliamirmohammad/lego.git
 cd lego
-````
-
-### 2. Clone LLVM and check out the required commit
-
-```bash
-git clone https://github.com/llvm/llvm-project.git
-cd llvm-project
-git checkout 48c8c45
-```
-
-### 3. Build and install LLVM/MLIR
-
-From inside `llvm-project`:
-
-```bash
-mkdir build && cd build
-cmake -G Ninja ../llvm \
-   -DCMAKE_BUILD_TYPE=Release \
-   -DLLVM_ENABLE_PROJECTS="mlir" \
-   -DLLVM_TARGETS_TO_BUILD="X86;NVPTX" \
-   -DLLVM_INCLUDE_EXAMPLES=OFF \
-   -DLLVM_INCLUDE_BENCHMARKS=OFF \
-   -DLLVM_ENABLE_BINDINGS=OFF \
-   -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
-   -DPython3_EXECUTABLE="$(which python)"
-ninja
-```
-
-> [!NOTE]
-> The default LLVM targets are `X86` (CPU) and `NVPTX` (NVIDIA GPU). To build for different architectures, change `-DLLVM_TARGETS_TO_BUILD` (e.g. `"AArch64;AMDGPU"`).
-
-Then set the build folder environment variable (still inside `build`):
-
-```bash
-export MLIR_BUILD_FOLDER="$(pwd)"
-```
-
-Return to the LEGO repository root:
-
-```bash
-cd /path/to/lego
-```
-
-### 4. Create the virtual environment and install Python packages
-
-From the root of the LEGO repository:
-
-```bash
 ./scripts/setup.sh
-```
-
-This script creates a virtual environment and installs all required Python packages (including Triton and PyTorch) using the versions listed above.
-
-### 5. Build and install the LEGO compiler
-
-Activate the virtual environment and install the LEGO Python package in editable mode:
-
-```bash
 source venv/bin/activate
 pip install -e ./python
 ```
 
-### 6. Build the LEGO MLIR dialect
+#### 2. Build the MLIR dialect
 
-The LEGO build system supports two modes. Both modes automatically detect and use fast linkers (`mold` or `lld`) and `ccache` for optimal performance.
-
-#### Option A: Monolithic Build (Recommended for first setup)
-This mode builds a minimal LLVM/MLIR (only the `mlir` project, CPU/GPU targets, with Python bindings and tests enabled, no examples/benchmarks/docs) along with LEGO. The first build includes LLVM/MLIR compilation, but subsequent rebuilds are incremental.
+**Monolithic build** (builds LLVM/MLIR + LEGO together):
 
 ```bash
-cmake -S <project_root> -B <build_dir> -DLEGO_MONOLITHIC_LLVM=ON
-cmake --build <build_dir> -j$(nproc) --target check-lego
+cmake -S . -B build -DLEGO_MONOLITHIC_LLVM=ON
+cmake --build build -j$(nproc) --target check-lego
 ```
 
-To customize which LLVM backend targets are built, pass `-DLEGO_LLVM_TARGETS` (defaults to `"X86;NVPTX"`):
+**Decoupled build** (uses a prebuilt MLIR for fast iteration):
 
 ```bash
-cmake -S <project_root> -B <build_dir> -DLEGO_MONOLITHIC_LLVM=ON -DLEGO_LLVM_TARGETS="X86;NVPTX;AArch64"
+cmake -S . -B build -DMLIR_DIR=<mlir_build>/lib/cmake/mlir -DLEGO_MONOLITHIC_LLVM=OFF
+cmake --build build -j$(nproc) --target check-lego
 ```
 
-#### Option B: Decoupled Build (Recommended for fast developer iteration)
-Once MLIR is built (either via Option A or separately), you can rebuild only the LEGO dialect in seconds by pointing to the existing build's CMake directory.
+The build system automatically detects and uses fast linkers (`mold`/`lld`) and `ccache`.
+
+To customize LLVM targets (default `X86;NVPTX`):
 
 ```bash
-# If building LLVM separately: MLIR_DIR is llvm-project/build/lib/cmake/mlir
-
-cmake -S <project_root> -B <build_dir> -DMLIR_DIR=<build_dir>/lib/cmake/mlir -DLEGO_MONOLITHIC_LLVM=OFF
-cmake --build <build_dir> -j$(nproc) --target check-lego
+cmake -S . -B build -DLEGO_MONOLITHIC_LLVM=ON -DLEGO_LLVM_TARGETS="X86;NVPTX;AArch64"
 ```
 
-> [!TIP]
-> **Switching between modes**: To switch from Monolithic to Decoupled, simply re-run the `cmake` command with the `-DMLIR_DIR` flag and a different build directory (or clear the current build directory first). The build system will automatically prioritize `MLIR_DIR` if provided.
+## Testing
 
-## Adding New MLIR Dialects
+```bash
+# MLIR lit tests
+cmake --build build --target check-lego
 
-To use a new MLIR dialect (e.g., `Linalg`, `Affine`, `GPU`):
+# Python tests
+cmake --build build --target check-lego-python
 
-1.  **Link the Dialect Library**: Add the library name (usually `MLIR<Name>Dialect`) to the `LINK_LIBS` section.
+# All tests
+cmake --build build --target check-lego-all
+```
 
-2.  **Add Includes/Passes**: If you need transformations or headers, add the corresponding library (e.g., `MLIRLinalgTransforms`).
+## Citation
 
-3.  **Run Monolithic Build Once**: If the dialect was not part of your previous build, its library (e.g., `libMLIRLinalgDialect.a`) will be missing from your build folder. You must run a **Monolithic Build** once to compile the new dependency:
-    ```bash
-    cmake -S <project_root> -B <build_dir> -DLEGO_MONOLITHIC_LLVM=ON
-    cmake --build <build_dir> -j$(nproc) --target check-lego
-    ```
+If you use LEGO in your research, please cite:
 
-4.  **Resume Decoupled Build**: Once the library is compiled, you can switch back to the faster Decoupled mode.
+> Amir Mohammad Tavakkoli, Cosmin E. Oancea, and Mary Hall. "LEGO: A Layout Expression Language for Code Generation of Hierarchical Mapping." In *2026 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)*, pp. 228-241, 2026.
 
-## Experiment Workflow
+```bibtex
+@INPROCEEDINGS{tavakkoli2026lego,
+  author={Tavakkoli, Amir Mohammad and Oancea, Cosmin E. and Hall, Mary},
+  booktitle={2026 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)},
+  title={LEGO: A Layout Expression Language for Code Generation of Hierarchical Mapping},
+  year={2026},
+  pages={228-241},
+  keywords={Codes;Algebra;Shape;Instruction sets;Layout;Graphics processing units;Organizations;Optimization;Indexing;Python;data layout;MLIR compiler;domain-specific optimization tools},
+  doi={10.1109/CGO68049.2026.11394846}}
+```
 
-From the root of the artifact repository, the experiments can be reproduced with the following steps:
-
-1. **Generate all kernel source code**
-
-   ```bash
-   ./paper/benchmarks/gen_all_kernel.sh
-   ```
-
-   This script generates all required kernel source files (Triton, CUDA, and MLIR) used in the evaluation.
-
-2. **Run all benchmarks and produce figures and tables**
-
-   ```bash
-   ./paper/benchmarks/run_all_kernels.sh
-   ```
-
-   This script runs all benchmarks and generates the figures and tables reported in the paper.
-
-## Evaluation and Expected Results
-
-* Running `run_all_kernels.sh` will execute all benchmarks and produce the evaluation outputs.
-* The generated figures corresponding to the evaluation section will be located in the `./paper/figures` folder in the root of the artifact directory.
-* Approximate time requirements:
-  * **Workflow preparation (installation, builds, environment):** ~2 hours
-  * **Experiment execution:** ~1.5 hours
+The paper artifact is available at: https://zenodo.org/records/17633994
 
 ## License
 
-The MIT License (MIT)
-
-Copyright (c) 2025 Amir Mohammad Tavakkoli
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
+MIT License. See [LICENCE.md](LICENCE.md).

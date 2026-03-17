@@ -6,8 +6,15 @@ build-backend = "setuptools.build_meta"
 name = "lego-layout"
 version = "0.1.4"
 description = "LEGO: Layout Expression Language for Code Generation"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["sympy", "numpy"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: MIT License",
+]
 
 [tool.setuptools.packages.find]
 include = ["mlir", "mlir.*", "lego", "lego.*"]
