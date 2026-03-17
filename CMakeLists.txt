@@ -233,16 +233,14 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       LegoPythonCAPI
     MLIR_BINDINGS_PYTHON_NB_DOMAIN lego)
 
-  # Copy the generated _lego_ops_gen.py into the source tree so that
-  # ``from lego.dialects.lego_dialect import RowOp, ...`` works at runtime.
-  # The source-tree lego/dialects/ already has an _ods_common.py shim that
-  # re-exports from mlir.dialects._ods_common.
+  # Copy generated _lego_ops_gen.py into source tree for dev imports.
+  # This file is .gitignored and not tracked in version control.
   add_custom_command(
     TARGET LegoPythonModules POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${CMAKE_BINARY_DIR}/lego/backend/dialects/_lego_ops_gen.py"
       "${CMAKE_SOURCE_DIR}/python/lego/backend/dialects/_lego_ops_gen.py"
-    COMMENT "Copying _lego_ops_gen.py to source tree for lego.backend.dialects import")
+    COMMENT "Copying _lego_ops_gen.py to source tree")
 
   # --- Wheel preparation target ---
   set(LEGO_WHEEL_DIR "${CMAKE_BINARY_DIR}/python_packages/lego")
