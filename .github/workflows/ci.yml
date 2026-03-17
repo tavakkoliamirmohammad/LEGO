@@ -151,6 +151,7 @@ jobs:
         run: |
           pip install wheel setuptools
           cd build/python_packages/lego
+          rm -rf dist build
           PLAT_NAME=""
           if [ "$RUNNER_OS" = "Linux" ]; then
             PLAT_NAME="--plat-name manylinux_2_35_x86_64"
@@ -160,7 +161,7 @@ jobs:
 
       - name: Verify wheel installs
         run: |
-          pip install build/python_packages/lego/dist/*.whl
+          pip install --no-index --find-links build/python_packages/lego/dist lego-layout
           python python/check_imports.py
 
       - name: Upload wheel
