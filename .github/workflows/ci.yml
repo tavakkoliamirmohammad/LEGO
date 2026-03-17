@@ -149,19 +149,22 @@ jobs:
 
       - name: Build wheel
         run: |
-          pip install wheel setuptools
+          pip install wheel setuptools build
           cd build/python_packages/lego
           rm -rf dist build
-          PLAT_NAME=""
+          pip wheel . --no-deps --use-pep517 -w dist
           if [ "$RUNNER_OS" = "Linux" ]; then
-            PLAT_NAME="--plat-name manylinux_2_35_x86_64"
+            pip install auditwheel
+            for whl in dist/*.whl; do
+              auditwheel repair "$whl" --plat manylinux_2_35_x86_64 -w dist/
+              rm "$whl"
+            done
           fi
-          python setup.py bdist_wheel $PLAT_NAME
           ls -lh dist/
 
       - name: Verify wheel installs
         run: |
-          pip install --no-index --find-links build/python_packages/lego/dist lego-layout
+          pip install --find-links build/python_packages/lego/dist lego-layout
           python python/check_imports.py
 
       - name: Upload wheel

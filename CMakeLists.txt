@@ -252,6 +252,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     COMMAND ${CMAKE_COMMAND} -E copy_directory
       "${CMAKE_SOURCE_DIR}/python/lego" "${LEGO_WHEEL_DIR}/lego"
     COMMAND ${CMAKE_COMMAND} -E copy
+      "${CMAKE_SOURCE_DIR}/python/pyproject_wheel.toml" "${LEGO_WHEEL_DIR}/pyproject.toml"
+    COMMAND ${CMAKE_COMMAND} -E copy
       "${CMAKE_SOURCE_DIR}/python/setup_wheel.py" "${LEGO_WHEEL_DIR}/setup.py"
     COMMENT "Preparing wheel directory"
   )
