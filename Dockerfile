@@ -3,7 +3,7 @@
 # ────────────────
 FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
 
-ARG LLVM_COMMIT=556ec4a7261447d13703816cd3730a891441e52c
+ARG LLVM_COMMIT=7477045d3d836e8e98fcbdea27bf46e2f3e5e0f3
 ARG PYTHON_VERSION=3.12
 
 # Install build deps
