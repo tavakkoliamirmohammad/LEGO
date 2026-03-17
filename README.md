@@ -7,7 +7,7 @@
 
 LEGO is an algebraic, compiler-agnostic framework for specifying and transforming memory layouts. It provides composable layout primitives that lower through a custom MLIR dialect to generate optimized code for CPU and GPU targets.
 
-[[Paper]](https://users.cs.utah.edu/~tavak/assets/pdf/LEGO-CGO26.pdf) [[Artifact]](https://zenodo.org/records/17633994)
+[[LEGO: A Layout Expression Language for Code Generation of Hierarchical Mapping]](https://users.cs.utah.edu/~tavak/assets/pdf/LEGO-CGO26.pdf) [[CGO 2026 Artifact]](https://zenodo.org/records/17633994)
 
 ## Project Structure
 
