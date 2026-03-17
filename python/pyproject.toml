@@ -1,24 +1,13 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lego"
-version = "0.1.0"
-description = "LEGO: A Layout Expression Language for Code Generation of Hierarchical Mapping"
-authors = [
-    { name = "Amir Mohammad Tavakkoli" }
-]
-requires-python = ">=3.8"
-dependencies = [
-    "sympy"
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest"
-]
+name = "lego-layout"
+version = "0.1.4"
+description = "LEGO: Layout Expression Language for Code Generation"
+requires-python = ">=3.12"
+dependencies = ["sympy", "numpy"]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["lego*"]
+include = ["mlir", "mlir.*", "lego", "lego.*"]

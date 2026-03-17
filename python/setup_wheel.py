@@ -1,7 +1,8 @@
-"""Wheel build script for LEGO.
+"""Dynamic setup config for wheel builds.
 
-Used by CI to create wheels from the build tree.
-Expects to be run from build/python_packages/lego/.
+pyproject.toml handles metadata. This file only provides:
+- package_data discovery (shared libs under mlir/ and lego/)
+- has_ext_modules (forces platform-tagged wheel)
 """
 import os
 from setuptools import setup, find_namespace_packages
@@ -17,11 +18,6 @@ for top in ("mlir", "lego"):
             package_data[pkg] = data
 
 setup(
-    name="lego-layout",
-    version="0.1.4",
-    description="LEGO: Layout Expression Language for Code Generation",
-    python_requires=">=3.12",
-    install_requires=["sympy", "numpy"],
     packages=packages,
     package_data=package_data,
     has_ext_modules=lambda: True,
