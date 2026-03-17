@@ -173,9 +173,10 @@ class TestIRBuilderIntegration:
 
     def test_ir_builder_produces_valid_mlir(self):
         """Test that IRBuilder generates valid MLIR text."""
-        from lego.backend.compiler import IRBuilder, RowDesc, OrderByDesc, GroupByDesc
+        from lego.backend.compiler import IRBuilder
+        from lego.core import Row, OrderBy, GroupBy
 
-        layout = GroupByDesc((4, 8), [OrderByDesc([RowDesc((4, 8))])])
+        layout = GroupBy([(4, 8)], [OrderBy(Row(4, 8))])
         builder = IRBuilder(layout, (4, 8), "f32")
         ctx, module = builder.build_module()
         with ctx:
@@ -189,9 +190,10 @@ class TestIRBuilderIntegration:
 
     def test_ir_builder_col_major(self):
         """Test IRBuilder with column-major layout."""
-        from lego.backend.compiler import IRBuilder, ColDesc, OrderByDesc, GroupByDesc
+        from lego.backend.compiler import IRBuilder
+        from lego.core import Col, OrderBy, GroupBy
 
-        layout = GroupByDesc((4, 8), [OrderByDesc([ColDesc((4, 8))])])
+        layout = GroupBy([(4, 8)], [OrderBy(Col(4, 8))])
         builder = IRBuilder(layout, (4, 8), "f32")
         ctx, module = builder.build_module()
         with ctx:

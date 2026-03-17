@@ -7,5 +7,5 @@ from lego.backend.compiler import LayoutCompiler
 from lego.backend.dialects.lego_dialect import register
 print("[check-lego-imports] Testing frontend imports...")
 from lego.frontends.python_mlir import Tiled
-from lego.frontends.symbolic import le_constraint, divisibility_constraint
+from lego.core import le_constraint, divisibility_constraint
 print("[check-lego-imports] All imports OK")

@@ -1,20 +1,23 @@
 """
-LEGO Layout Compiler
+LEGO Layout Compiler & MLIR Codegen
 
-Builds LEGO MLIR IR programmatically using the MLIR Python bindings, then
-JIT-compiles via the lego-to-llvm pipeline for efficient tensor transforms.
-
-Uses mlir.execution_engine.ExecutionEngine for JIT (no custom C++ wrapper).
+- IRBuilder: constructs LEGO dialect IR from layout objects
+- LayoutCompiler: JIT-compiles via lego-to-llvm pipeline
+- MLIRPrinter / MLIRTensor: GPU kernel codegen helpers
+- mlir_apply, mlir_load, mlir_store, mlir_loop: pure-MLIR layout ops
 """
 
 import ctypes
+import functools
 import numpy as np
+from enum import Enum
 
 from mlir.ir import (
     Context, Location, Module, InsertionPoint,
     IndexType, MemRefType, FunctionType, IntegerAttr, StringAttr,
-    IntegerType, F32Type, F64Type, UnitAttr,
+    IntegerType, F32Type, F64Type, UnitAttr, Type,
 )
+from mlir import ir
 from mlir.dialects import func as func_dialect
 from mlir.dialects import arith as arith_dialect
 from mlir.dialects import scf as scf_dialect
@@ -23,126 +26,43 @@ from mlir.passmanager import PassManager
 from mlir.execution_engine import ExecutionEngine
 from mlir.runtime import get_ranked_memref_descriptor
 from lego.backend.dialects.lego_dialect import register as register_lego
-
-
-# ============================================================================
-# Lightweight layout descriptors (no SymPy dependency)
-# ============================================================================
-
-class RegPDesc:
-    """Regular permutation: dims + permutation vector."""
-
-    def __init__(self, dims, perm):
-        self.dims = tuple(int(d) for d in dims)
-        self.perm = [int(p) for p in perm]
-
-
-class RowDesc:
-    """Mirrors lego.row [dims] : !lego.layout"""
-
-    def __init__(self, dims):
-        self.dims = tuple(int(d) for d in dims)
-
-
-class ColDesc:
-    """Mirrors lego.col [dims] : !lego.layout"""
-
-    def __init__(self, dims):
-        self.dims = tuple(int(d) for d in dims)
-
-
-class OrderByDesc:
-    """Sequence of permutation blocks."""
-
-    def __init__(self, perms):
-        self.perms = list(perms)
-
-    @property
-    def dims(self):
-        result = []
-        for p in self.perms:
-            result.extend(p.dims)
-        return tuple(result)
-
-    def tile_by(self, *tile_groups):
-        """Chain into a TileByDesc."""
-        return TileByDesc(self, list(tile_groups))
-
-
-class GroupByDesc:
-    """Grouped layout: outer dims + inner layout objects."""
-
-    def __init__(self, dims, objects):
-        self.dims = tuple(int(d) for d in dims)
-        self.objects = list(objects)
-
-
-class TileByDesc:
-    """Mirrors lego.tile_by %input tile_dims [[g0], [g1], ...] : !lego.layout"""
-
-    def __init__(self, input_layout, tile_groups):
-        self.input = input_layout
-        self.tile_groups = [tuple(int(x) for x in g) for g in tile_groups]
-
-    @property
-    def d(self):
-        return len(self.tile_groups[0])
-
-    @property
-    def q(self):
-        return len(self.tile_groups)
-
-    @property
-    def dims(self):
-        """Flattened tile dims — matches getLayoutInputDims(TileByOp)."""
-        return tuple(x for g in self.tile_groups for x in g)
-
-    @property
-    def tile_shape(self):
-        """[d, d, ..., d] (q times) — the tile_shape I64ArrayAttr."""
-        return [self.d] * self.q
-
-
-class GenPDesc:
-    """Mirrors lego.gen_p [dims] apply { ... } inv { ... } : !lego.layout
-
-    apply_builder: callable(block_args: list[Value]) -> Value  (single flat index)
-    inv_builder:   callable(block_arg: Value) -> list[Value]   (N-D indices)
-    """
-
-    def __init__(self, dims, apply_builder, inv_builder):
-        self.dims = tuple(int(d) for d in dims)
-        self.apply_builder = apply_builder
-        self.inv_builder = inv_builder
-
-
-_LAYOUT_DESC_TYPES = (
-    RegPDesc, RowDesc, ColDesc, OrderByDesc, GroupByDesc, TileByDesc, GenPDesc,
+from lego.core import (
+    LayoutBlock, Row, Col, RegP, OrderBy, GroupBy, TileByLayout, GenP, product,
+)
+from lego.backend._ops import (
+    _index_const, _emit_reg_p, _emit_row, _emit_col, _emit_order_by,
+    _emit_group_by, _emit_tile_by, _emit_gen_p,
+    _emit_apply, _emit_apply_inverse,
+    _emit_cast_view, _emit_load, _emit_store,
 )
 
+try:
+    from mlir.dialects import gpu
+except ImportError:
+    gpu = None
+try:
+    import mlir.extras.types as T
+except ImportError:
+    T = None
 
+
+# ============================================================================
+# Dtype mapping
+# ============================================================================
 
 def _dtype_to_mlir(dtype):
     """Map numpy/torch dtype to MLIR element type string."""
     dtype_map = {
-        np.float32: "f32",
-        np.float64: "f64",
-        np.int32: "i32",
-        np.int64: "i64",
-        np.int16: "i16",
-        np.int8: "i8",
+        np.float32: "f32", np.float64: "f64",
+        np.int32: "i32", np.int64: "i64", np.int16: "i16", np.int8: "i8",
     }
     try:
         import torch
         dtype_map.update({
-            torch.float32: "f32",
-            torch.float64: "f64",
-            torch.float16: "f16",
-            torch.bfloat16: "bf16",
-            torch.int32: "i32",
-            torch.int64: "i64",
-            torch.int16: "i16",
-            torch.int8: "i8",
+            torch.float32: "f32", torch.float64: "f64",
+            torch.float16: "f16", torch.bfloat16: "bf16",
+            torch.int32: "i32", torch.int64: "i64",
+            torch.int16: "i16", torch.int8: "i8",
         })
     except ImportError:
         pass
@@ -154,7 +74,6 @@ def _dtype_to_mlir(dtype):
 
 
 def _get_mlir_element_type(ctx, dtype_str):
-    """Get MLIR Type for a dtype string within the given context."""
     type_map = {
         "f32": lambda: F32Type.get(ctx),
         "f64": lambda: F64Type.get(ctx),
@@ -166,35 +85,56 @@ def _get_mlir_element_type(ctx, dtype_str):
     return type_map.get(dtype_str, type_map["f32"])()
 
 
-_MLIR_DTYPE_TO_CTYPE = {
-    "f32": ctypes.c_float,
-    "f64": ctypes.c_double,
-    "i32": ctypes.c_int32,
-    "i64": ctypes.c_int64,
-    "i16": ctypes.c_int16,
-    "i8": ctypes.c_int8,
-}
+# ============================================================================
+# IR Builder — emits LEGO dialect IR from core layout objects
+# ============================================================================
+
+def _get_layout_dims(layout):
+    """Get dims as tuple of ints from a layout object."""
+    dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
+    return tuple(int(d) for d in dims)
 
 
-# ============================================================================
-# MLIR IR Builder — constructs LEGO ops using Python bindings
-# ============================================================================
+def _emit_layout(layout, dim_vals):
+    """Emit LEGO dialect ops for a core layout object. Returns layout SSA value."""
+    if isinstance(layout, Row):
+        return _emit_row(dim_vals)
+    if isinstance(layout, Col):
+        return _emit_col(dim_vals)
+    if isinstance(layout, RegP):
+        return _emit_reg_p(layout._perm_vector, dim_vals)
+    if isinstance(layout, OrderBy):
+        offset, perm_vals = 0, []
+        for perm in layout.perms:
+            count = len(perm.dims() if callable(getattr(perm, 'dims', None)) else perm._dims)
+            perm_vals.append(_emit_layout(perm, dim_vals[offset:offset + count]))
+            offset += count
+        return _emit_order_by(perm_vals)
+    if isinstance(layout, TileByLayout):
+        all_perm_vals = []
+        for orderby in layout._input_chain:
+            for p in orderby.perms:
+                all_perm_vals.append(_emit_layout(p, [_index_const(int(d)) for d in p.dims()]))
+        input_val = _emit_order_by(all_perm_vals)
+        tile_dim_vals = [_index_const(int(d)) for g in layout._tile_groups for d in g]
+        return _emit_tile_by(input_val, tile_dim_vals, layout.tile_shape)
+    if isinstance(layout, GroupBy):
+        obj_vals = []
+        for obj in layout.objects:
+            obj_dims = [_index_const(int(d)) for d in obj.dims()]
+            obj_vals.append(_emit_layout(obj, obj_dims))
+        return _emit_group_by(dim_vals, obj_vals)
+    if isinstance(layout, GenP):
+        return _emit_gen_p(dim_vals, len(layout._dims),
+                           layout.f_apply, layout.f_inv)
+    raise TypeError(f"Unsupported: {type(layout).__name__}")
+
 
 class IRBuilder:
-    """Builds MLIR IR for LEGO layout transforms using the Python bindings.
+    """Builds a complete MLIR module with @transform / @inverse_transform."""
 
-    Constructs a complete module with @transform and @inverse_transform
-    functions that use LEGO dialect ops (reg_p, row, col, order_by, group_by,
-    tile_by, gen_p, apply, apply_inverse) and standard dialects.
-    """
-
-    def __init__(self, layout_desc, shape, dtype_str="f32"):
-        if not isinstance(layout_desc, _LAYOUT_DESC_TYPES):
-            raise TypeError(
-                f"Expected a layout descriptor, got {type(layout_desc).__name__}. "
-                f"Use RegPDesc, RowDesc, ColDesc, OrderByDesc, GroupByDesc, TileByDesc, or GenPDesc."
-            )
-        self._layout = layout_desc
+    def __init__(self, layout, shape, dtype_str="f32"):
+        self._layout = layout
         self._shape = shape
         self._dtype_str = dtype_str
         self._total = 1
@@ -202,43 +142,19 @@ class IRBuilder:
             self._total *= int(s)
 
     def build_module(self):
-        """Build and return (context, module) tuple.
-
-        The context must be kept alive while the module is in use.
-        """
         ctx = Context()
         register_lego(ctx)
-
         with ctx, Location.unknown():
             module = Module.create()
             idx_ty = IndexType.get()
             elem_ty = _get_mlir_element_type(ctx, self._dtype_str)
             memref_ty = MemRefType.get([self._total], elem_ty)
-
-            # Build @transform
-            self._build_function(
-                module, "transform", idx_ty, memref_ty, forward=True
-            )
-            # Build @inverse_transform
-            self._build_function(
-                module, "inverse_transform", idx_ty, memref_ty, forward=False
-            )
-
+            self._build_function(module, "transform", idx_ty, memref_ty, forward=True)
+            self._build_function(module, "inverse_transform", idx_ty, memref_ty, forward=False)
         return ctx, module
 
-    def _make_identity_layout(self, layout_dims, dim_vals, idx_ty):
-        """Auto-generate row-major identity layout matching the descriptor's dims."""
-        identity_perm = list(range(len(layout_dims)))
-        identity_reg_p = _emit_reg_p(identity_perm, dim_vals)
-        identity_layout = _emit_order_by([identity_reg_p])
-        return _emit_group_by(dim_vals, [identity_layout])
-
     def _build_function(self, module, name, idx_ty, memref_ty, forward):
-        """Build a single transform function inside the module."""
-        func_ty = FunctionType.get(
-            [memref_ty, memref_ty, idx_ty], []
-        )
-
+        func_ty = FunctionType.get([memref_ty, memref_ty, idx_ty], [])
         with InsertionPoint(module.body):
             f = func_dialect.FuncOp(name, func_ty)
             f.sym_visibility = StringAttr.get("public")
@@ -248,298 +164,308 @@ class IRBuilder:
         src, dst, n = entry.arguments
 
         with InsertionPoint(entry):
-            # Use the layout's own dims for linearization/delinearization
-            layout_dims = self._layout.dims
-            print(layout_dims)
-
+            layout_dims = _get_layout_dims(self._layout)
             dim_vals = [_index_const(s) for s in layout_dims]
+            rank = len(layout_dims)
 
-            # Build the identity (row-major) layout for delinearization
-            identity_group = self._make_identity_layout(layout_dims, dim_vals, idx_ty)
+            identity_perm = list(range(rank))
+            identity = _emit_group_by(dim_vals, [_emit_order_by([_emit_reg_p(identity_perm, dim_vals)])])
+            layout_val = _emit_layout(self._layout, dim_vals)
 
-            # Build the custom layout
-            layout_val = self._emit_layout(self._layout, dim_vals, idx_ty)
-
-            # Loop: scf.for %i = 0 to %n step 1
-            c0 = _index_const(0)
-            c1 = _index_const(1)
-
-            loop = scf_dialect.ForOp(c0, n, c1)
+            loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1))
             with InsertionPoint(loop.body):
                 iv = loop.induction_variable
-
-                rank = len(layout_dims)
                 if forward:
-                    # Forward: view src as custom layout → row-major dst
-                    # Delinearize iv with custom (src layout) → multi-D coords
-                    # Relinearize coords with identity (dst layout) → 1D dst index
                     val = memref_dialect.LoadOp(src, [iv])
                     indices = _emit_apply_inverse(layout_val, iv, rank)
-                    new_idx = _emit_apply(identity_group, indices)
-                    memref_dialect.StoreOp(val.result, dst, [new_idx])
+                    memref_dialect.StoreOp(val.result, dst, [_emit_apply(identity, indices)])
                 else:
-                    # Inverse: row-major src → encode into custom layout dst
-                    # Delinearize iv with identity (src layout) → multi-D coords
-                    # Relinearize coords with custom (dst layout) → 1D dst index
                     val = memref_dialect.LoadOp(src, [iv])
-                    indices = _emit_apply_inverse(identity_group, iv, rank)
-                    new_idx = _emit_apply(layout_val, indices)
-                    memref_dialect.StoreOp(val.result, dst, [new_idx])
-
+                    indices = _emit_apply_inverse(identity, iv, rank)
+                    memref_dialect.StoreOp(val.result, dst, [_emit_apply(layout_val, indices)])
                 scf_dialect.YieldOp([])
-
             func_dialect.ReturnOp([])
 
-    def _emit_layout(self, block, dim_vals, idx_ty):
-        """Emit LEGO dialect ops for a layout descriptor. Returns the layout SSA value."""
-        if isinstance(block, RegPDesc):
-            return _emit_reg_p(block.perm, dim_vals)
-        elif isinstance(block, RowDesc):
-            return _emit_row(dim_vals)
-        elif isinstance(block, ColDesc):
-            return _emit_col(dim_vals)
-        elif isinstance(block, OrderByDesc):
-            return self._emit_order_by(block, dim_vals, idx_ty)
-        elif isinstance(block, GroupByDesc):
-            return self._emit_group_by(block, dim_vals, idx_ty)
-        elif isinstance(block, TileByDesc):
-            return self._emit_tile_by(block, idx_ty)
-        elif isinstance(block, GenPDesc):
-            return _emit_gen_p(dim_vals, len(block.dims),
-                               block.apply_builder, block.inv_builder, idx_ty)
-        else:
-            raise TypeError(f"Unsupported layout block type: {type(block).__name__}")
-
-    def _emit_order_by(self, order_by, dim_vals, idx_ty):
-        """Emit lego.order_by with its sub-permutation blocks."""
-        offset = 0
-        perm_vals = []
-        for perm in order_by.perms:
-            count = len(perm.dims)
-            sub_dims = dim_vals[offset:offset + count]
-            offset += count
-            perm_val = self._emit_layout(perm, sub_dims, idx_ty)
-            perm_vals.append(perm_val)
-
-        return _emit_order_by(perm_vals)
-
-    def _emit_group_by(self, group_by, dim_vals, idx_ty):
-        """Emit lego.group_by with its object layouts."""
-        obj_vals = []
-        for obj in group_by.objects:
-            obj_dim_vals = [_index_const(d) for d in obj.dims]
-            obj_val = self._emit_layout(obj, obj_dim_vals, idx_ty)
-            obj_vals.append(obj_val)
-
-        return _emit_group_by(dim_vals, obj_vals)
-
-    def _emit_tile_by(self, tile_by, idx_ty):
-        """Emit lego.tile_by with its input layout and tile dimensions."""
-        # Emit input layout (e.g. OrderByDesc) with its own dims
-        input_dim_vals = [_index_const(d) for d in tile_by.input.dims]
-        input_val = self._emit_layout(tile_by.input, input_dim_vals, idx_ty)
-
-        # Emit tile dim constants
-        tile_dim_vals = [_index_const(d) for d in tile_by.dims]
-        return _emit_tile_by(input_val, tile_dim_vals, tile_by.tile_shape)
-
 
 # ============================================================================
-# Op emission helpers using auto-generated LEGO dialect Python bindings
-# ============================================================================
-
-def _lego_layout_type():
-    """Get the !lego.layout type from the current context."""
-    from mlir.ir import Type
-    return Type.parse("!lego.layout")
-
-
-def _index_const(val):
-    """Emit an arith.constant with an index value. Returns the SSA result."""
-    idx_ty = IndexType.get()
-    return arith_dialect.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(val))).result
-
-
-def _emit_reg_p(perm, dim_vals):
-    """Emit a lego.reg_p op. Returns the layout SSA value."""
-    from lego.backend.dialects.lego_dialect import RegPOp
-    layout_ty = _lego_layout_type()
-    return RegPOp(result=layout_ty, perm=perm, dims=dim_vals).result
-
-
-def _emit_row(dim_vals):
-    """Emit a lego.row op. Returns the layout SSA value."""
-    from lego.backend.dialects.lego_dialect import RowOp
-    layout_ty = _lego_layout_type()
-    return RowOp(result=layout_ty, dims=dim_vals).result
-
-
-def _emit_col(dim_vals):
-    """Emit a lego.col op. Returns the layout SSA value."""
-    from lego.backend.dialects.lego_dialect import ColOp
-    layout_ty = _lego_layout_type()
-    return ColOp(result=layout_ty, dims=dim_vals).result
-
-
-def _emit_order_by(perm_vals):
-    """Emit a lego.order_by op. Returns the layout SSA value."""
-    from lego.backend.dialects.lego_dialect import OrderByOp
-    layout_ty = _lego_layout_type()
-    return OrderByOp(result=layout_ty, perms=perm_vals).result
-
-
-def _emit_group_by(dim_vals, obj_vals):
-    """Emit a lego.group_by op. Returns the layout SSA value."""
-    from lego.backend.dialects.lego_dialect import GroupByOp
-    layout_ty = _lego_layout_type()
-    return GroupByOp(result=layout_ty, group_dims=dim_vals, objects=obj_vals).result
-
-
-def _emit_tile_by(input_val, tile_dim_vals, tile_shape):
-    """Emit a lego.tile_by op. Returns the layout SSA value."""
-    from lego.backend.dialects.lego_dialect import TileByOp
-    layout_ty = _lego_layout_type()
-    return TileByOp(result=layout_ty, input=input_val,
-                    tile_dims=tile_dim_vals, tile_shape=tile_shape).result
-
-
-def _emit_gen_p(dim_vals, rank, apply_builder, inv_builder, idx_ty):
-    """Emit a lego.gen_p op with apply and inverse regions."""
-    from lego.backend.dialects.lego_dialect import GenPOp, YieldOp
-    layout_ty = _lego_layout_type()
-    gen_p_op = GenPOp(result=layout_ty, dims=dim_vals)
-
-    # Apply region: block args = N indices → yield single flat index
-    apply_block = gen_p_op.body.blocks.append(*([idx_ty] * rank))
-    with InsertionPoint(apply_block):
-        flat_result = apply_builder(list(apply_block.arguments))
-        YieldOp(values=[flat_result])
-
-    # Inverse region: block arg = single flat index → yield N indices
-    inv_block = gen_p_op.inv_body.blocks.append(idx_ty)
-    with InsertionPoint(inv_block):
-        index_results = inv_builder(inv_block.arguments[0])
-        YieldOp(values=list(index_results))
-
-    return gen_p_op.result
-
-
-def _emit_apply(layout_val, indices):
-    """Emit a lego.apply op. Returns the flat index Value."""
-    from lego.backend.dialects.lego_dialect import ApplyOp
-    idx_ty = IndexType.get()
-    return ApplyOp(flat_index=idx_ty, layout=layout_val, indices=list(indices)).result
-
-
-def _emit_apply_inverse(layout_val, flat_index, rank):
-    """Emit a lego.apply_inverse op. Returns list of index Values."""
-    from lego.backend.dialects.lego_dialect import ApplyInverseOp
-    idx_ty = IndexType.get()
-    op = ApplyInverseOp(indices=[idx_ty] * rank, layout=layout_val,
-                        flat_index=flat_index)
-    return list(op.results)
-
-
-# ============================================================================
-# Compiler classes
+# JIT Compiler
 # ============================================================================
 
 def get_compiler(layout, shape, dtype="f32"):
-    """Get a LayoutCompiler for the given layout and shape."""
-    if isinstance(dtype, str):
-        d = dtype
-    else:
-        d = _dtype_to_mlir(dtype)
+    d = _dtype_to_mlir(dtype) if not isinstance(dtype, str) else dtype
     return LayoutCompiler(layout, shape, d)
 
 
 class LayoutCompiler:
-    """Compiles a LEGO layout into a JIT-executable module.
-
-    Uses MLIR Python bindings to construct IR programmatically, then
-    JIT-compiles via the lego-to-llvm pipeline using mlir.execution_engine.
-    """
+    """Compiles a layout into a JIT-executable module."""
 
     def __init__(self, layout, shape, dtype="f32"):
-        if isinstance(layout, _LAYOUT_DESC_TYPES):
-            self._layout = layout
-        else:
-            raise TypeError(
-                f"Expected a layout descriptor, got {type(layout).__name__}. "
-                f"Use RegPDesc, RowDesc, ColDesc, OrderByDesc, GroupByDesc, TileByDesc, or GenPDesc."
-            )
+        self._layout = layout
         self._shape = tuple(int(s) for s in shape)
-        if isinstance(dtype, str):
-            self._dtype = dtype
-        else:
-            self._dtype = _dtype_to_mlir(dtype)
+        self._dtype = _dtype_to_mlir(dtype) if not isinstance(dtype, str) else dtype
         self._ctx = None
         self._engine = None
         self._mlir_text = None
 
     @property
     def mlir_text(self):
-        """Return the generated MLIR module text (before lowering)."""
         if self._mlir_text is None:
-            builder = IRBuilder(self._layout, self._shape, self._dtype)
-            _, module = builder.build_module()
+            _, module = IRBuilder(self._layout, self._shape, self._dtype).build_module()
             self._mlir_text = str(module)
         return self._mlir_text
 
     def compile(self):
-        """JIT-compile the layout and return the ExecutionEngine."""
         if self._engine is None:
-            builder = IRBuilder(self._layout, self._shape, self._dtype)
-            self._ctx, module = builder.build_module()
-
-            # Store pre-lowering text for debugging
+            self._ctx, module = IRBuilder(self._layout, self._shape, self._dtype).build_module()
             if self._mlir_text is None:
                 self._mlir_text = str(module)
-
-            # Run the lego-to-llvm pipeline
             with self._ctx:
                 pm = PassManager.parse("builtin.module(lego-to-llvm)")
                 pm.run(module.operation)
-
-                # JIT compile the LLVM-dialect module
                 self._engine = ExecutionEngine(module, opt_level=2)
-
         return self._engine
 
-    def transform_numpy(self, arr):
-        """Apply the layout transformation to a NumPy array."""
+    def _invoke(self, func_name, arr):
         engine = self.compile()
         total = 1
         for s in self._shape:
             total *= s
-
         src = np.ascontiguousarray(arr, dtype=arr.dtype).ravel()
         dst = np.empty_like(src)
-
-        src_ptr = ctypes.pointer(ctypes.pointer(
-            get_ranked_memref_descriptor(src)))
-        dst_ptr = ctypes.pointer(ctypes.pointer(
-            get_ranked_memref_descriptor(dst)))
-        n = (ctypes.c_int64 * 1)(total)
-
-        engine.invoke("transform", src_ptr, dst_ptr, n)
+        src_ptr = ctypes.pointer(ctypes.pointer(get_ranked_memref_descriptor(src)))
+        dst_ptr = ctypes.pointer(ctypes.pointer(get_ranked_memref_descriptor(dst)))
+        engine.invoke(func_name, src_ptr, dst_ptr, (ctypes.c_int64 * 1)(total))
         return dst.reshape(arr.shape)
+
+    def transform_numpy(self, arr):
+        return self._invoke("transform", arr)
 
     def inverse_transform_numpy(self, arr):
-        """Apply the inverse layout transformation to a NumPy array."""
-        engine = self.compile()
-        total = 1
-        for s in self._shape:
-            total *= s
+        return self._invoke("inverse_transform", arr)
 
-        src = np.ascontiguousarray(arr, dtype=arr.dtype).ravel()
-        dst = np.empty_like(src)
 
-        src_ptr = ctypes.pointer(ctypes.pointer(
-            get_ranked_memref_descriptor(src)))
-        dst_ptr = ctypes.pointer(ctypes.pointer(
-            get_ranked_memref_descriptor(dst)))
-        n = (ctypes.c_int64 * 1)(total)
+# ============================================================================
+# GPU codegen helpers (pure MLIR, no SymPy)
+# ============================================================================
 
-        engine.invoke("inverse_transform", src_ptr, dst_ptr, n)
-        return dst.reshape(arr.shape)
+class MemorySpace(Enum):
+    HOST_MEMORY = 0
+    GLOBAL_MEMORY = 1
+    SHARED_MEMORY = 3
+    PRIVATE_MEMORY = 5
+
+
+class MLIRPrinter:
+    """MLIR code generation helper for GPU kernels."""
+
+    def __init__(self, ctx=Context()):
+        self.ctx = ctx
+        self.ctx.allow_unregistered_dialects = True
+        try:
+            from lego.backend.dialects.lego_dialect import register as _reg
+            _reg(self.ctx)
+        except Exception:
+            pass
+
+    def generate_mlir(self, schedule=None):
+        def decorator_body(body):
+            @functools.wraps(body)
+            def wrapper():
+                with self.ctx, Location.unknown():
+                    module = Module.create()
+                    with InsertionPoint(module.body):
+                        @func_dialect.FuncOp.from_py_func()
+                        def main():
+                            return body()
+                    if schedule:
+                        print(Module.parse(schedule))
+                    print(module)
+            return wrapper()
+        return decorator_body
+
+    @staticmethod
+    def insert_barrier():
+        gpu.barrier()
+
+    @staticmethod
+    def get_token_type():
+        return ir.Type.parse("!gpu.async.token")
+
+    @staticmethod
+    def generate_gpu_kernel(ins, outs, gridSize, blockSize,
+                            workgroup_memory=[], private_memory=[]):
+        def decorator_body(body):
+            @functools.wraps(body)
+            def wrapper():
+                token = gpu.wait([])
+                for t in set(ins + outs):
+                    token = t.gpu_allocate(token)
+                    t.host_allocate()
+                for t in ins:
+                    t.fill_host()
+                    token = t.copy_to_device(token)
+                gpu.wait([token])
+
+                launch_op = gpu.LaunchOp(
+                    list(map(arith_dialect.ConstantOp.create_index, gridSize)),
+                    list(map(arith_dialect.ConstantOp.create_index, blockSize)),
+                    async_dependencies=[])
+                launch_op.attributes["workgroup_attributions"] = IntegerAttr.get(
+                    T.i64(), len(workgroup_memory))
+
+                block = launch_op.body.blocks[0]
+                for w in workgroup_memory:
+                    block.add_argument(w.get_memref_type_address_space(3), Location.unknown())
+                for p in private_memory:
+                    block.add_argument(p.get_memref_type_address_space(5), Location.unknown())
+
+                with InsertionPoint(block):
+                    for t in set(ins + outs):
+                        t.set_memory_space(MemorySpace.GLOBAL_MEMORY)
+                        memref_dialect.assume_alignment(t.gpu_alloc_ref, 128)
+                    for idx in range(len(workgroup_memory)):
+                        workgroup_memory[idx].shared_memory_ref = block.arguments[12 + idx]
+                        workgroup_memory[idx].set_memory_space(MemorySpace.SHARED_MEMORY)
+                    for p in private_memory:
+                        p.set_memory_space(MemorySpace.PRIVATE_MEMORY)
+                    body(block.arguments)
+                    gpu.terminator()
+
+                for t in set(ins + outs):
+                    token = t.dealloc_gpu(token)
+            return wrapper()
+        return decorator_body
+
+
+class MLIRTensor:
+    """Tensor backed by a memref with a LEGO layout."""
+
+    def __init__(self, layout, dtype="", is_dim_shape=False):
+        self.layout = layout
+        self.alloc_ref = None
+        self.gpu_alloc_ref = None
+        self.shared_memory_ref = None
+        self.private_memory_ref = None
+        self.data_type = None
+        self.is_dim_shape = is_dim_shape
+        self.dimension = layout.d
+        self.memory_space = MemorySpace.HOST_MEMORY
+        if dtype == "f32":
+            self.data_type = T.f32()
+        if dtype == "f16":
+            self.data_type = T.f16()
+
+    def get_memref_type(self):
+        return self.get_memref_type_address_space(self.memory_space)
+
+    def get_flattend_shape(self):
+        return product(self.layout.dims())
+
+    def get_memref_type_address_space(self, address_space):
+        return T.memref(self.get_flattend_shape(), self.data_type, memory_space=address_space)
+
+    def host_allocate(self):
+        self.alloc_ref = memref_dialect.alloc(self.get_memref_type_address_space(0), [], [])
+        return self
+
+    def dealloc_gpu(self, *tokens):
+        if tokens is None:
+            gpu.dealloc(self.gpu_alloc_ref)
+            return None
+        return gpu.dealloc(Type.parse("!gpu.async.token"), list(tokens), self.gpu_alloc_ref)
+
+    def set_memory_space(self, memory_space):
+        self.memory_space = memory_space
+        return self
+
+    def gpu_allocate(self, *tokens):
+        if tokens is None:
+            self.gpu_alloc_ref = gpu.alloc(self.get_memref_type(), [], [], [], [])
+            return None
+        token_ty = Type.parse("!gpu.async.token")
+        tmp = gpu.alloc(self.get_memref_type_address_space(0), token_ty, list(tokens), [], [])
+        self.gpu_alloc_ref = tmp[0]
+        return tmp[1]
+
+    def fill_host(self):
+        for_op = scf_dialect.ForOp(
+            _index_const(0), _index_const(int(self.get_flattend_shape())), _index_const(1))
+        with InsertionPoint(for_op.body):
+            iv = for_op.induction_variable
+            f_i = arith_dialect.sitofp(self.data_type, arith_dialect.index_cast(T.i32(), iv))
+            self.store_physical_1d([iv], f_i)
+            scf_dialect.YieldOp([])
+        return self
+
+    def store_physical_1d(self, coords, value):
+        return memref_dialect.store(value, self.get_memory_ref_address_space(), coords)
+
+    def copy_to_device(self, token):
+        token_ty = Type.parse("!gpu.async.token")
+        if token is None:
+            gpu.memcpy(None, [], self.gpu_alloc_ref, self.alloc_ref)
+            return None
+        return gpu.memcpy(token_ty, [token], self.gpu_alloc_ref, self.alloc_ref)
+
+    def get_memory_ref_address_space(self):
+        if self.memory_space == MemorySpace.SHARED_MEMORY:
+            return self.shared_memory_ref
+        if self.memory_space == MemorySpace.PRIVATE_MEMORY:
+            return self.private_memory_ref
+        if self.memory_space == MemorySpace.GLOBAL_MEMORY:
+            return self.gpu_alloc_ref
+        return self.alloc_ref
+
+
+printer = MLIRPrinter()
+
+
+# ============================================================================
+# Pure-MLIR layout helpers (no SymPy)
+# ============================================================================
+
+def mlir_layout(layout):
+    """Emit a Python layout object as MLIR LEGO dialect ops."""
+    from .symbolic import emit_layout_from_python
+    return emit_layout_from_python(layout, {})
+
+
+def mlir_apply(layout, indices):
+    """Forward-apply a layout to MLIR index values."""
+    return _emit_apply(mlir_layout(layout), indices)
+
+
+def mlir_apply_inverse(layout, flat_idx):
+    """Inverse-apply a layout to an MLIR flat index."""
+    dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
+    return _emit_apply_inverse(mlir_layout(layout), flat_idx, len(dims))
+
+
+def mlir_cast_view(tensor):
+    """Create a lego.view from an MLIRTensor's memref and layout."""
+    return _emit_cast_view(mlir_layout(tensor.layout),
+                           tensor.get_memory_ref_address_space(),
+                           tensor.data_type)
+
+
+def mlir_load(tensor, indices):
+    """Load from an MLIRTensor using lego.cast_view + lego.load."""
+    return _emit_load(mlir_cast_view(tensor), tensor.data_type, indices)
+
+
+def mlir_store(value, tensor, indices):
+    """Store to an MLIRTensor using lego.cast_view + lego.store."""
+    _emit_store(value, mlir_cast_view(tensor), indices)
+
+
+def mlir_loop(layout, body_fn):
+    """Generate an scf.for loop with LEGO apply_inverse (no SymPy)."""
+    dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
+    total = 1
+    for d in dims:
+        total *= int(d)
+    for_op = scf_dialect.ForOp(_index_const(0), _index_const(total), _index_const(1))
+    with InsertionPoint(for_op.body):
+        idx = for_op.induction_variable
+        body_fn(mlir_apply_inverse(layout, idx), idx)
+        scf_dialect.YieldOp([])

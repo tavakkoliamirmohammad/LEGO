@@ -1,8 +1,8 @@
 """
 LEGO: Layout Expression Language for Code Generation
 
-  Backend:   lego.backend (compiler, dialects, mlir_roundtrip)
-  Frontends: lego.frontends.symbolic, .triton_jit, .python_mlir
+  Backend:   lego.backend (symbolic, codegen, compiler, dialects)
+  Frontends: lego.frontends.triton_jit, .python_mlir
 """
 from .core import *
 from .frontends.triton_jit import jit, get_kernel_source

@@ -16,10 +16,8 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lego.backend.compiler import (
-    LayoutCompiler, RegPDesc, RowDesc, ColDesc, OrderByDesc,
-    GroupByDesc, TileByDesc,
-)
+from lego.backend.compiler import LayoutCompiler
+from lego.core import Row, Col, RegP, OrderBy, GroupBy, TileByLayout
 from lego.frontends.python_mlir import (
     LegoLayout, RowMajor, ColMajor, Tiled,
     row, col, reg_p, order_by, tile_by, group_by,
@@ -124,9 +122,9 @@ class TestLegoLayout:
     """Test LegoLayout wrapper class."""
 
     def test_lego_layout_type_check(self):
-        """LegoLayout rejects non-layout inputs."""
+        """LegoLayout rejects non-layout inputs at compile time."""
         with pytest.raises((TypeError, AttributeError)):
-            LegoLayout("not a layout", (4, 8))
+            LegoLayout("not a layout", (4, 8)).create_tensor(np.float32)
 
     def test_lego_layout_transform_numpy(self):
         """LegoLayout.create_tensor works with NumPy."""
@@ -144,72 +142,68 @@ class TestLegoLayout:
 
 
 class TestDescriptorAPI:
-    """Test the composable descriptor API that mirrors MLIR ops."""
+    """Test the composable layout API that mirrors MLIR ops."""
 
-    def test_row_desc(self):
-        """RowDesc creates correct dims."""
-        r = RowDesc((4, 8))
-        assert r.dims == (4, 8)
+    def test_row(self):
+        """Row creates correct dims."""
+        r = Row(4, 8)
+        assert r.dims() == (4, 8)
 
-    def test_col_desc(self):
-        """ColDesc creates correct dims."""
-        c = ColDesc((4, 8))
-        assert c.dims == (4, 8)
+    def test_col(self):
+        """Col creates correct dims."""
+        c = Col(4, 8)
+        assert c.dims() == (4, 8)
 
-    def test_tile_by_desc_dims(self):
-        """TileByDesc.dims returns flattened tile dims."""
-        ob = OrderByDesc([RowDesc((8, 8))])
-        tb = TileByDesc(ob, [(2, 2), (4, 4)])
-        assert tb.dims == (2, 2, 4, 4)
-        assert tb.d == 2
-        assert tb.q == 2
-        assert tb.tile_shape == [2, 2]
+    def test_tile_by_dims(self):
+        """TileByLayout dims and tile_shape."""
+        layout = OrderBy(Row(8, 8)).TileBy((2, 2), (4, 4))
+        assert isinstance(layout, TileByLayout)
+        assert layout._dims == (2, 2, 4, 4)
+        assert layout.tile_shape == [2, 2]
 
     def test_order_by_tile_by_chaining(self):
-        """OrderByDesc.tile_by() returns a TileByDesc."""
-        ob = order_by(col(4, 8))
-        tb = ob.tile_by((4,), (8,))
-        assert isinstance(tb, TileByDesc)
-        assert tb.input is ob
+        """OrderBy.TileBy() returns a TileByLayout."""
+        layout = OrderBy(Col(4, 8)).TileBy((4,), (8,))
+        assert isinstance(layout, TileByLayout)
 
     def test_functional_constructors(self):
-        """Functional constructors create correct descriptor types."""
+        """Functional constructors create correct types."""
         r = row(4, 8)
-        assert isinstance(r, RowDesc) and r.dims == (4, 8)
+        assert isinstance(r, Row) and r.dims() == (4, 8)
 
         c = col(4, 8)
-        assert isinstance(c, ColDesc) and c.dims == (4, 8)
+        assert isinstance(c, Col) and c.dims() == (4, 8)
 
         ob = order_by(r)
-        assert isinstance(ob, OrderByDesc) and len(ob.perms) == 1
+        assert isinstance(ob, OrderBy) and len(ob.perms) == 1
 
         gb = group_by((4, 8), ob)
-        assert isinstance(gb, GroupByDesc) and gb.dims == (4, 8)
+        assert isinstance(gb, GroupBy)
 
-    def test_rowmajor_uses_row_desc(self):
-        """RowMajor uses RowDesc internally."""
+    def test_rowmajor_uses_row(self):
+        """RowMajor uses Row internally."""
         layout = RowMajor((4, 8))
-        inner = layout._layout  # GroupByDesc
-        assert isinstance(inner, GroupByDesc)
+        inner = layout._layout
+        assert isinstance(inner, GroupBy)
         inner_order = inner.objects[0]
-        assert isinstance(inner_order, OrderByDesc)
-        assert isinstance(inner_order.perms[0], RowDesc)
+        assert isinstance(inner_order, OrderBy)
+        assert isinstance(inner_order.perms[0], Row)
 
-    def test_colmajor_uses_col_desc(self):
-        """ColMajor uses ColDesc internally."""
+    def test_colmajor_uses_col(self):
+        """ColMajor uses Col internally."""
         layout = ColMajor((4, 8))
-        inner = layout._layout  # GroupByDesc
-        assert isinstance(inner, GroupByDesc)
+        inner = layout._layout
+        assert isinstance(inner, GroupBy)
         inner_order = inner.objects[0]
-        assert isinstance(inner_order, OrderByDesc)
-        assert isinstance(inner_order.perms[0], ColDesc)
+        assert isinstance(inner_order, OrderBy)
+        assert isinstance(inner_order.perms[0], Col)
 
-    def test_tiled_uses_tile_by_desc(self):
-        """Tiled uses TileByDesc internally (no SymPy)."""
+    def test_tiled_uses_tile_by(self):
+        """Tiled uses TileByLayout internally."""
         layout = Tiled((8, 8), tile_shape=(4, 4))
         inner = layout._layout
-        assert isinstance(inner, TileByDesc)
-        assert inner.tile_groups == [(2, 2), (4, 4)]
+        assert isinstance(inner, TileByLayout)
+        assert inner._tile_groups == [(2, 2), (4, 4)]
 
     def test_row_major_round_trip_with_row_desc(self):
         """RowMajor with RowDesc compiles and round-trips correctly."""
@@ -247,7 +241,7 @@ class TestDescriptorAPI:
 
     def test_composable_api_col_tile(self):
         """order_by(col(...)).tile_by(...) composes correctly."""
-        layout = LegoLayout(order_by(col(4, 8)).tile_by((2, 4), (2, 2)))
+        layout = LegoLayout(order_by(col(4, 8)).TileBy((2, 4), (2, 2)))
         result = layout.create_tensor(np.float32)
         back = layout.inverse_transform(result)
         expected = np.arange(32, dtype=np.float32).reshape(2, 4, 2, 2)
@@ -298,7 +292,7 @@ class TestPyTorchIntegration:
 
     def test_torch_col_major(self):
         """Col-major create_tensor produces Fortran-order view."""
-        layout = LegoLayout(order_by(col(4, 8)).tile_by((4, 8)))
+        layout = LegoLayout(order_by(col(4, 8)).TileBy((4, 8)))
         result = layout.create_tensor(np.float32)
 
         # layout = LegoLayout(order_by(row(2,3), col(4,5)).tile_by((8, 15)))

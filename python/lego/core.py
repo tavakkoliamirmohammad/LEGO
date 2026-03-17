@@ -72,6 +72,14 @@ def product(symbols: List[Symbol]) -> Symbol:
     return reduce(lambda x, y: x * y, symbols)
 
 
+def divisibility_constraint(lhs, rhs):
+    return sp.Eq(lhs % rhs, 0, evaluate=False)
+
+
+def le_constraint(lhs, rhs):
+    return sp.StrictLessThan(lhs, rhs, evaluate=False)
+
+
 class LayoutBlock:
     def dims(self) -> Tuple[Symbol, ...]:
         raise NotImplementedError
@@ -177,7 +185,7 @@ class GroupBy(LayoutBlock):
 
     def apply(self, *idx: Symbol) -> Symbol:
         """Apply the GroupBy operation via MLIR roundtrip."""
-        from .backend.mlir_roundtrip import simplify_via_mlir
+        from .backend.symbolic import simplify_via_mlir
 
         if len(idx) != len(self._dims):
             raise ValueError(
@@ -192,7 +200,7 @@ class GroupBy(LayoutBlock):
 
     def inv(self, flat_idx: Symbol) -> Tuple[Symbol, ...]:
         """Apply the inverse GroupBy operation via MLIR roundtrip."""
-        from .backend.mlir_roundtrip import simplify_via_mlir
+        from .backend.symbolic import simplify_via_mlir
 
         index_constraints = {flat_idx: (0, product(self._dims))}
         constraints = self._build_constraints(index_constraints)
@@ -316,7 +324,7 @@ class GroupBy(LayoutBlock):
             else:
                 result.append(item)
                 self.constraints[item] = (0, logical_range[idx])
-        from .backend.mlir_roundtrip import simplify_via_mlir
+        from .backend.symbolic import simplify_via_mlir
 
         constraints = self._build_constraints(self.constraints)
         simplified = simplify_via_mlir(self, 'apply', list(result),
