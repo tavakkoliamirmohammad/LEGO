@@ -1,70 +1,76 @@
-# ────────────────
-# 1) Builder stage
-# ────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 1: Build LLVM/MLIR + LEGO (monolithic)
+# ──────────────────────────────────────────────────────────────────────────────
 FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS builder
 
-ARG LLVM_COMMIT=7477045d3d836e8e98fcbdea27bf46e2f3e5e0f3
 ARG PYTHON_VERSION=3.12
+ARG NPROC=32
 
-# Install build deps
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake ninja-build git python${PYTHON_VERSION} \
-    python${PYTHON_VERSION}-dev python3-pip libssl-dev ca-certificates \
+    build-essential cmake ninja-build git lld ccache \
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    python3-pip libssl-dev ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-# Clone llvm-project (or COPY if you already have it as a git submodule)
-WORKDIR /workspace
-RUN git clone --depth 1 https://github.com/llvm/llvm-project.git \
-    && cd llvm-project \
-    && git fetch --depth 1 origin ${LLVM_COMMIT} \
-    && git checkout ${LLVM_COMMIT}
+# Python deps needed at build time (nanobind for bindings, lit for tests)
+RUN pip3 install --no-cache-dir nanobind==2.12.0 lit==18.1.8 pytest==9.0.2
 
-RUN pip install pybind11
-# Configure & build
-WORKDIR /workspace/llvm-project
-RUN mkdir build && cd build && \
-    cmake -G Ninja ../llvm \
+WORKDIR /workspace/lego
+
+# Copy submodule first (changes rarely, maximizes layer cache)
+COPY third_party/llvm-project third_party/llvm-project
+
+# Copy build system and source
+COPY CMakeLists.txt requirements.txt README.md ./
+COPY include/ include/
+COPY lib/ lib/
+COPY tools/ tools/
+COPY test/ test/
+COPY python/ python/
+
+# Configure: monolithic build with lld, ccache, Release mode
+RUN cmake -G Ninja -S . -B build \
+      -DLEGO_MONOLITHIC_LLVM=ON \
       -DCMAKE_BUILD_TYPE=Release \
-      -DLLVM_ENABLE_PROJECTS="mlir" \
-      -DLLVM_TARGETS_TO_BUILD="X86;NVPTX" \
-      -DMLIR_ENABLE_CUDA_RUNNER=ON \
-      -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
-      -DPython3_EXECUTABLE=$(which python${PYTHON_VERSION}) \
-      -DCMAKE_INSTALL_PREFIX=/opt/llvm \
-      -DLLVM_BUILD_EXAMPLES=OFF
-    ninja && ninja install
+      -DLEGO_LLVM_TARGETS="X86;NVPTX" \
+      -DLEGO_ENABLE_RUNNERS=ON \
+      -DLLVM_USE_LINKER=lld \
+      -DLEGO_ENABLE_CCACHE=ON \
+      -DCMAKE_INSTALL_PREFIX=/opt/lego
 
-# ────────────────
-# 2) Runtime stage
-# ────────────────
+# Build everything
+RUN cmake --build build -j${NPROC} --target check-lego-all
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 2: Lightweight runtime image
+# ──────────────────────────────────────────────────────────────────────────────
 FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+
 ARG PYTHON_VERSION=3.12
 
-# copy install from builder
-COPY --from=builder /opt/llvm /opt/llvm
-COPY --from=builder /workspace/llvm-project/mlir/python/requirements.txt /opt/llvm/mlir/requirements.txt
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install build deps
-RUN apt-get update && apt-get install -y --no-install-recommends python${PYTHON_VERSION} python3-pip \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python3-pip \
   && rm -rf /var/lib/apt/lists/*
 
-# set up environment
-ENV LLVM_INSTALL=/opt/llvm
-ENV PATH=${LLVM_INSTALL}/bin:${PATH}
-ENV LD_LIBRARY_PATH=${LLVM_INSTALL}/lib:${LD_LIBRARY_PATH}
-ENV PYTHONPATH=${LLVM_INSTALL}/python_packages/mlir_core
+# Copy built artifacts from builder
+COPY --from=builder /workspace/lego/build/python_packages/lego /opt/lego/python_packages/lego
+COPY --from=builder /workspace/lego/build/tools/lego-opt/lego-opt /usr/local/bin/lego-opt
+COPY --from=builder /workspace/lego/python /opt/lego/python
 
-COPY requirements.txt /workspace/
+# Install Python runtime dependencies
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
+# Environment
+ENV PYTHONPATH=/opt/lego/python_packages/lego:/opt/lego/python
+ENV PATH=/usr/local/bin:${PATH}
+
+# Charliecloud bind-mount directories (CHPC: --bind=/uufs --bind=/scratch)
+RUN mkdir -p /scratch /uufs
+
 WORKDIR /workspace
-
-COPY requirements.txt .
-
-# 2) install dependencies
-RUN pip3 install --no-cache-dir -r /opt/llvm/mlir/requirements.txt
-RUN pip3 install --no-cache-dir -r requirements.txt
-RUN pip3 install triton==3.2.0 torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1 --index-url https://download.pytorch.org/whl/cu118
-# 3) now copy the rest of your application code
-COPY . .
-
-
 CMD ["/bin/bash"]
