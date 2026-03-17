@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 from triton.runtime import driver
 import lego
-from lego.lego import *
+from lego.core import *
 import sympy as sp
 
 n_rows, n_cols, BLOCK_SIZE = sp.symbols('n_rows n_cols BLOCK_SIZE', integer=True, positive=True)

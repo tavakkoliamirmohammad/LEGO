@@ -2,8 +2,8 @@ import torch
 import triton
 import triton.language as tl
 import lego
-from lego.lego import *
-from lego import jit as lego_jit
+from lego.core import *
+from lego.frontends.triton_jit import jit as lego_jit
 from sympy import Max, Min
 
 def is_cuda():

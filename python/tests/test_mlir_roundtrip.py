@@ -27,11 +27,7 @@ import os
 # Ensure the project is on PYTHONPATH
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lego.lego import (
-    OrderBy, Row, Col, RegP, GenP, GroupBy,
-    flatten_index, unflatten_index, product,
-    get_sigma_perm, sigma, inverse_permutation,
-)
+from lego.core import OrderBy, Row, Col, RegP, GenP, GroupBy
 
 
 # ============================================================================
@@ -194,14 +190,14 @@ class TestSimplifyViaMlir:
     """Test the simplify_via_mlir function directly."""
 
     def test_apply_mode(self):
-        from lego.lego_mlir import simplify_via_mlir
+        from lego.backend.symbolic import simplify_via_mlir
         a, b = syms("a b")
         L = OrderBy(Row(4, 8)).GroupBy([(4, 8)])
         result = simplify_via_mlir(L, "apply", [a, b], {a: (0, 4), b: (0, 8)})
         assert_expr_equal(result, 8 * a + b, "direct_apply")
 
     def test_inv_mode(self):
-        from lego.lego_mlir import simplify_via_mlir
+        from lego.backend.symbolic import simplify_via_mlir
         x = sym("x")
         L = OrderBy(Row(4, 8)).GroupBy([(4, 8)])
         result = simplify_via_mlir(L, "inv", x, {x: (0, 32)})
@@ -219,7 +215,7 @@ class TestGenP:
 
     def test_genp_identity(self):
         """GenP with identity mapping should match Row."""
-        from lego.lego_mlir import simplify_via_mlir
+        from lego.backend.symbolic import simplify_via_mlir
 
         def f_apply(idx):
             return idx[0] * 8 + idx[1]
@@ -244,7 +240,7 @@ class TestGenP:
         produces a symbolically correct expression matching the Python
         antidiag reference.
         """
-        from lego.lego import antidiag
+        from lego.core import antidiag
 
         i, j = syms("i j")
         n = sp.Symbol("n", integer=True, positive=True)
@@ -265,9 +261,9 @@ class TestEmitLayout:
     """Test emit_layout_from_python directly."""
 
     def test_emit_regp(self):
-        from lego.lego_mlir import emit_layout_from_python
+        from lego.backend.symbolic import emit_layout_from_python
         from mlir.ir import Context, Location, InsertionPoint, Module, IndexType
-        from lego.dialects.lego_dialect import register as register_lego
+        from lego.backend.dialects.lego_dialect import register as register_lego
         import mlir.ir as ir
 
         ctx = Context()
@@ -280,9 +276,9 @@ class TestEmitLayout:
                 assert layout_val is not None
 
     def test_emit_orderby(self):
-        from lego.lego_mlir import emit_layout_from_python
+        from lego.backend.symbolic import emit_layout_from_python
         from mlir.ir import Context, Location, InsertionPoint, Module
-        from lego.dialects.lego_dialect import register as register_lego
+        from lego.backend.dialects.lego_dialect import register as register_lego
 
         ctx = Context()
         register_lego(ctx)
@@ -294,9 +290,9 @@ class TestEmitLayout:
                 assert layout_val is not None
 
     def test_emit_groupby(self):
-        from lego.lego_mlir import emit_layout_from_python
+        from lego.backend.symbolic import emit_layout_from_python
         from mlir.ir import Context, Location, InsertionPoint, Module
-        from lego.dialects.lego_dialect import register as register_lego
+        from lego.backend.dialects.lego_dialect import register as register_lego
 
         ctx = Context()
         register_lego(ctx)
@@ -316,9 +312,9 @@ class TestArithToSympy:
     """Test the MLIR arith -> SymPy converter."""
 
     def test_constant(self):
-        from lego.lego_mlir import arith_to_sympy
+        from lego.backend.symbolic import arith_to_sympy
         from mlir.ir import Context, Location, Module
-        from lego.dialects.lego_dialect import register as register_lego
+        from lego.backend.dialects.lego_dialect import register as register_lego
         import mlir.ir as ir
 
         ctx = Context()
@@ -335,9 +331,9 @@ class TestArithToSympy:
                     assert result == sp.Integer(42)
 
     def test_addi(self):
-        from lego.lego_mlir import arith_to_sympy
+        from lego.backend.symbolic import arith_to_sympy
         from mlir.ir import Context, Location, Module
-        from lego.dialects.lego_dialect import register as register_lego
+        from lego.backend.dialects.lego_dialect import register as register_lego
 
         a_sym, b_sym = syms("a b")
         ctx = Context()
@@ -378,7 +374,7 @@ class TestSymbolicShapes:
         constraints = [ii < R, jj < R, tid < T*T, 0 < tid]
         l.inv(expr) should give [ii, jj, floor(tid/T), Mod(tid, T)]
         """
-        from lego.lego import le_constraint
+        from lego.core import le_constraint
 
         R, T, ii, jj, tid = syms("R T ii jj tid")
         expr = (ii * R + jj) * T * T + tid
@@ -467,7 +463,7 @@ class TestSymbolicShapes:
 
     def test_auto_inferred_bounds(self):
         """Auto-inferred bounds (dim > 0) should be emitted as assume_bounds."""
-        from lego.lego_mlir import simplify_via_mlir
+        from lego.backend.symbolic import simplify_via_mlir
         M, N = syms("M N")
         i, j = syms("i j")
         L = OrderBy(Row(M, N)).GroupBy([(M, N)])

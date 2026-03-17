@@ -6,8 +6,8 @@ import sys
 import os
 import contextlib
 import io
-from .lego_python import LEGOPythonCodePrinter
-from .lego import *
+from lego.python_printer import LEGOPythonCodePrinter
+from lego.core import *
 
 
 def jit(fn=None, **kwargs):

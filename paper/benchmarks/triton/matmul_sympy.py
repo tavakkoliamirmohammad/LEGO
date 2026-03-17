@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 import lego
-from lego.lego import *
+from lego.core import *
 from sympy import Max, Min
 import argparse
 

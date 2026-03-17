@@ -1,4 +1,4 @@
-from .lego import *
+from .core import *
 from sympy.printing.pycode import PythonCodePrinter
 
 

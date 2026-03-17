@@ -1,6 +1,6 @@
-from lego import *
+from lego.core import *
 
-from lego.lego_c import *
+from lego.c_printer import *
 
 i, j, k, radius, i_diff, j_diff, k_diff, bx, by, bz = symbols(
     'i j k radius i_diff j_diff k_diff bx by bz', integer=True, positive=True)

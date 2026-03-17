@@ -1,9 +1,10 @@
 """Shared-memory matrix transpose — pure MLIR LEGO dialect (no SymPy index math)."""
-from lego.lego_mlir import (
+from lego.backend.compiler import (
     MLIRTensor, printer,
     mlir_apply_inverse, mlir_load, mlir_store, mlir_loop,
 )
-from lego.lego import OrderBy, Row, Col, divisibility_constraint
+from lego.core import OrderBy, Row, Col
+from lego.core import divisibility_constraint
 import sys
 
 if len(sys.argv) != 3:

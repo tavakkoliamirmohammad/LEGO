@@ -1,6 +1,6 @@
 import sympy as sp
 
-from lego.lego_c import *
+from lego.c_printer import *
 
 
 n, i, j = sp.symbols('n i j', integer=True, postive=True)

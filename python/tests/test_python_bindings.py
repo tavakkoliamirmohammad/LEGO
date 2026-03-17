@@ -37,7 +37,7 @@ class TestDialectRegistration:
         """Create an MLIR context with the LEGO dialect registered."""
         try:
             from mlir.ir import Context
-            from lego.dialects.lego_dialect import register
+            from lego.backend.dialects.lego_dialect import register
         except ImportError:
             pytest.skip("MLIR Python bindings not available")
 
@@ -70,7 +70,7 @@ class TestOpConstruction:
     def setup(self):
         try:
             from mlir.ir import Context
-            from lego.dialects.lego_dialect import register
+            from lego.backend.dialects.lego_dialect import register
         except ImportError:
             pytest.skip("MLIR Python bindings not available")
 
@@ -82,7 +82,7 @@ class TestOpConstruction:
         """Test building a lego.row op."""
         from mlir.ir import Location, Module, InsertionPoint, FunctionType
         from mlir.dialects import func
-        from lego.dialects.lego_dialect import RowOp
+        from lego.backend.dialects.lego_dialect import RowOp
 
         ctx = setup
         with ctx, Location.unknown():
@@ -110,7 +110,7 @@ class TestOpConstruction:
             IntegerType, IntegerAttr, ArrayAttr, FunctionType,
         )
         from mlir.dialects import func
-        from lego.dialects.lego_dialect import RegPOp
+        from lego.backend.dialects.lego_dialect import RegPOp
 
         ctx = setup
         with ctx, Location.unknown():
@@ -143,7 +143,7 @@ class TestOpConstruction:
             Location, Module, InsertionPoint, IndexType, FunctionType,
         )
         from mlir.dialects import func
-        from lego.dialects.lego_dialect import RowOp, ApplyOp
+        from lego.backend.dialects.lego_dialect import RowOp, ApplyOp
 
         ctx = setup
         with ctx, Location.unknown():
@@ -173,9 +173,10 @@ class TestIRBuilderIntegration:
 
     def test_ir_builder_produces_valid_mlir(self):
         """Test that IRBuilder generates valid MLIR text."""
-        from lego.compiler import IRBuilder, RowDesc, OrderByDesc, GroupByDesc
+        from lego.backend.compiler import IRBuilder
+        from lego.core import Row, OrderBy, GroupBy
 
-        layout = GroupByDesc((4, 8), [OrderByDesc([RowDesc((4, 8))])])
+        layout = GroupBy([(4, 8)], [OrderBy(Row(4, 8))])
         builder = IRBuilder(layout, (4, 8), "f32")
         ctx, module = builder.build_module()
         with ctx:
@@ -189,9 +190,10 @@ class TestIRBuilderIntegration:
 
     def test_ir_builder_col_major(self):
         """Test IRBuilder with column-major layout."""
-        from lego.compiler import IRBuilder, ColDesc, OrderByDesc, GroupByDesc
+        from lego.backend.compiler import IRBuilder
+        from lego.core import Col, OrderBy, GroupBy
 
-        layout = GroupByDesc((4, 8), [OrderByDesc([ColDesc((4, 8))])])
+        layout = GroupBy([(4, 8)], [OrderBy(Col(4, 8))])
         builder = IRBuilder(layout, (4, 8), "f32")
         ctx, module = builder.build_module()
         with ctx:
