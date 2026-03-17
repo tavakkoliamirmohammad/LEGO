@@ -21,7 +21,7 @@ Example:
 
 import time
 import numpy as np
-from .compiler import (
+from lego.backend.compiler import (
     RegPDesc, RowDesc, ColDesc, OrderByDesc, GroupByDesc, TileByDesc, GenPDesc,
     _LAYOUT_DESC_TYPES,
     LayoutCompiler, _dtype_to_mlir,
@@ -155,7 +155,7 @@ class LegoLayout:
         compiler = self._get_compiler(tensor)
 
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
-            from .torch_ops import LegoTransformFunction
+            from lego.backend.torch_ops import LegoTransformFunction
             if LegoTransformFunction is not None:
                 return LegoTransformFunction.apply(tensor, compiler).reshape(self._shape)
 
@@ -176,7 +176,7 @@ class LegoLayout:
         compiler = self._get_compiler(tensor)
 
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
-            from .torch_ops import LegoInverseTransformFunction
+            from lego.backend.torch_ops import LegoInverseTransformFunction
             if LegoInverseTransformFunction is not None:
                 return LegoInverseTransformFunction.apply(tensor, compiler).reshape(self._shape)
 

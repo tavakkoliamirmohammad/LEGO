@@ -1,6 +1,6 @@
-from lego import *
-
-from lego.lego_c import *
+from lego.core import *
+from lego.frontends.symbolic import le_constraint
+from lego.c_printer import *
 
 R, T, ii, jj, tid, BLOCK_SIZE = symbols(
     'R T ii jj tid BLOCK_SIZE', integer=True, positive=True)

@@ -22,7 +22,7 @@ from mlir.dialects import memref as memref_dialect
 from mlir.passmanager import PassManager
 from mlir.execution_engine import ExecutionEngine
 from mlir.runtime import get_ranked_memref_descriptor
-from lego.dialects.lego_dialect import register as register_lego
+from lego.backend.dialects.lego_dialect import register as register_lego
 
 
 # ============================================================================
@@ -362,42 +362,42 @@ def _index_const(val):
 
 def _emit_reg_p(perm, dim_vals):
     """Emit a lego.reg_p op. Returns the layout SSA value."""
-    from lego.dialects.lego_dialect import RegPOp
+    from lego.backend.dialects.lego_dialect import RegPOp
     layout_ty = _lego_layout_type()
     return RegPOp(result=layout_ty, perm=perm, dims=dim_vals).result
 
 
 def _emit_row(dim_vals):
     """Emit a lego.row op. Returns the layout SSA value."""
-    from lego.dialects.lego_dialect import RowOp
+    from lego.backend.dialects.lego_dialect import RowOp
     layout_ty = _lego_layout_type()
     return RowOp(result=layout_ty, dims=dim_vals).result
 
 
 def _emit_col(dim_vals):
     """Emit a lego.col op. Returns the layout SSA value."""
-    from lego.dialects.lego_dialect import ColOp
+    from lego.backend.dialects.lego_dialect import ColOp
     layout_ty = _lego_layout_type()
     return ColOp(result=layout_ty, dims=dim_vals).result
 
 
 def _emit_order_by(perm_vals):
     """Emit a lego.order_by op. Returns the layout SSA value."""
-    from lego.dialects.lego_dialect import OrderByOp
+    from lego.backend.dialects.lego_dialect import OrderByOp
     layout_ty = _lego_layout_type()
     return OrderByOp(result=layout_ty, perms=perm_vals).result
 
 
 def _emit_group_by(dim_vals, obj_vals):
     """Emit a lego.group_by op. Returns the layout SSA value."""
-    from lego.dialects.lego_dialect import GroupByOp
+    from lego.backend.dialects.lego_dialect import GroupByOp
     layout_ty = _lego_layout_type()
     return GroupByOp(result=layout_ty, group_dims=dim_vals, objects=obj_vals).result
 
 
 def _emit_tile_by(input_val, tile_dim_vals, tile_shape):
     """Emit a lego.tile_by op. Returns the layout SSA value."""
-    from lego.dialects.lego_dialect import TileByOp
+    from lego.backend.dialects.lego_dialect import TileByOp
     layout_ty = _lego_layout_type()
     return TileByOp(result=layout_ty, input=input_val,
                     tile_dims=tile_dim_vals, tile_shape=tile_shape).result
@@ -405,7 +405,7 @@ def _emit_tile_by(input_val, tile_dim_vals, tile_shape):
 
 def _emit_gen_p(dim_vals, rank, apply_builder, inv_builder, idx_ty):
     """Emit a lego.gen_p op with apply and inverse regions."""
-    from lego.dialects.lego_dialect import GenPOp, YieldOp
+    from lego.backend.dialects.lego_dialect import GenPOp, YieldOp
     layout_ty = _lego_layout_type()
     gen_p_op = GenPOp(result=layout_ty, dims=dim_vals)
 
@@ -426,14 +426,14 @@ def _emit_gen_p(dim_vals, rank, apply_builder, inv_builder, idx_ty):
 
 def _emit_apply(layout_val, indices):
     """Emit a lego.apply op. Returns the flat index Value."""
-    from lego.dialects.lego_dialect import ApplyOp
+    from lego.backend.dialects.lego_dialect import ApplyOp
     idx_ty = IndexType.get()
     return ApplyOp(flat_index=idx_ty, layout=layout_val, indices=list(indices)).result
 
 
 def _emit_apply_inverse(layout_val, flat_index, rank):
     """Emit a lego.apply_inverse op. Returns list of index Values."""
-    from lego.dialects.lego_dialect import ApplyInverseOp
+    from lego.backend.dialects.lego_dialect import ApplyInverseOp
     idx_ty = IndexType.get()
     op = ApplyInverseOp(indices=[idx_ty] * rank, layout=layout_val,
                         flat_index=flat_index)

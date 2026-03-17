@@ -16,11 +16,11 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lego.compiler import (
+from lego.backend.compiler import (
     LayoutCompiler, RegPDesc, RowDesc, ColDesc, OrderByDesc,
     GroupByDesc, TileByDesc,
 )
-from lego.tensor_api import (
+from lego.frontends.python_mlir import (
     LegoLayout, RowMajor, ColMajor, Tiled,
     row, col, reg_p, order_by, tile_by, group_by,
 )
@@ -108,7 +108,7 @@ class TestConvenienceConstructors:
 
     def test_custom_import(self):
         """Custom wraps a descriptor layout."""
-        from lego.tensor_api import Custom
+        from lego.frontends.python_mlir import Custom
         shape = (4, 8)
         desc = group_by(shape, order_by(row(*shape)))
         layout = Custom(desc, shape)

@@ -1,4 +1,4 @@
-from .lego import *
+from lego.core import *
 import functools
 import os
 import sys
@@ -45,7 +45,7 @@ class MLIRPrinter:
         self.ctx = ctx
         self.ctx.allow_unregistered_dialects = True
         try:
-            from lego.dialects.lego_dialect import register as _reg
+            from lego.backend.dialects.lego_dialect import register as _reg
             _reg(self.ctx)
         except Exception:
             pass
@@ -241,7 +241,7 @@ def mlir_apply(layout, indices):
     Returns:
         MLIR Value (index type) — the flat index
     """
-    from lego.dialects.lego_dialect import ApplyOp as _ApplyOp
+    from lego.backend.dialects.lego_dialect import ApplyOp as _ApplyOp
     layout_val = mlir_layout(layout)
     return _ApplyOp(
         flat_index=ir.IndexType.get(),
@@ -259,7 +259,7 @@ def mlir_apply_inverse(layout, flat_idx):
     Returns:
         list of MLIR Values (index type) — the multi-dim indices
     """
-    from lego.dialects.lego_dialect import ApplyInverseOp as _ApplyInverseOp
+    from lego.backend.dialects.lego_dialect import ApplyInverseOp as _ApplyInverseOp
     layout_val = mlir_layout(layout)
     dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
     rank = len(dims)
@@ -276,7 +276,7 @@ def mlir_cast_view(tensor):
 
     Returns an MLIR Value of !lego.view type.
     """
-    from lego.dialects.lego_dialect import CastViewOp as _CastViewOp
+    from lego.backend.dialects.lego_dialect import CastViewOp as _CastViewOp
     layout_val = mlir_layout(tensor.layout)
     view_ty = ir.Type.parse(f"!lego.view<{tensor.data_type}>")
     return _CastViewOp(
@@ -295,7 +295,7 @@ def mlir_load(tensor, indices):
     Returns:
         MLIR Value — the loaded element
     """
-    from lego.dialects.lego_dialect import LoadOp as _LoadOp
+    from lego.backend.dialects.lego_dialect import LoadOp as _LoadOp
     view = mlir_cast_view(tensor)
     return _LoadOp(result=tensor.data_type, view=view, indices=indices).result
 
@@ -308,7 +308,7 @@ def mlir_store(value, tensor, indices):
         tensor: MLIRTensor instance
         indices: list of MLIR Values (index type)
     """
-    from lego.dialects.lego_dialect import StoreOp as _StoreOp
+    from lego.backend.dialects.lego_dialect import StoreOp as _StoreOp
     view = mlir_cast_view(tensor)
     _StoreOp(value=value, view=view, indices=indices)
 
@@ -338,12 +338,12 @@ def mlir_loop(layout, body_fn):
 
 from mlir.passmanager import PassManager as _PassManager
 from mlir.dialects import func as _func_dialect
-from lego.dialects.lego_dialect import (
+from lego.backend.dialects.lego_dialect import (
     register as _register_lego,
     RegPOp, RowOp, ColOp, OrderByOp, GroupByOp, ApplyOp,
     ApplyInverseOp, TileByOp, GenPOp, YieldOp,
 )
-from lego.dialects._lego_ops_gen import assume_bounds as _assume_bounds_fn
+from lego.backend.dialects._lego_ops_gen import assume_bounds as _assume_bounds_fn
 
 
 def _index_const(val):
@@ -512,6 +512,14 @@ def emit_layout_from_python(layout, sym_to_val):
     """
     from mlir.ir import IndexType
     lt = _layout_type()
+
+    if isinstance(layout, Row):
+        dim_vals = [_resolve_dim(d, sym_to_val) for d in layout._dims]
+        return RowOp(result=lt, dims=dim_vals).result
+
+    if isinstance(layout, Col):
+        dim_vals = [_resolve_dim(d, sym_to_val) for d in layout._dims]
+        return ColOp(result=lt, dims=dim_vals).result
 
     if isinstance(layout, RegP):
         perm_vec = layout._perm_vector

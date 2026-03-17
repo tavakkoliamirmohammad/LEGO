@@ -166,8 +166,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   declare_mlir_dialect_python_bindings(
     ADD_TO_PARENT LegoPythonSources.Dialects
     ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/python"
-    TD_FILE lego/dialects/LegoOps.td
-    SOURCES lego/dialects/lego_dialect.py
+    TD_FILE lego/backend/dialects/LegoOps.td
+    SOURCES lego/backend/dialects/lego_dialect.py
     DIALECT_NAME lego)
 
   # Build the nanobind extension for dialect registration
@@ -240,12 +240,59 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   add_custom_command(
     TARGET LegoPythonModules POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${CMAKE_BINARY_DIR}/lego/dialects/_lego_ops_gen.py"
-      "${CMAKE_SOURCE_DIR}/python/lego/dialects/_lego_ops_gen.py"
-    COMMENT "Copying _lego_ops_gen.py to source tree for lego.dialects import")
+      "${CMAKE_BINARY_DIR}/lego/backend/dialects/_lego_ops_gen.py"
+      "${CMAKE_SOURCE_DIR}/python/lego/backend/dialects/_lego_ops_gen.py"
+    COMMENT "Copying _lego_ops_gen.py to source tree for lego.backend.dialects import")
+
+  # --- Wheel preparation target ---
+  set(LEGO_WHEEL_DIR "${CMAKE_BINARY_DIR}/python_packages/lego")
+
+  add_custom_target(lego-prepare-wheel
+    DEPENDS LegoPythonModules
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_SOURCE_DIR}/python/lego" "${LEGO_WHEEL_DIR}/lego"
+    COMMAND ${CMAKE_COMMAND} -E copy
+      "${CMAKE_SOURCE_DIR}/python/setup_wheel.py" "${LEGO_WHEEL_DIR}/setup.py"
+    COMMENT "Preparing wheel directory"
+  )
+
+  # --- Import verification target ---
+  add_custom_target(check-lego-imports
+    COMMAND ${CMAKE_COMMAND} -E env
+      "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+      "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/python/check_imports.py"
+    DEPENDS LegoPythonModules
+    COMMENT "Verifying LEGO Python imports"
+    USES_TERMINAL
+  )
+
+  # --- Wheel build + verification target ---
+  add_custom_target(check-lego-wheel
+    COMMAND ${CMAKE_COMMAND} -E env
+      "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+      "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/python/check_wheel.py"
+    DEPENDS lego-prepare-wheel
+    COMMENT "Building and verifying LEGO wheel"
+    USES_TERMINAL
+  )
 endif()
 
 # --- Tests (after Python bindings so check-lego-python can depend on LegoPythonModules) ---
 if(LEGO_BUILD_TESTS)
   add_subdirectory(test)
+endif()
+
+# --- Umbrella target: run all checks ---
+add_custom_target(check-lego-all
+  COMMENT "Running all LEGO checks"
+)
+if(LEGO_BUILD_TESTS)
+  add_dependencies(check-lego-all check-lego)
+endif()
+if(MLIR_ENABLE_BINDINGS_PYTHON)
+  if(LEGO_BUILD_TESTS)
+    add_dependencies(check-lego-all check-lego-python)
+  endif()
+  add_dependencies(check-lego-all check-lego-imports)
+  add_dependencies(check-lego-all check-lego-wheel)
 endif()

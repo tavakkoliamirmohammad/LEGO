@@ -19,5 +19,6 @@ dev = [
     "pytest"
 ]
 
-[tool.setuptools]
-packages = ["lego"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lego*"]

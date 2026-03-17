@@ -1,5 +1,5 @@
 from sympy.printing.c import C99CodePrinter
-from .lego import *
+from .core import *
 
 
 class LEGOCCodePrinter(C99CodePrinter):

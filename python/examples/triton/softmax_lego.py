@@ -3,8 +3,8 @@ import triton
 import triton.language as tl
 from triton.runtime import driver
 import lego
-from lego.lego import *
-from lego import jit as lego_jit
+from lego.core import *
+from lego.frontends.triton_jit import jit as lego_jit
 
 def is_hip():
     return triton.runtime.driver.active.get_current_target().backend == "hip"

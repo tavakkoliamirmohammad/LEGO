@@ -1,4 +1,4 @@
-from lego import *
+from lego.core import *
 
 i, j, k, w, q, n = symbols('i j k w q n ', integer=True, postive=True)
 

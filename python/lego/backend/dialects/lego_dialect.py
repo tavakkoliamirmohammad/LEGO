@@ -5,7 +5,7 @@ Provides dialect registration and re-exports auto-generated op classes.
 
 Usage:
     from mlir.ir import Context
-    from lego.dialects import lego_dialect
+    from lego.backend.dialects import lego_dialect
 
     ctx = Context()
     lego_dialect.register(ctx)
