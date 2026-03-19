@@ -57,14 +57,15 @@ if __name__ == "__main__":
         M, N, K = size, size, size
         a_torch = torch.randn(M, K)
         b_torch = torch.randn(K, N)
-        expected = (a_torch @ b_torch).numpy()
 
         a_jax = jnp.array(a_torch.numpy())
         b_jax = jnp.array(b_torch.numpy())
-        c_jax = jax_matmul(a_jax, b_jax)
-        c_np = np.asarray(c_jax)
 
-        ok = np.allclose(c_np, expected, atol=1e-4)
+        # Compare LEGO tiled matmul against jnp.dot (same device/precision)
+        c_lego = jax_matmul(a_jax, b_jax)
+        c_ref = jnp.dot(a_jax, b_jax)
+
+        ok = np.allclose(np.asarray(c_lego), np.asarray(c_ref), atol=1e-4)
         print(f"{M}x{K} @ {K}x{N}  match={ok}")
         assert ok, f"Mismatch at size={size}"
-    print("PASS: JAX LEGO matmul matches PyTorch")
+    print("PASS: JAX LEGO matmul matches jnp.dot")
