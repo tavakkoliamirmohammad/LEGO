@@ -81,7 +81,7 @@ The `lego` MLIR dialect defines layout operations (`gen_p`, `reg_p`, `row`, `col
 | Dependency | Version          | Notes                         |
 |-----------|------------------|-------------------------------|
 | Python    | >= 3.12          | Tested with 3.12, 3.13, 3.14 |
-| LLVM/MLIR | commit `a3d8e35` | Included as a submodule       |
+| LLVM/MLIR | commit `7477045` | Included as a submodule       |
 | CMake     | >= 3.20          |                               |
 | Ninja     |                  | Recommended build generator   |
 | NumPy     | 2.1.2            |                               |
