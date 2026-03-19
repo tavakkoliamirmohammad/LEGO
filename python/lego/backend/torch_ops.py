@@ -17,88 +17,74 @@ if _HAS_TORCH:
     class LegoTransformFunction(torch.autograd.Function):
         """Autograd function for LEGO layout transforms.
 
-        Forward: applies the layout transformation (permutation).
+        Forward: applies the layout transformation via permutation table.
         Backward: applies the inverse (since layouts are bijective).
         """
 
         @staticmethod
-        def forward(ctx, input_tensor, compiler):
+        def forward(ctx, input_tensor, compiler, fwd_perm=None, inv_perm=None):
             ctx.compiler = compiler
-            src = input_tensor.contiguous()
+            device = input_tensor.device
 
-            if src.is_cuda:
-                np_src = src.cpu().numpy()
+            if fwd_perm is not None:
+                fwd_t = fwd_perm
+                inv_t = inv_perm
             else:
-                np_src = src.numpy()
+                fwd_np, inv_np = compiler.get_permutation_table()
+                fwd_t = torch.from_numpy(fwd_np).to(device)
+                inv_t = torch.from_numpy(inv_np).to(device)
 
-            np_dst = compiler.transform_numpy(np_src)
-
-            if src.is_cuda:
-                output = torch.from_numpy(np_dst).to(input_tensor.device)
-            else:
-                output = torch.from_numpy(np_dst)
-
-            return output
+            ctx.save_for_backward(inv_t)
+            flat = input_tensor.contiguous().view(-1)
+            return flat[fwd_t].view(input_tensor.shape)
 
         @staticmethod
         def backward(ctx, grad_output):
-            compiler = ctx.compiler
-            grad = grad_output.contiguous()
-
-            if grad.is_cuda:
-                np_grad = grad.cpu().numpy()
-            else:
-                np_grad = grad.numpy()
-
-            np_out = compiler.inverse_transform_numpy(np_grad)
-
-            if grad.is_cuda:
-                result = torch.from_numpy(np_out).to(grad_output.device)
-            else:
-                result = torch.from_numpy(np_out)
-
-            return result, None
+            inv_t, = ctx.saved_tensors
+            flat_grad = grad_output.contiguous().view(-1)
+            return flat_grad[inv_t].view(grad_output.shape), None, None, None
 
     class LegoInverseTransformFunction(torch.autograd.Function):
         """Autograd function for LEGO inverse layout transforms."""
 
         @staticmethod
-        def forward(ctx, input_tensor, compiler):
+        def forward(ctx, input_tensor, compiler, fwd_perm=None, inv_perm=None):
             ctx.compiler = compiler
-            src = input_tensor.contiguous()
+            device = input_tensor.device
 
-            if src.is_cuda:
-                np_src = src.cpu().numpy()
+            if inv_perm is not None:
+                inv_t = inv_perm
+                fwd_t = fwd_perm
             else:
-                np_src = src.numpy()
+                fwd_np, inv_np = compiler.get_permutation_table()
+                fwd_t = torch.from_numpy(fwd_np).to(device)
+                inv_t = torch.from_numpy(inv_np).to(device)
 
-            np_dst = compiler.inverse_transform_numpy(np_src)
-
-            if src.is_cuda:
-                output = torch.from_numpy(np_dst).to(input_tensor.device)
-            else:
-                output = torch.from_numpy(np_dst)
-
-            return output
+            ctx.save_for_backward(fwd_t)
+            flat = input_tensor.contiguous().view(-1)
+            return flat[inv_t].view(input_tensor.shape)
 
         @staticmethod
         def backward(ctx, grad_output):
-            compiler = ctx.compiler
-            grad = grad_output.contiguous()
+            fwd_t, = ctx.saved_tensors
+            flat_grad = grad_output.contiguous().view(-1)
+            return flat_grad[fwd_t].view(grad_output.shape), None, None, None
 
-            if grad.is_cuda:
-                np_grad = grad.cpu().numpy()
-            else:
-                np_grad = grad.numpy()
+    # ========================================================================
+    # torch.library custom op for torch.compile support
+    # ========================================================================
 
-            np_out = compiler.transform_numpy(np_grad)
+    torch.library.define("lego::permute", "(Tensor x, Tensor perm) -> Tensor")
 
-            if grad.is_cuda:
-                result = torch.from_numpy(np_out).to(grad_output.device)
-            else:
-                result = torch.from_numpy(np_out)
+    def _permute_impl(x, perm):
+        return x.contiguous().view(-1)[perm].view(x.shape)
 
-            return result, None
+    torch.library.impl("lego::permute", "cpu")(_permute_impl)
+    torch.library.impl("lego::permute", "cuda")(_permute_impl)
+
+    @torch.library.register_fake("lego::permute")
+    def _permute_fake(x, perm):
+        return x.new_empty(x.shape)
 
 else:
     # Stubs when PyTorch is not available

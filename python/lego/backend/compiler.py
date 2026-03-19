@@ -125,8 +125,32 @@ def _emit_layout(layout, dim_vals):
             obj_vals.append(_emit_layout(obj, obj_dims))
         return _emit_group_by(dim_vals, obj_vals)
     if isinstance(layout, GenP):
-        return _emit_gen_p(dim_vals, len(layout._dims),
-                           layout.f_apply, layout.f_inv)
+        import sympy as sp
+        from lego.backend.symbolic import _lower_sympy_to_index
+        from lego.backend.dialects.lego_dialect import GenPOp, YieldOp
+
+        idx_ty = IndexType.get()
+        lt = ir.Type.parse("!lego.layout")
+        gen_p_op = GenPOp(result=lt, dims=dim_vals)
+        rank = len(layout._dims)
+
+        apply_block = gen_p_op.body.blocks.append(*([idx_ty] * rank))
+        with InsertionPoint(apply_block):
+            temp_syms = [sp.Symbol(f"_genp_arg_{k}", integer=True) for k in range(rank)]
+            sym_to_val = {s: v for s, v in zip(temp_syms, apply_block.arguments)}
+            result_expr = layout.f_apply(tuple(temp_syms))
+            YieldOp(values=[_lower_sympy_to_index(result_expr, sym_to_val)])
+
+        if layout.f_inv is not None:
+            inv_block = gen_p_op.inv_body.blocks.append(idx_ty)
+            with InsertionPoint(inv_block):
+                temp_flat = sp.Symbol("_genp_flat", integer=True)
+                sym_to_val = {temp_flat: inv_block.arguments[0]}
+                inv_results = layout.f_inv(temp_flat)
+                YieldOp(values=[_lower_sympy_to_index(r, sym_to_val)
+                                for r in inv_results])
+
+        return gen_p_op.result
     raise TypeError(f"Unsupported: {type(layout).__name__}")
 
 
@@ -206,6 +230,7 @@ class LayoutCompiler:
         self._ctx = None
         self._engine = None
         self._mlir_text = None
+        self._perm_table = None
 
     @property
     def mlir_text(self):
@@ -242,6 +267,23 @@ class LayoutCompiler:
 
     def inverse_transform_numpy(self, arr):
         return self._invoke("inverse_transform", arr)
+
+    def get_permutation_table(self):
+        """Compute forward and inverse permutation as int64 arrays."""
+        if self._perm_table is not None:
+            return self._perm_table
+
+        total = 1
+        for s in self._shape:
+            total *= s
+
+        i64_compiler = LayoutCompiler(self._layout, self._shape, "i64")
+        identity = np.arange(total, dtype=np.int64)
+        fwd = i64_compiler.transform_numpy(identity).ravel()
+        inv = i64_compiler.inverse_transform_numpy(identity).ravel()
+
+        self._perm_table = (fwd, inv)
+        return self._perm_table
 
 
 # ============================================================================
