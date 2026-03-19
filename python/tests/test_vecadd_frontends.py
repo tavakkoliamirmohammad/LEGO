@@ -1,4 +1,7 @@
-"""End-to-end vecadd tests for all frontends, verified against PyTorch."""
+"""End-to-end vecadd tests for all frontends, verified against PyTorch.
+
+Skipped entirely when GPU dependencies (triton, numba, jax) are not installed.
+"""
 
 import functools
 import math
@@ -6,11 +9,15 @@ import math
 import numpy as np
 import pytest
 import torch
-import triton
-import triton.language as tl
-import jax
-import jax.numpy as jnp
-from numba import cuda
+
+try:
+    import triton
+    import triton.language as tl
+    import jax
+    import jax.numpy as jnp
+    from numba import cuda
+except ImportError:
+    pytest.skip("GPU dependencies (triton/jax/numba) not available", allow_module_level=True)
 
 from lego.core import OrderBy, Row
 from lego.rewriter import rewrite

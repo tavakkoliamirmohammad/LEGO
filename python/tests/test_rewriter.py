@@ -43,6 +43,15 @@ class TestLegoArange:
 
 # ── Triton backend ───────────────────────────────────────────────────────
 
+# ── Triton availability check (used to skip triton-dependent classes) ────
+try:
+    import triton  # noqa: F401
+    _has_triton = True
+except ImportError:
+    _has_triton = False
+
+
+@pytest.mark.skipif(not _has_triton, reason="triton not installed")
 class TestTritonParsing:
     """Verify that the Triton adapter produces valid Triton code."""
 
