@@ -17,8 +17,8 @@ class LEGOPythonCodePrinter(PythonCodePrinter):
         num, den = arg.as_numer_denom()
         return f"(({self._print(num)})//({self._print(den)}))"
 
-    def _print_TritonRange(self, expr):
-        base_expr_str = expr.args[0]
+    def _print_BroadcastRange(self, expr):
+        base_expr_str = self._print(expr.args[0])
         try:
             dim_val = int(expr.args[1])
             total_val = int(expr.args[2])
@@ -35,3 +35,7 @@ class LEGOPythonCodePrinter(PythonCodePrinter):
             slices.append(f"None at dim {dim_val} and ':' otherwise")
         index_str = ", ".join(slices)
         return f"(({base_expr_str})[{index_str}])"
+
+    def _print_lego_arange(self, expr):
+        """Base rendering of lego_arange — DSL subclasses override this."""
+        return f"lego_arange({self._print(expr.args[0])}, {self._print(expr.args[1])})"

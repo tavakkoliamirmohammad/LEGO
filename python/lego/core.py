@@ -6,7 +6,7 @@ import sympy as sp
 from functools import reduce
 
 
-class TritonRange(Function):
+class BroadcastRange(Function):
     is_integer = True
 
     @classmethod
@@ -63,9 +63,21 @@ class TritonRange(Function):
         return None  # Let SymPy decide based on other properties
 
 
+# Keep backward-compatible alias
+TritonRange = BroadcastRange
+
+
+class lego_arange(Function):
+    """DSL-agnostic arange placeholder. Each DSL printer renders it appropriately."""
+    is_integer = True
+
+    @classmethod
+    def eval(cls, start, stop):
+        return None
+
+
 def get_arange(start, stop):
-    tl_arange = Function("tl.arange", integer=True)
-    return tl_arange(start, stop)
+    return lego_arange(start, stop)
 
 
 def product(symbols: List[Symbol]) -> Symbol:
@@ -302,7 +314,7 @@ class GroupBy(LayoutBlock):
                     start = item.start
                 if item.stop is not None:
                     end = item.stop
-                expr_new_axis = TritonRange(
+                expr_new_axis = BroadcastRange(
                     get_arange(start, end), slice_rank, num_slices)
                 sym = sp.symbols(f"_tr{i}", integer=True)
                 i += 1
