@@ -16,9 +16,11 @@ LEGO/
 ├── python/                  # Python package (lego-layout)
 │   ├── lego/
 │   │   ├── core.py          # Layout primitives (Row, Col, RegP, GenP, OrderBy, GroupBy, TileByLayout)
+│   │   ├── rewriter.py      # DSL-agnostic AST rewriting engine
+│   │   ├── python_printer.py# SymPy code printer (base + DSL subclasses)
 │   │   ├── backend/         # MLIR compilation, JIT, SymPy lowering, PyTorch autograd
-│   │   └── frontends/       # User-facing APIs (Triton @jit, NumPy/PyTorch tensor transforms)
-│   ├── examples/            # Usage examples (triton, python_mlir, symbolic)
+│   │   └── frontends/       # DSLAdapter ABC + adapters (Triton, Numba CUDA, JAX, python_mlir)
+│   ├── examples/            # Usage examples (triton, numba_cuda, jax, python_mlir, symbolic)
 │   └── tests/               # Python tests
 │
 ├── include/Lego/           # MLIR dialect headers (ODS definitions, passes)
@@ -34,38 +36,64 @@ LEGO/
 
 ## Architecture
 
-All frontends lower through a unified MLIR-based backend:
+All frontends share a DSL-agnostic rewriter that evaluates layout algebra at
+decoration time, then delegates code generation to a pluggable `DSLAdapter`.
+The adapters lower through a unified MLIR-based backend:
 
 ```
- ┌─────────────┐ ┌────────────┐ ┌───────────┐
- │ Triton @jit │ │ Tensor API │ │ Symbolic  │
- └──────┬──────┘ └─────┬──────┘ └─────┬─────┘
-        │              │              │
-        └──────────────┼──────────────┘
-                       │
-                       v
-        ┌──────────────────────────┐
-        │       lego dialect       │
-        │  ······················  │
-        │  normalization           │
-        │  simplification          │
-        │  verification            │
-        │  lowering                │
-        └────────────┬─────────────┘
-                     │
-                     v
-        ┌──────────────────────────┐
-        │        LLVM / MLIR       │
-        │  ······················  │
-        │  X86 │ AArch64 │ NVPTX  │
-        └──────────────────────────┘
+                          User Code
+                             |
+                     +-------+-------+
+                     |               |
+              @lego.jit        Tensor / Symbolic
+              decorator              API
+                     |               |
+          +----------+----------+    |
+          |          |          |    |
+      +---+---+ +---+---+ +---+---+ |
+      |Triton | |Numba  | | JAX   | |
+      |Adapter| |CUDA   | |Adapter| |
+      |       | |Adapter| |       | |
+      +---+---+ +---+---+ +---+---+ |
+          |          |          |    |
+          +----------+----------+    |
+                     |               |
+            +--------+--------+      |
+            |    rewriter.py  |      |
+            |  AST transform  |      |
+            |  + SymPy eval   |      |
+            +--------+--------+      |
+                     |               |
+                     +-------+-------+
+                             |
+                  +----------+----------+
+                  |    lego dialect     |
+                  |  .................. |
+                  |  normalization      |
+                  |  simplification     |
+                  |  verification       |
+                  |  lowering           |
+                  +----------+----------+
+                             |
+                  +----------+----------+
+                  |     LLVM / MLIR     |
+                  |  .................. |
+                  |  X86 | AArch64 |   |
+                  |       NVPTX        |
+                  +---------------------+
 ```
 
 ### Frontends
 
-- **Triton JIT** (`lego.jit`) -- `@jit` decorator that transforms Triton GPU kernels via AST rewriting ([example](python/examples/triton/hello_world.py))
-- **Tensor API** (`lego.frontends.python_mlir`) -- JIT-compiled layout transforms for NumPy and PyTorch tensors ([example](python/examples/python_mlir/hello_world.py))
-- **Symbolic** (`lego.core`) -- SymPy-based algebraic layout expressions ([example](python/examples/symbolic/hello_world.py))
+| Frontend | Module | Decorator | Description |
+|----------|--------|-----------|-------------|
+| **Triton** | `lego.frontends.triton_jit` | `@lego.jit` | Transforms Triton GPU kernels via AST rewriting ([vecadd](python/examples/triton/hello_world.py), [matmul](python/examples/triton/matmul_lego.py)) |
+| **Numba CUDA** | `lego.frontends.numba_jit` | `@lego_jit` | Transforms Numba CUDA kernels, scalar thread indexing ([vecadd](python/examples/numba_cuda/hello_world.py), [matmul](python/examples/numba_cuda/matmul_lego.py)) |
+| **JAX** | `lego.frontends.jax_jit` | `@lego_jit` | Transforms JAX functions, preserves `static_argnums` ([vecadd](python/examples/jax/hello_world.py), [matmul](python/examples/jax/matmul_lego.py)) |
+| **Tensor API** | `lego.frontends.python_mlir` | -- | JIT-compiled layout transforms for NumPy/PyTorch ([example](python/examples/python_mlir/hello_world.py)) |
+| **Symbolic** | `lego.core` | -- | SymPy-based algebraic layout expressions ([example](python/examples/symbolic/hello_world.py)) |
+
+Each JIT frontend implements the `DSLAdapter` interface (`frontends/_adapter.py`), which defines four hooks: `unwrap`, `find_runtime_vars`, `get_code_printer`, and `compile_and_wrap`. The DSL-agnostic rewriter (`rewriter.py`) handles AST transformation and symbolic evaluation.
 
 ### MLIR Backend
 
@@ -86,6 +114,14 @@ The `lego` MLIR dialect defines layout operations (`gen_p`, `reg_p`, `row`, `col
 | Ninja     |                  | Recommended build generator   |
 | NumPy     | 2.1.2            |                               |
 | SymPy     | 1.14.0           |                               |
+
+Optional (for GPU frontends):
+
+| Dependency | Frontend    |
+|-----------|-------------|
+| Triton    | Triton JIT  |
+| Numba     | Numba CUDA  |
+| JAX       | JAX JIT     |
 
 ## Installation
 
