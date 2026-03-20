@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lego.backend.compiler import LayoutCompiler
 from lego.core import Row, Col, RegP, OrderBy, GroupBy, TileByLayout
 from lego.frontends.python_mlir import (
-    LegoLayout, RowMajor, ColMajor, Tiled,
+    LegoLayout, RowMajor, ColMajor, Tiled, TiledView, Custom,
     row, col, reg_p, order_by, tile_by, group_by,
     Transposed, ZCurve, Swizzle, BlockCyclic,
     Batched, BatchedLayout, LegoArray,
@@ -117,9 +117,13 @@ class TestConvenienceConstructors:
         assert layout._shape == (4, 8)
 
     def test_tiled_import(self):
-        """Tiled is importable from lego."""
+        """Tiled is importable from lego and returns TiledView."""
         layout = Tiled((8, 8), tile_shape=(4, 4))
-        assert layout._shape == (8, 8)
+        assert isinstance(layout, TiledView)
+        assert layout.original_shape == (8, 8)
+        assert layout.tile_grid == (2, 2)
+        assert layout.tile_shape == (4, 4)
+        assert layout.shape == (2, 2, 4, 4)
 
     def test_custom_import(self):
         """Custom wraps a descriptor layout."""
@@ -215,12 +219,12 @@ class TestDescriptorAPI:
         assert isinstance(inner_order, OrderBy)
         assert isinstance(inner_order.perms[0], Col)
 
-    def test_tiled_uses_tile_by(self):
-        """Tiled uses TileByLayout internally."""
-        layout = Tiled((8, 8), tile_shape=(4, 4))
-        inner = layout._layout
-        assert isinstance(inner, TileByLayout)
-        assert inner._tile_groups == [(2, 2), (4, 4)]
+    def test_tile_by_via_custom(self):
+        """TileByLayout is usable via Custom wrapper."""
+        tile_layout = OrderBy(Row(8, 8)).TileBy((2, 2), (4, 4))
+        layout = Custom(tile_layout, (8, 8))
+        assert isinstance(tile_layout, TileByLayout)
+        assert tile_layout._tile_groups == [(2, 2), (4, 4)]
 
     def test_row_major_round_trip_with_row_desc(self):
         """RowMajor with RowDesc compiles and round-trips correctly."""
@@ -249,12 +253,23 @@ class TestDescriptorAPI:
         assert result[0, 1] == 4  # j=1, i=0 -> flat[1*4+0] = flat[4] = 4
 
     def test_tiled_round_trip(self):
-        """Tiled with TileByDesc compiles and round-trips correctly."""
+        """Tiled transform + inverse == identity."""
         layout = Tiled((8, 8), tile_shape=(4, 4))
-        result = layout.create_tensor(np.float32)
-        back = layout.inverse_transform(result)
-        expected = np.arange(64, dtype=np.float32).reshape(8, 8)
-        np.testing.assert_array_almost_equal(back, expected)
+        arr = np.arange(64, dtype=np.float32).reshape(8, 8)
+        tiled = layout.transform(arr)
+        assert tiled.shape == (2, 2, 4, 4)
+        back = layout.inverse_transform(tiled)
+        np.testing.assert_array_equal(back, arr)
+
+    def test_tiled_values_preserved(self):
+        """Tiled view preserves values — tiled[tr,tc,lr,lc] == original[tr*th+lr, tc*tw+lc]."""
+        layout = Tiled((8, 8), tile_shape=(4, 4))
+        arr = np.arange(64, dtype=np.float32).reshape(8, 8)
+        tiled = layout.transform(arr)
+        for tr in range(2):
+            for tc in range(2):
+                expected_tile = arr[tr*4:(tr+1)*4, tc*4:(tc+1)*4]
+                np.testing.assert_array_equal(tiled[tr, tc], expected_tile)
 
     def test_composable_api_col_tile(self):
         """order_by(col(...)).tile_by(...) composes correctly."""
@@ -277,8 +292,9 @@ class TestDescriptorAPI:
         assert "lego.col" in mlir
 
     def test_mlir_text_contains_tile_by_op(self):
-        """Tiled MLIR text contains lego.tile_by."""
-        layout = Tiled((8, 8), tile_shape=(4, 4))
+        """TileByLayout MLIR text contains lego.tile_by."""
+        tile_layout = OrderBy(Row(8, 8)).TileBy((2, 2), (4, 4))
+        layout = Custom(tile_layout, (8, 8))
         mlir = layout.get_mlir()
         assert "lego.tile_by" in mlir
 
@@ -324,11 +340,13 @@ class TestPyTorchIntegration:
 
     def test_torch_tiled(self):
         """PyTorch tiled layout round-trip."""
+        import torch
         layout = Tiled((8, 8), tile_shape=(4, 4))
-        result = layout.create_tensor(np.float32)
-        back = layout.inverse_transform(result)
-        expected = np.arange(64, dtype=np.float32).reshape(8, 8)
-        np.testing.assert_array_almost_equal(back, expected)
+        x = torch.arange(64, dtype=torch.float32).reshape(8, 8)
+        tiled = layout.transform(x)
+        assert tiled.shape == (2, 2, 4, 4)
+        back = layout.inverse_transform(tiled)
+        torch.testing.assert_close(back, x)
 
 
 # ============================================================================
@@ -338,7 +356,7 @@ class TestPyTorchIntegration:
 class TestPermutationTable:
     def test_perm_table_round_trip(self):
         """Permutation table forward then inverse == identity."""
-        layout = Tiled((8, 8), tile_shape=(4, 4))
+        layout = ColMajor((8, 8))
         compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
         fwd, inv = compiler.get_permutation_table()
         assert np.array_equal(inv[fwd], np.arange(64))
@@ -346,7 +364,7 @@ class TestPermutationTable:
 
     def test_perm_table_matches_jit(self):
         """Permutation table produces same result as JIT transform."""
-        layout = Tiled((8, 8), tile_shape=(4, 4))
+        layout = ColMajor((8, 8))
         arr = np.random.randn(64).astype(np.float32)
         jit_result = layout.transform(arr)
         compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
@@ -358,7 +376,7 @@ class TestPermutationTable:
     def test_cuda_transform_no_cpu_roundtrip(self):
         """CUDA tensors should transform without CPU copy."""
         import torch
-        layout = Tiled((8, 8), tile_shape=(4, 4))
+        layout = ColMajor((8, 8))
         x = torch.randn(8, 8, device="cuda")
         result = layout.transform(x)
         assert result.device.type == "cuda"
@@ -378,11 +396,11 @@ class TestErgonomics:
 
     def test_repr(self):
         layout = Tiled((8, 8), tile_shape=(4, 4))
-        assert "TileByLayout" in repr(layout)
+        assert "TiledView" in repr(layout)
         assert "(8, 8)" in repr(layout)
 
     def test_rank(self):
-        assert Tiled((8, 8), tile_shape=(4, 4)).rank == 2
+        assert Tiled((8, 8), tile_shape=(4, 4)).rank == 4
         assert RowMajor((2, 3, 4)).rank == 3
 
     def test_identity(self):
@@ -412,11 +430,11 @@ class TestErgonomics:
 
 class TestBatched:
     def test_batched_shape(self):
-        batched = Batched(Tiled((8, 8), (4, 4)), batch_shape=(32,))
+        batched = Batched(ColMajor((8, 8)), batch_shape=(32,))
         assert batched.shape == (32, 8, 8)
 
     def test_batched_round_trip(self):
-        base = Tiled((4, 4), tile_shape=(2, 2))
+        base = ColMajor((4, 4))
         batched = Batched(base, batch_shape=(3,))
         arr = np.random.randn(3, 4, 4).astype(np.float32)
         result = batched.transform(arr)
@@ -563,7 +581,7 @@ class TestLegoTensor:
     def test_as_lego_tensor_to_logical(self):
         import torch
         from lego.backend.torch_tensor import as_lego_tensor
-        layout = Tiled((4, 4), tile_shape=(2, 2))
+        layout = ColMajor((4, 4))
         x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
         lx = as_lego_tensor(x, layout)
         back = lx.to_logical()
@@ -572,7 +590,7 @@ class TestLegoTensor:
     def test_lego_tensor_repr(self):
         import torch
         from lego.backend.torch_tensor import as_lego_tensor
-        layout = Tiled((4, 4), tile_shape=(2, 2))
+        layout = ColMajor((4, 4))
         x = torch.randn(4, 4)
         lx = as_lego_tensor(x, layout)
         assert "LegoTensor" in repr(lx)
@@ -598,7 +616,7 @@ class TestLegoArray:
         np.testing.assert_array_equal(back, arr)
 
     def test_array_shape_dtype(self):
-        layout = Tiled((4, 4), tile_shape=(2, 2))
+        layout = ColMajor((4, 4))
         arr = np.zeros((4, 4), dtype=np.float64)
         la = layout.as_array(arr)
         assert la.shape == (4, 4)
@@ -631,7 +649,7 @@ class TestDLPack:
     def test_to_dlpack_torch(self, check_torch):
         """to_dlpack on a torch tensor returns a DLPack capsule."""
         import torch
-        layout = Tiled((4, 4), tile_shape=(2, 2))
+        layout = ColMajor((4, 4))
         x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
         capsule = layout.to_dlpack(x)
         restored = torch.from_dlpack(capsule)

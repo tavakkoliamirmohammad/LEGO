@@ -108,7 +108,7 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
 
     for stmt in stmts:
         # 1. Skip docstrings/constants
-        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, (ast.Constant, ast.Str)):
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
             new_body.append(stmt)
             continue
 

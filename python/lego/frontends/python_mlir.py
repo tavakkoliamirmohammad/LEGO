@@ -282,13 +282,110 @@ def ColMajor(shape):
     return LegoLayout(layout, shape)
 
 
+class TiledView:
+    """Tiled multi-index view of a tensor.
+
+    Transforms an (N, M) tensor into a (N//th, M//tw, th, tw) view
+    via reshape + transpose — no data movement, just re-indexing.
+
+    Example:
+        layout = Tiled((8, 8), tile_shape=(4, 4))
+        tiled = layout.transform(data)   # shape (2, 2, 4, 4)
+        tiled[0, 1]                      # the (0,1) tile as a 4×4 array
+        back = layout.inverse_transform(tiled)  # shape (8, 8)
+    """
+
+    def __init__(self, shape, tile_shape):
+        if len(shape) != len(tile_shape):
+            raise ValueError("shape and tile_shape must have the same rank")
+        for s, t in zip(shape, tile_shape):
+            if s % t != 0:
+                raise ValueError(f"Dimension {s} not divisible by tile size {t}")
+
+        self._original_shape = tuple(shape)
+        self._tile_shape = tuple(tile_shape)
+        self._tile_grid = tuple(s // t for s, t in zip(shape, tile_shape))
+        self._shape = self._tile_grid + self._tile_shape
+        self._tile_layout = OrderBy(Row(*shape)).TileBy(self._tile_grid, self._tile_shape)
+
+        self._numel = 1
+        for s in shape:
+            self._numel *= s
+
+        ndim = len(shape)
+        # (g0, t0, g1, t1, ...) → (g0, g1, ..., t0, t1, ...)
+        self._fwd_perm = list(range(0, 2 * ndim, 2)) + list(range(1, 2 * ndim, 2))
+        # (g0, g1, ..., t0, t1, ...) → (g0, t0, g1, t1, ...)
+        self._inv_perm = [0] * (2 * ndim)
+        for i in range(ndim):
+            self._inv_perm[2 * i] = i
+            self._inv_perm[2 * i + 1] = ndim + i
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def original_shape(self):
+        return self._original_shape
+
+    @property
+    def tile_shape(self):
+        return self._tile_shape
+
+    @property
+    def tile_grid(self):
+        return self._tile_grid
+
+    @property
+    def numel(self):
+        return self._numel
+
+    @property
+    def rank(self):
+        return len(self._shape)
+
+    def _interleaved_shape(self):
+        result = []
+        for g, t in zip(self._tile_grid, self._tile_shape):
+            result.extend([g, t])
+        return result
+
+    def transform(self, tensor):
+        """Reshape tensor into tiled multi-index view."""
+        interleaved = self._interleaved_shape()
+        if _HAS_TORCH and isinstance(tensor, torch.Tensor):
+            return tensor.reshape(interleaved).permute(self._fwd_perm)
+        if isinstance(tensor, np.ndarray):
+            return tensor.reshape(interleaved).transpose(self._fwd_perm)
+        raise TypeError(f"Unsupported tensor type: {type(tensor)}")
+
+    def inverse_transform(self, tensor):
+        """Reshape tiled multi-index view back to original shape."""
+        if _HAS_TORCH and isinstance(tensor, torch.Tensor):
+            return tensor.permute(self._inv_perm).contiguous().reshape(self._original_shape)
+        if isinstance(tensor, np.ndarray):
+            return tensor.transpose(self._inv_perm).reshape(self._original_shape)
+        raise TypeError(f"Unsupported tensor type: {type(tensor)}")
+
+    def create_tensor(self, dtype):
+        arr = np.arange(self._numel, dtype=dtype).reshape(self._original_shape)
+        return self.transform(arr)
+
+    def __call__(self, tensor):
+        return self.transform(tensor)
+
+    def get_mlir(self, dtype="f32"):
+        """Return MLIR text with lego.tile_by ops."""
+        return LayoutCompiler(self._tile_layout, self._original_shape, dtype).mlir_text
+
+    def __repr__(self):
+        return f"TiledView(shape={self._original_shape}, tile={self._tile_shape})"
+
+
 def Tiled(shape, tile_shape):
-    """Tiled layout — tiles arranged row-major, elements within tiles contiguous."""
-    if len(shape) != len(tile_shape):
-        raise ValueError("shape and tile_shape must have the same rank")
-    tile_grid = tuple(s // t for s, t in zip(shape, tile_shape))
-    layout = OrderBy(Row(*shape)).TileBy(tile_grid, tile_shape)
-    return LegoLayout(layout, shape)
+    """Tiled layout — multi-index view with (grid..., tile...) dimensions."""
+    return TiledView(shape, tile_shape)
 
 
 def Custom(layout_obj, shape):

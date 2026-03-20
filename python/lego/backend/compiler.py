@@ -9,8 +9,12 @@ LEGO Layout Compiler & MLIR Codegen
 
 import ctypes
 import functools
+import os
+import sys
 import numpy as np
 from enum import Enum
+
+_LEGO_DEBUG = os.environ.get("LEGO_DEBUG", "")
 
 from mlir.ir import (
     Context, Location, Module, InsertionPoint,
@@ -192,8 +196,7 @@ class IRBuilder:
             dim_vals = [_index_const(s) for s in layout_dims]
             rank = len(layout_dims)
 
-            identity_perm = list(range(rank))
-            identity = _emit_group_by(dim_vals, [_emit_order_by([_emit_reg_p(identity_perm, dim_vals)])])
+            identity = _emit_group_by(dim_vals, [_emit_order_by([_emit_row(dim_vals)])])
             layout_val = _emit_layout(self._layout, dim_vals)
 
             loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1))
@@ -245,8 +248,22 @@ class LayoutCompiler:
             if self._mlir_text is None:
                 self._mlir_text = str(module)
             with self._ctx:
+                if _LEGO_DEBUG:
+                    print("=== MLIR input (LEGO dialect) ===", file=sys.stderr)
+                    print(module, file=sys.stderr)
+                    print(file=sys.stderr)
+                    module_copy = Module.parse(str(module))
+                    pm_pre = PassManager.parse("builtin.module(canonicalize,cse)")
+                    pm_pre.run(module_copy.operation)
+                    print("=== MLIR after canonicalize + CSE ===", file=sys.stderr)
+                    print(module_copy, file=sys.stderr)
+                    print(file=sys.stderr)
                 pm = PassManager.parse("builtin.module(lego-to-llvm)")
                 pm.run(module.operation)
+                if _LEGO_DEBUG:
+                    print("=== MLIR after lego-to-llvm ===", file=sys.stderr)
+                    print(module, file=sys.stderr)
+                    print(file=sys.stderr)
                 self._engine = ExecutionEngine(module, opt_level=2)
         return self._engine
 

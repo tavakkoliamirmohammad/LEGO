@@ -52,12 +52,19 @@ add_lit_testsuite(check-lego "Running the Lego regression tests"
 
 # Python tests (pytest) — runs after LegoPythonModules is built
 if(TARGET LegoPythonModules)
+  add_custom_target(lego-sync-python-sources
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_SOURCE_DIR}/python/lego" "${CMAKE_BINARY_DIR}/python_packages/lego/lego"
+    DEPENDS LegoPythonModules
+    COMMENT "Syncing Python sources to build directory"
+  )
+
   add_custom_target(check-lego-python
     COMMAND ${CMAKE_COMMAND} -E env
       "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
       "${Python_EXECUTABLE}" -m pytest
         "${CMAKE_SOURCE_DIR}/python/tests" -v
-    DEPENDS LegoPythonModules
+    DEPENDS lego-sync-python-sources
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running LEGO Python tests"
     USES_TERMINAL
