@@ -53,7 +53,7 @@ def eval_expr(expr, subs):
 
 
 # ============================================================================
-# Phase 0: Infrastructure checks
+# Infrastructure checks
 # ============================================================================
 
 class TestInfrastructure:

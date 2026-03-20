@@ -7,11 +7,11 @@ Tests the user-facing tensor API including:
   - Composable descriptor API (row, col, order_by, tile_by)
   - NumPy integration
   - PyTorch integration (if available)
-  - Permutation tables (Phase 1)
-  - Ergonomics: __call__, __repr__, rank, is_identity, compose, __eq__ (Phase 2)
-  - Batched transforms (Phase 3)
-  - New constructors: Transposed, ZCurve, Swizzle, BlockCyclic (Phase 4)
-  - LegoTensor, LegoArray (Phase 5)
+  - Permutation tables
+  - Ergonomics: __call__, __repr__, rank, is_identity, compose, __eq__
+  - Batched transforms
+  - New constructors: Transposed, ZCurve, Swizzle, BlockCyclic
+  - LegoTensor, LegoArray
 """
 
 import pytest
@@ -332,7 +332,7 @@ class TestPyTorchIntegration:
 
 
 # ============================================================================
-# Phase 1: Permutation Table Tests
+# Permutation Table Tests
 # ============================================================================
 
 class TestPermutationTable:
@@ -367,7 +367,7 @@ class TestPermutationTable:
 
 
 # ============================================================================
-# Phase 2: Ergonomics Tests
+# Ergonomics Tests
 # ============================================================================
 
 class TestErgonomics:
@@ -407,7 +407,7 @@ class TestErgonomics:
 
 
 # ============================================================================
-# Phase 3: Batched Tests
+# Batched Tests
 # ============================================================================
 
 class TestBatched:
@@ -435,7 +435,7 @@ class TestBatched:
 
 
 # ============================================================================
-# Phase 4: New Constructor Tests
+# New Constructor Tests
 # ============================================================================
 
 class TestTransposed:
@@ -549,7 +549,7 @@ class TestBlockCyclic:
 
 
 # ============================================================================
-# Phase 5: LegoTensor & LegoArray Tests
+# LegoTensor & LegoArray Tests
 # ============================================================================
 
 class TestLegoTensor:
@@ -606,7 +606,7 @@ class TestLegoArray:
 
 
 # ============================================================================
-# Phase 5c: DLPack Tests
+# DLPack Tests
 # ============================================================================
 
 class TestDLPack:
@@ -652,7 +652,7 @@ class TestDLPack:
 
 
 # ============================================================================
-# Phase 5a: torch.library Custom Op Tests
+# torch.library Custom Op Tests
 # ============================================================================
 
 class TestCustomOp:
