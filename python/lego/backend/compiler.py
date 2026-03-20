@@ -222,11 +222,3 @@ class LayoutCompiler:
 
         self._perm_table = (fwd, inv)
         return self._perm_table
-
-
-# Backward compat: GPU codegen moved to lego.backend.gpu
-from lego.backend.gpu import (  # noqa: E402, F401
-    MemorySpace, MLIRPrinter, MLIRTensor, printer,
-    mlir_layout, mlir_apply, mlir_apply_inverse,
-    mlir_cast_view, mlir_load, mlir_store, mlir_loop,
-)

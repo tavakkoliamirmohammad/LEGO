@@ -36,10 +36,6 @@ if _HAS_TORCH:
             flat_grad = grad_output.contiguous().view(-1)
             return flat_grad[inv_perm].view(grad_output.shape), None, None
 
-    # Backward compat aliases
-    LegoTransformFunction = _LegoPermuteFunction
-    LegoInverseTransformFunction = _LegoPermuteFunction
-
     # ========================================================================
     # torch.library custom op for torch.compile support
     # ========================================================================
@@ -58,5 +54,3 @@ if _HAS_TORCH:
 
 else:
     _LegoPermuteFunction = None
-    LegoTransformFunction = None
-    LegoInverseTransformFunction = None
