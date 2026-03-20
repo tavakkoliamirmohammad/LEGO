@@ -50,14 +50,14 @@ add_lit_testsuite(check-lego "Running the Lego regression tests"
   ${LEGO_TEST_DEPENDS}
   )
 
-# Python tests (pytest) — runs after LegoPythonModules is built
+# Python tests (pytest) — runs after wheel directory is prepared
 if(TARGET LegoPythonModules)
   add_custom_target(check-lego-python
     COMMAND ${CMAKE_COMMAND} -E env
       "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
       "${Python_EXECUTABLE}" -m pytest
         "${CMAKE_SOURCE_DIR}/python/tests" -v
-    DEPENDS LegoPythonModules
+    DEPENDS lego-prepare-wheel
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running LEGO Python tests"
     USES_TERMINAL

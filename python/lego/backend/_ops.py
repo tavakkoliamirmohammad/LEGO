@@ -2,9 +2,13 @@
 
 Used by both compiler.py and symbolic.py — kept separate to avoid circular imports.
 """
+import os
+
 from mlir.ir import IndexType, IntegerAttr, Type, InsertionPoint
 from mlir import ir
 from mlir.dialects import arith as arith_dialect
+
+_LEGO_DEBUG = os.environ.get("LEGO_DEBUG", "")
 
 
 def _lego_layout_type():
@@ -45,22 +49,6 @@ def _emit_tile_by(input_val, tile_dim_vals, tile_shape):
     from lego.backend.dialects.lego_dialect import TileByOp
     return TileByOp(result=_lego_layout_type(), input=input_val,
                     tile_dims=tile_dim_vals, tile_shape=tile_shape).result
-
-
-def _emit_gen_p(dim_vals, rank, apply_builder, inv_builder):
-    from lego.backend.dialects.lego_dialect import GenPOp, YieldOp
-    idx_ty = IndexType.get()
-    gen_p_op = GenPOp(result=_lego_layout_type(), dims=dim_vals)
-
-    apply_block = gen_p_op.body.blocks.append(*([idx_ty] * rank))
-    with InsertionPoint(apply_block):
-        YieldOp(values=[apply_builder(list(apply_block.arguments))])
-
-    inv_block = gen_p_op.inv_body.blocks.append(idx_ty)
-    with InsertionPoint(inv_block):
-        YieldOp(values=list(inv_builder(inv_block.arguments[0])))
-
-    return gen_p_op.result
 
 
 def _emit_apply(layout_val, indices):

@@ -14,93 +14,43 @@ except ImportError:
 
 if _HAS_TORCH:
 
-    class LegoTransformFunction(torch.autograd.Function):
-        """Autograd function for LEGO layout transforms.
+    class _LegoPermuteFunction(torch.autograd.Function):
+        """Autograd function for LEGO layout permutations.
 
-        Forward: applies the layout transformation (permutation).
-        Backward: applies the inverse (since layouts are bijective).
+        Forward: applies perm to flatten the input.
+        Backward: applies inv_perm (since layouts are bijective).
+
+        For forward transforms, call with (tensor, fwd_perm, inv_perm).
+        For inverse transforms, call with (tensor, inv_perm, fwd_perm).
         """
 
         @staticmethod
-        def forward(ctx, input_tensor, compiler):
-            ctx.compiler = compiler
-            src = input_tensor.contiguous()
-
-            if src.is_cuda:
-                np_src = src.cpu().numpy()
-            else:
-                np_src = src.numpy()
-
-            np_dst = compiler.transform_numpy(np_src)
-
-            if src.is_cuda:
-                output = torch.from_numpy(np_dst).to(input_tensor.device)
-            else:
-                output = torch.from_numpy(np_dst)
-
-            return output
+        def forward(ctx, input_tensor, perm, inv_perm):
+            ctx.save_for_backward(inv_perm)
+            flat = input_tensor.contiguous().view(-1)
+            return flat[perm].view(input_tensor.shape)
 
         @staticmethod
         def backward(ctx, grad_output):
-            compiler = ctx.compiler
-            grad = grad_output.contiguous()
+            inv_perm, = ctx.saved_tensors
+            flat_grad = grad_output.contiguous().view(-1)
+            return flat_grad[inv_perm].view(grad_output.shape), None, None
 
-            if grad.is_cuda:
-                np_grad = grad.cpu().numpy()
-            else:
-                np_grad = grad.numpy()
+    # ========================================================================
+    # torch.library custom op for torch.compile support
+    # ========================================================================
 
-            np_out = compiler.inverse_transform_numpy(np_grad)
+    torch.library.define("lego::permute", "(Tensor x, Tensor perm) -> Tensor")
 
-            if grad.is_cuda:
-                result = torch.from_numpy(np_out).to(grad_output.device)
-            else:
-                result = torch.from_numpy(np_out)
+    def _permute_impl(x, perm):
+        return x.contiguous().view(-1)[perm].view(x.shape)
 
-            return result, None
+    torch.library.impl("lego::permute", "cpu")(_permute_impl)
+    torch.library.impl("lego::permute", "cuda")(_permute_impl)
 
-    class LegoInverseTransformFunction(torch.autograd.Function):
-        """Autograd function for LEGO inverse layout transforms."""
-
-        @staticmethod
-        def forward(ctx, input_tensor, compiler):
-            ctx.compiler = compiler
-            src = input_tensor.contiguous()
-
-            if src.is_cuda:
-                np_src = src.cpu().numpy()
-            else:
-                np_src = src.numpy()
-
-            np_dst = compiler.inverse_transform_numpy(np_src)
-
-            if src.is_cuda:
-                output = torch.from_numpy(np_dst).to(input_tensor.device)
-            else:
-                output = torch.from_numpy(np_dst)
-
-            return output
-
-        @staticmethod
-        def backward(ctx, grad_output):
-            compiler = ctx.compiler
-            grad = grad_output.contiguous()
-
-            if grad.is_cuda:
-                np_grad = grad.cpu().numpy()
-            else:
-                np_grad = grad.numpy()
-
-            np_out = compiler.transform_numpy(np_grad)
-
-            if grad.is_cuda:
-                result = torch.from_numpy(np_out).to(grad_output.device)
-            else:
-                result = torch.from_numpy(np_out)
-
-            return result, None
+    @torch.library.register_fake("lego::permute")
+    def _permute_fake(x, perm):
+        return x.new_empty(x.shape)
 
 else:
-    # Stubs when PyTorch is not available
-    LegoTransformFunction = None
-    LegoInverseTransformFunction = None
+    _LegoPermuteFunction = None

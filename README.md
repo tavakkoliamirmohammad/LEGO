@@ -90,10 +90,38 @@ The adapters lower through a unified MLIR-based backend:
 | **Triton** | `lego.frontends.triton_jit` | `@lego.jit` | Transforms Triton GPU kernels via AST rewriting ([vecadd](python/examples/triton/hello_world.py), [matmul](python/examples/triton/matmul_lego.py)) |
 | **Numba CUDA** | `lego.frontends.numba_jit` | `@lego_jit` | Transforms Numba CUDA kernels, scalar thread indexing ([vecadd](python/examples/numba_cuda/hello_world.py), [matmul](python/examples/numba_cuda/matmul_lego.py)) |
 | **JAX** | `lego.frontends.jax_jit` | `@lego_jit` | Transforms JAX functions, preserves `static_argnums` ([vecadd](python/examples/jax/hello_world.py), [matmul](python/examples/jax/matmul_lego.py)) |
-| **Tensor API** | `lego.frontends.python_mlir` | -- | JIT-compiled layout transforms for NumPy/PyTorch ([example](python/examples/python_mlir/hello_world.py)) |
+| **Tensor API** | `lego.frontends.python_mlir` | -- | JIT-compiled layout transforms for NumPy/PyTorch with `torch.compile` support ([example](python/examples/python_mlir/hello_world.py)) |
 | **Symbolic** | `lego.core` | -- | SymPy-based algebraic layout expressions ([example](python/examples/symbolic/hello_world.py)) |
 
 Each JIT frontend implements the `DSLAdapter` interface (`frontends/_adapter.py`), which defines four hooks: `unwrap`, `find_runtime_vars`, `get_code_printer`, and `compile_and_wrap`. The DSL-agnostic rewriter (`rewriter.py`) handles AST transformation and symbolic evaluation.
+
+### Tensor API
+
+The Tensor API provides layout constructors and transforms for NumPy and PyTorch:
+
+```python
+from lego import Tiled, ColMajor, ZCurve, Swizzle, BlockCyclic, Batched
+
+# Basic layouts
+layout = Tiled((8, 8), tile_shape=(4, 4))
+result = layout.transform(tensor)          # or layout(tensor)
+back = layout.inverse_transform(result)
+
+# GPU-oriented layouts
+z = ZCurve((4, 4))          # Morton curve for 2D spatial locality
+s = Swizzle((8, 8))         # XOR swizzle to avoid shared memory bank conflicts
+bc = BlockCyclic((16,), 2, 2)  # ScaLAPACK-style distribution
+
+# Batched transforms (vectorized, no Python loop)
+batched = Batched(layout, batch_shape=(32,))
+batched.transform(batch_tensor)  # (32, 8, 8)
+
+# Composition and comparison
+composed = layout_a.compose(layout_b)
+assert RowMajor((4, 4)) == RowMajor((4, 4))
+```
+
+PyTorch integration uses precomputed permutation tables for device-local transforms (no CPU↔GPU copies) and supports `torch.compile` via a registered `lego::permute` custom op. `LegoTensor` (torch.Tensor subclass) and `LegoArray` (NumPy wrapper) carry layout metadata with the data.
 
 ### MLIR Backend
 
@@ -119,6 +147,7 @@ Optional (for GPU frontends):
 
 | Dependency | Frontend    |
 |-----------|-------------|
+| PyTorch   | Tensor API, `torch.compile` |
 | Triton    | Triton JIT  |
 | Numba     | Numba CUDA  |
 | JAX       | JAX JIT     |

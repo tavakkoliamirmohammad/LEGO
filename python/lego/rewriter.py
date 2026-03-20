@@ -10,13 +10,14 @@ import ast
 import contextlib
 import inspect
 import io
-import os
 import sys
 import textwrap
+
 
 import sympy as sp
 
 from lego.core import LayoutBlock
+from lego.backend._ops import _LEGO_DEBUG
 from lego.frontends._adapter import DSLAdapter
 
 
@@ -108,7 +109,7 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
 
     for stmt in stmts:
         # 1. Skip docstrings/constants
-        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, (ast.Constant, ast.Str)):
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
             new_body.append(stmt)
             continue
 
@@ -270,9 +271,8 @@ def rewrite(fn, adapter: DSLAdapter, **kwargs):
 
     new_source = ast.unparse(tree)
 
-    _debug = os.environ.get('LEGO_DEBUG', False)
-    if _debug:
-        print(f"=== LEGO Generated Kernel ===", file=sys.stderr)
+    if _LEGO_DEBUG:
+        print("=== LEGO Generated Kernel ===", file=sys.stderr)
         print(new_source, file=sys.stderr)
         print("=== End Generated Kernel ===", file=sys.stderr)
 
