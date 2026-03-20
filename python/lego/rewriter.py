@@ -10,13 +10,14 @@ import ast
 import contextlib
 import inspect
 import io
-import os
 import sys
 import textwrap
+
 
 import sympy as sp
 
 from lego.core import LayoutBlock
+from lego.backend._ops import _LEGO_DEBUG
 from lego.frontends._adapter import DSLAdapter
 
 
@@ -270,9 +271,8 @@ def rewrite(fn, adapter: DSLAdapter, **kwargs):
 
     new_source = ast.unparse(tree)
 
-    _debug = os.environ.get('LEGO_DEBUG', False)
-    if _debug:
-        print(f"=== LEGO Generated Kernel ===", file=sys.stderr)
+    if _LEGO_DEBUG:
+        print("=== LEGO Generated Kernel ===", file=sys.stderr)
         print(new_source, file=sys.stderr)
         print("=== End Generated Kernel ===", file=sys.stderr)
 

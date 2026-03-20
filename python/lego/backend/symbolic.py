@@ -2,7 +2,6 @@
 SymPy lowering pipeline: SymPy layout expressions → MLIR LEGO dialect → arith → SymPy.
 """
 from lego.core import *
-import os
 import sys
 import sympy as sp
 
@@ -16,6 +15,7 @@ from lego.backend.dialects.lego_dialect import (
     ApplyOp, ApplyInverseOp, GenPOp, YieldOp,
 )
 from lego.backend._ops import (
+    _LEGO_DEBUG,
     _index_const, _lego_layout_type,
     _emit_reg_p, _emit_row, _emit_col, _emit_order_by,
     _emit_group_by, _emit_tile_by,
@@ -330,9 +330,6 @@ def _collect_free_symbols(layout):
         for obj in layout.objects:
             syms |= _collect_free_symbols(obj)
     return syms
-
-
-_LEGO_DEBUG = os.environ.get("LEGO_DEBUG", "")
 
 
 def simplify_via_mlir(layout, mode, args, constraints=None):

@@ -150,11 +150,11 @@ class LegoLayout:
 
     def transform(self, tensor):
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
-            from lego.backend.torch_ops import LegoTransformFunction
-            if LegoTransformFunction is not None:
+            from lego.backend.torch_ops import _LegoPermuteFunction
+            if _LegoPermuteFunction is not None:
                 fwd_t, inv_t = self._get_perm_tensors(tensor.device)
-                return LegoTransformFunction.apply(
-                    tensor, self._get_compiler(tensor), fwd_t, inv_t
+                return _LegoPermuteFunction.apply(
+                    tensor, fwd_t, inv_t
                 ).reshape(self._shape)
         if isinstance(tensor, np.ndarray):
             if self._composed_perm is not None:
@@ -166,11 +166,11 @@ class LegoLayout:
 
     def inverse_transform(self, tensor):
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
-            from lego.backend.torch_ops import LegoInverseTransformFunction
-            if LegoInverseTransformFunction is not None:
+            from lego.backend.torch_ops import _LegoPermuteFunction
+            if _LegoPermuteFunction is not None:
                 fwd_t, inv_t = self._get_perm_tensors(tensor.device)
-                return LegoInverseTransformFunction.apply(
-                    tensor, self._get_compiler(tensor), fwd_t, inv_t
+                return _LegoPermuteFunction.apply(
+                    tensor, inv_t, fwd_t
                 ).reshape(self._shape)
         if isinstance(tensor, np.ndarray):
             if self._composed_perm is not None:

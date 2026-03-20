@@ -14,61 +14,31 @@ except ImportError:
 
 if _HAS_TORCH:
 
-    class LegoTransformFunction(torch.autograd.Function):
-        """Autograd function for LEGO layout transforms.
+    class _LegoPermuteFunction(torch.autograd.Function):
+        """Autograd function for LEGO layout permutations.
 
-        Forward: applies the layout transformation via permutation table.
-        Backward: applies the inverse (since layouts are bijective).
+        Forward: applies perm to flatten the input.
+        Backward: applies inv_perm (since layouts are bijective).
+
+        For forward transforms, call with (tensor, fwd_perm, inv_perm).
+        For inverse transforms, call with (tensor, inv_perm, fwd_perm).
         """
 
         @staticmethod
-        def forward(ctx, input_tensor, compiler, fwd_perm=None, inv_perm=None):
-            ctx.compiler = compiler
-            device = input_tensor.device
-
-            if fwd_perm is not None:
-                fwd_t = fwd_perm
-                inv_t = inv_perm
-            else:
-                fwd_np, inv_np = compiler.get_permutation_table()
-                fwd_t = torch.from_numpy(fwd_np).to(device)
-                inv_t = torch.from_numpy(inv_np).to(device)
-
-            ctx.save_for_backward(inv_t)
+        def forward(ctx, input_tensor, perm, inv_perm):
+            ctx.save_for_backward(inv_perm)
             flat = input_tensor.contiguous().view(-1)
-            return flat[fwd_t].view(input_tensor.shape)
+            return flat[perm].view(input_tensor.shape)
 
         @staticmethod
         def backward(ctx, grad_output):
-            inv_t, = ctx.saved_tensors
+            inv_perm, = ctx.saved_tensors
             flat_grad = grad_output.contiguous().view(-1)
-            return flat_grad[inv_t].view(grad_output.shape), None, None, None
+            return flat_grad[inv_perm].view(grad_output.shape), None, None
 
-    class LegoInverseTransformFunction(torch.autograd.Function):
-        """Autograd function for LEGO inverse layout transforms."""
-
-        @staticmethod
-        def forward(ctx, input_tensor, compiler, fwd_perm=None, inv_perm=None):
-            ctx.compiler = compiler
-            device = input_tensor.device
-
-            if inv_perm is not None:
-                inv_t = inv_perm
-                fwd_t = fwd_perm
-            else:
-                fwd_np, inv_np = compiler.get_permutation_table()
-                fwd_t = torch.from_numpy(fwd_np).to(device)
-                inv_t = torch.from_numpy(inv_np).to(device)
-
-            ctx.save_for_backward(fwd_t)
-            flat = input_tensor.contiguous().view(-1)
-            return flat[inv_t].view(input_tensor.shape)
-
-        @staticmethod
-        def backward(ctx, grad_output):
-            fwd_t, = ctx.saved_tensors
-            flat_grad = grad_output.contiguous().view(-1)
-            return flat_grad[fwd_t].view(grad_output.shape), None, None, None
+    # Backward compat aliases
+    LegoTransformFunction = _LegoPermuteFunction
+    LegoInverseTransformFunction = _LegoPermuteFunction
 
     # ========================================================================
     # torch.library custom op for torch.compile support
@@ -87,6 +57,6 @@ if _HAS_TORCH:
         return x.new_empty(x.shape)
 
 else:
-    # Stubs when PyTorch is not available
+    _LegoPermuteFunction = None
     LegoTransformFunction = None
     LegoInverseTransformFunction = None

@@ -1,5 +1,5 @@
 """Shared-memory matrix transpose — pure MLIR LEGO dialect (no SymPy index math)."""
-from lego.backend.compiler import (
+from lego.backend.gpu import (
     MLIRTensor, printer,
     mlir_apply_inverse, mlir_load, mlir_store, mlir_loop,
 )
