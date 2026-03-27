@@ -301,7 +301,7 @@ def arith_to_sympy(value, val_to_sym, memo=None):
         "arith.shli": lambda a, b: a * sp.Pow(2, b),
         "arith.shrui": lambda a, b: sp.floor(a / sp.Pow(2, b)),
         "arith.shrsi": lambda a, b: sp.floor(a / sp.Pow(2, b)),
-        "arith.andi": lambda a, b: sp.Function('bitand')(a, b),
+        "arith.andi": lambda a, b: sp.Mod(a, b + 1) if (isinstance(b, sp.Integer) and ((int(b) + 1) & int(b)) == 0) else sp.Function('bitand')(a, b),
         "arith.ori": lambda a, b: sp.Function('bitor')(a, b),
     }
     if op_name in _BINARY_OPS:

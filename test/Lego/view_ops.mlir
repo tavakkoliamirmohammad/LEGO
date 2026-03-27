@@ -40,7 +40,7 @@ func.func @test_tiled_view(%mem: memref<1024xf32>, %bi: index, %bj: index, %li: 
   
   %view = lego.cast_view %mem, %tiled : memref<1024xf32>, !lego.layout -> !lego.view<f32>
   
-  // CHECK: arith.muli
+  // CHECK: arith.shli
   // CHECK: arith.addi
   // CHECK: %[[VAL:.*]] = memref.load %[[MEM]][%{{.*}}]
   // CHECK: return %[[VAL]]

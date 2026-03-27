@@ -23,6 +23,7 @@ std::unique_ptr<Pass> createLegoExternalSMTVerifierPass();
 std::unique_ptr<Pass> createLegoVerifyBijectivityPass();
 std::unique_ptr<Pass> createLegoVerifyCoalescingPass();
 std::unique_ptr<Pass> createLegoVerifyBankConflictsPass();
+std::unique_ptr<Pass> createLegoStrengthReductionPass();
 
 void registerLegoPipelines();
 void buildLegoToLLVMPipeline(OpPassManager &pm);
@@ -37,6 +38,7 @@ void buildLegoToLLVMPipeline(OpPassManager &pm);
 #define GEN_PASS_DECL_LEGOVERIFYBIJECTIVITYPASS
 #define GEN_PASS_DECL_LEGOVERIFYCOALESCINGPASS
 #define GEN_PASS_DECL_LEGOVERIFYBANKCONFLICTSPASS
+#define GEN_PASS_DECL_LEGOSTRENGTHREDUCTIONPASS
 #define GEN_PASS_REGISTRATION
 #include "Lego/Passes.h.inc"
 
