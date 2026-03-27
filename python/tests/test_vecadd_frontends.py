@@ -25,7 +25,13 @@ from lego.rewriter import rewrite
 from lego.frontends.triton_jit import TritonAdapter, jit as triton_lego_jit
 from lego.frontends.numba_jit import jit as numba_lego_jit
 from lego.frontends.jax_jit import jit as jax_lego_jit
-from lego.frontends.cutile_jit import CutileAdapter, get_cutile_kernel_source
+from lego.frontends.cutile_jit import CutileAdapter, cutile_jit, get_cutile_kernel_source
+
+try:
+    import cuda.tile as ct
+    _has_cutile = True
+except ImportError:
+    _has_cutile = False
 
 
 # ── Triton vecadd (full GPU test) ────────────────────────────────────────
@@ -360,3 +366,130 @@ class TestCutileMatmulSwizzleSource:
 
         src = rewrite(matmul, CutileAdapter(), return_source=True)
         ast.parse(src)
+
+
+# ── cuTile GPU execution tests ─────────────────────────────────────────
+
+_skip_cutile_gpu = pytest.mark.skipif(
+    not (_has_cutile and torch.cuda.is_available()),
+    reason="cuda.tile and CUDA GPU required",
+)
+
+
+@_skip_cutile_gpu
+class TestCutileVecadd:
+    """Full GPU test: LEGO-rewritten cuTile vecadd vs PyTorch."""
+
+    @staticmethod
+    def _make_kernels():
+        @ct.kernel
+        def ref_kernel(a, b, c, TILE: ct.Constant[int]):
+            bid = ct.bid(0)
+            indices = bid * TILE + ct.arange(TILE, dtype=ct.int32)
+            a_tile = ct.gather(a, indices)
+            b_tile = ct.gather(b, indices)
+            ct.scatter(c, indices, a_tile + b_tile)
+
+        @cutile_jit
+        @ct.kernel
+        def lego_kernel(a, b, c, N: int, TILE: ct.Constant[int]):
+            bid = ct.bid(0)
+            L = OrderBy(Row(N)).TileBy([N / TILE], [TILE])
+            offsets = L[bid, :]
+            a_tile = ct.gather(a, offsets)
+            b_tile = ct.gather(b, offsets)
+            ct.scatter(c, offsets, a_tile + b_tile)
+
+        return ref_kernel, lego_kernel
+
+    def test_vecadd_matches_pytorch(self):
+        ref_kernel, lego_kernel = self._make_kernels()
+        N = 2 ** 16
+        TILE = 1024
+        a = torch.randn(N, device='cuda')
+        b = torch.randn(N, device='cuda')
+        expected = a + b
+        stream = torch.cuda.current_stream()
+        grid = (math.ceil(N / TILE), 1, 1)
+
+        c_lego = torch.empty_like(a)
+        ct.launch(stream, grid, lego_kernel, (a, b, c_lego, N, TILE))
+        assert torch.allclose(c_lego, expected, atol=1e-5)
+
+    def test_vecadd_multiple_sizes(self):
+        ref_kernel, lego_kernel = self._make_kernels()
+        TILE = 1024
+        stream = torch.cuda.current_stream()
+        for N in [1024, 8192, 2 ** 16]:
+            a = torch.randn(N, device='cuda')
+            b = torch.randn(N, device='cuda')
+            c = torch.empty_like(a)
+            grid = (math.ceil(N / TILE), 1, 1)
+            ct.launch(stream, grid, lego_kernel, (a, b, c, N, TILE))
+            assert torch.allclose(c, a + b, atol=1e-5), f"Failed for N={N}"
+
+    def test_matches_reference_kernel(self):
+        ref_kernel, lego_kernel = self._make_kernels()
+        N = 2 ** 16
+        TILE = 1024
+        a = torch.randn(N, device='cuda')
+        b = torch.randn(N, device='cuda')
+        stream = torch.cuda.current_stream()
+        grid = (math.ceil(N / TILE), 1, 1)
+
+        c_ref = torch.empty_like(a)
+        ct.launch(stream, grid, ref_kernel, (a, b, c_ref, TILE))
+        c_lego = torch.empty_like(a)
+        ct.launch(stream, grid, lego_kernel, (a, b, c_lego, N, TILE))
+        assert torch.allclose(c_ref, c_lego, atol=1e-5)
+
+
+@_skip_cutile_gpu
+class TestCutileMatmul:
+    """Full GPU test: LEGO-rewritten cuTile matmul vs PyTorch."""
+
+    @staticmethod
+    def _make_kernels():
+        @cutile_jit
+        @ct.kernel
+        def lego_kernel(A, B, C,
+                        tm: ct.Constant[int], tn: ct.Constant[int],
+                        tk: ct.Constant[int]):
+            GM = 8
+            M = A.shape[0]
+            N = B.shape[1]
+            bid = ct.bid(0)
+            num_pid_m = ct.cdiv(M, tm)
+            num_pid_n = ct.cdiv(N, tn)
+            L_pid = OrderBy(Col(Max(num_pid_m // GM, 1), 1),
+                            Col(Min(num_pid_m, GM), num_pid_n)).TileBy(
+                                [num_pid_m, num_pid_n])
+            bidx, bidy = L_pid.inv(bid)
+            num_tiles_k = ct.num_tiles(A, axis=1, shape=(tm, tk))
+            accumulator = ct.full((tm, tn), 0, dtype=ct.float32)
+            zero_pad = ct.PaddingMode.ZERO
+            dtype = ct.tfloat32 if A.dtype == ct.float32 else A.dtype
+            for k in range(num_tiles_k):
+                a = ct.load(A, index=(bidx, k), shape=(tm, tk),
+                            padding_mode=zero_pad).astype(dtype)
+                b = ct.load(B, index=(k, bidy), shape=(tk, tn),
+                            padding_mode=zero_pad).astype(dtype)
+                accumulator = ct.mma(a, b, accumulator)
+            accumulator = ct.astype(accumulator, C.dtype)
+            ct.store(C, index=(bidx, bidy), tile=accumulator)
+
+        return lego_kernel
+
+    def test_matmul_matches_pytorch(self):
+        lego_kernel = self._make_kernels()
+        M, N, K = 512, 512, 512
+        tm, tn, tk = 64, 64, 32
+        A = torch.randn(M, K, device='cuda', dtype=torch.float16)
+        B = torch.randn(K, N, device='cuda', dtype=torch.float16)
+        C = torch.empty(M, N, device='cuda', dtype=torch.float16)
+        expected = torch.matmul(A, B)
+
+        stream = torch.cuda.current_stream()
+        grid = (math.ceil(M / tm) * math.ceil(N / tn), 1, 1)
+        ct.launch(stream, grid, lego_kernel, (A, B, C, tm, tn, tk))
+        assert torch.allclose(C, expected, atol=1e-1, rtol=1e-1)
