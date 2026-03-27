@@ -10,14 +10,16 @@ generated MLIR and are bound to concrete values at invocation time.
 """
 
 import ctypes
+import hashlib
 import sys
+import threading
 import numpy as np
 import sympy as sp
 
 from mlir.ir import (
     Context, Location, Module, InsertionPoint,
     IndexType, MemRefType, FunctionType, IntegerAttr, StringAttr,
-    IntegerType, F32Type, F64Type, UnitAttr,
+    IntegerType, F32Type, F64Type, F16Type, BF16Type, UnitAttr,
 )
 from mlir.dialects import func as func_dialect
 from mlir.dialects import scf as scf_dialect
@@ -34,6 +36,20 @@ from lego.backend._ops import (
 
 
 # ============================================================================
+# Global caches (thread-safe)
+# ============================================================================
+
+_CACHE_LOCK = threading.Lock()
+_COMPILER_CACHE: dict = {}   # SHA-256 of MLIR text -> (ctx, ExecutionEngine)
+_PERM_TABLE_CACHE: dict = {} # SHA-256 of i64 MLIR text -> (fwd, inv)
+
+
+def _mlir_cache_key(mlir_text: str) -> str:
+    """Compute SHA-256 hash of MLIR text for cache keying."""
+    return hashlib.sha256(mlir_text.encode('utf-8')).hexdigest()
+
+
+# ============================================================================
 # Dtype mapping
 # ============================================================================
 
@@ -42,6 +58,7 @@ def _dtype_to_mlir(dtype):
     dtype_map = {
         np.float32: "f32", np.float64: "f64",
         np.int32: "i32", np.int64: "i64", np.int16: "i16", np.int8: "i8",
+        np.bool_: "i1", np.uint8: "ui8",
     }
     try:
         import torch
@@ -50,6 +67,7 @@ def _dtype_to_mlir(dtype):
             torch.float16: "f16", torch.bfloat16: "bf16",
             torch.int32: "i32", torch.int64: "i64",
             torch.int16: "i16", torch.int8: "i8",
+            torch.bool: "i1", torch.uint8: "ui8",
         })
     except ImportError:
         pass
@@ -64,10 +82,14 @@ def _get_mlir_element_type(ctx, dtype_str):
     type_map = {
         "f32": lambda: F32Type.get(ctx),
         "f64": lambda: F64Type.get(ctx),
+        "f16": lambda: F16Type.get(ctx),
+        "bf16": lambda: BF16Type.get(ctx),
         "i32": lambda: IntegerType.get_signless(32, ctx),
         "i64": lambda: IntegerType.get_signless(64, ctx),
         "i16": lambda: IntegerType.get_signless(16, ctx),
         "i8": lambda: IntegerType.get_signless(8, ctx),
+        "i1": lambda: IntegerType.get_signless(1, ctx),
+        "ui8": lambda: IntegerType.get_unsigned(8, ctx),
     }
     return type_map.get(dtype_str, type_map["f32"])()
 
@@ -129,6 +151,9 @@ class IRBuilder:
         return ctx, module
 
     def _build_function(self, module, name, idx_ty, memref_ty, forward):
+        if not forward:
+            from lego.frontends.python_mlir import _check_layout_invertible
+            _check_layout_invertible(self._layout)
         # Base args: src, dst, n.  Symbolic dims appended as extra index args.
         param_types = [memref_ty, memref_ty, idx_ty] + [idx_ty] * len(self._sym_list)
         func_ty = FunctionType.get(param_types, [])
@@ -168,6 +193,7 @@ class IRBuilder:
                     memref_dialect.StoreOp(val.result, dst, [_emit_apply(layout_val, indices)])
                 scf_dialect.YieldOp([])
             func_dialect.ReturnOp([])
+
 
 
 # ============================================================================
@@ -273,9 +299,12 @@ class LayoutCompiler:
         values = []
         for sym in builder.sym_list:
             if sym not in bindings:
+                known = {str(k): v for k, v in bindings.items()}
                 raise ValueError(
                     f"Cannot resolve symbolic dimension '{sym}'. "
-                    f"Provide dim_bindings={{'{sym}': <value>}} to LayoutCompiler."
+                    f"Known bindings: {known}. "
+                    f"Provide dim_bindings={{'{sym}': <value>}} to LayoutCompiler, "
+                    f"or ensure the layout's dims match the tensor shape positionally."
                 )
             values.append(int(bindings[sym]))
         return values
@@ -289,6 +318,14 @@ class LayoutCompiler:
 
     def compile(self):
         if self._engine is None:
+            # Check global cache first
+            cache_key = _mlir_cache_key(self.mlir_text)
+            with _CACHE_LOCK:
+                cached = _COMPILER_CACHE.get(cache_key)
+            if cached is not None:
+                self._ctx, self._engine = cached
+                return self._engine
+
             builder = self._get_ir_builder()
             self._ctx, module = builder.build_module()
             if self._mlir_text is None:
@@ -311,6 +348,9 @@ class LayoutCompiler:
                     print(module, file=sys.stderr)
                     print(file=sys.stderr)
                 self._engine = ExecutionEngine(module, opt_level=2)
+
+            with _CACHE_LOCK:
+                _COMPILER_CACHE[cache_key] = (self._ctx, self._engine)
         return self._engine
 
     def _invoke(self, func_name, arr):
@@ -337,18 +377,37 @@ class LayoutCompiler:
         return self._invoke("inverse_transform", arr)
 
     def get_permutation_table(self):
-        """Compute forward and inverse permutation as int64 arrays."""
+        """Compute forward and inverse permutation as int64 arrays.
+
+        Returns (fwd, inv) where both are 1-D int64 arrays of length numel.
+
+        Semantics (gather-based):
+          fwd: logical->physical gather table.  output[i] = input[fwd[i]]
+          inv: physical->logical gather table.  output[i] = input[inv[i]]
+
+        Invariant: inv[fwd[i]] == i  and  fwd[inv[i]] == i  for all i.
+        """
         if self._perm_table is not None:
+            return self._perm_table
+
+        # Check global perm table cache
+        i64_compiler = LayoutCompiler(self._layout, self._shape, "i64")
+        perm_cache_key = _mlir_cache_key(i64_compiler.mlir_text)
+        with _CACHE_LOCK:
+            cached = _PERM_TABLE_CACHE.get(perm_cache_key)
+        if cached is not None:
+            self._perm_table = cached
             return self._perm_table
 
         total = 1
         for s in self._shape:
             total *= s
 
-        i64_compiler = LayoutCompiler(self._layout, self._shape, "i64")
         identity = np.arange(total, dtype=np.int64)
         fwd = i64_compiler.transform_numpy(identity).ravel()
         inv = i64_compiler.inverse_transform_numpy(identity).ravel()
 
         self._perm_table = (fwd, inv)
+        with _CACHE_LOCK:
+            _PERM_TABLE_CACHE[perm_cache_key] = self._perm_table
         return self._perm_table

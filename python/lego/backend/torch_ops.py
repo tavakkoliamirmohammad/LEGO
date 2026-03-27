@@ -17,11 +17,16 @@ if _HAS_TORCH:
     class _LegoPermuteFunction(torch.autograd.Function):
         """Autograd function for LEGO layout permutations.
 
-        Forward: applies perm to flatten the input.
-        Backward: applies inv_perm (since layouts are bijective).
+        Forward: applies gather-based permutation ``output[i] = input[perm[i]]``.
+        Backward: applies the inverse permutation (since layouts are bijective).
 
-        For forward transforms, call with (tensor, fwd_perm, inv_perm).
-        For inverse transforms, call with (tensor, inv_perm, fwd_perm).
+        Usage:
+          For layout transform (logical->physical):
+            call with (tensor, fwd_perm, inv_perm)
+          For inverse transform (physical->logical):
+            call with (tensor, inv_perm, fwd_perm)
+
+        Invariant: inv_perm[fwd_perm[i]] == i for all i.
         """
 
         @staticmethod

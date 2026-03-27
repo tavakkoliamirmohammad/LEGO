@@ -122,7 +122,31 @@ composed = layout_a.compose(layout_b)
 assert RowMajor((4, 4)) == RowMajor((4, 4))
 ```
 
-PyTorch integration uses precomputed permutation tables for device-local transforms (no CPU↔GPU copies) and supports `torch.compile` via a registered `lego::permute` custom op. `LegoTensor` (torch.Tensor subclass) and `LegoArray` (NumPy wrapper) carry layout metadata with the data.
+PyTorch integration compiles layout transforms to native PyTorch arithmetic via the MLIR lowering pipeline. Instead of materializing O(numel) permutation tables, layout index expressions are lowered through MLIR (`lego-lower` pass with simplification and strength reduction), extracted as SymPy expressions, and compiled to vectorized PyTorch functions. For example, `Col(4,8)` becomes `4*j + i` -- pure arithmetic, no lookup table.
+
+```python
+import lego
+import torch
+
+layout = lego.ColMajor((4, 8))
+x = torch.randn(4, 8)
+
+# Transform: uses compiled arithmetic (arange + mul + add + gather)
+physical = layout.transform(x)       # autograd-compatible
+logical = layout.inverse_transform(physical)  # round-trips exactly
+
+# LegoTensor: layout-aware tensor subclass
+lx = lego.as_lego_tensor(x, layout)
+result = lx + lx          # operates on physical storage, no permutation
+back = result.to_logical() # converts back to row-major
+
+# torch.compile: traces through compiled index arithmetic
+@torch.compile(backend="lego")
+def fn(t):
+    return layout.transform(t) * 2
+```
+
+`LegoTensor` is a `torch.Tensor` subclass that carries layout metadata. Elementwise ops between same-layout tensors operate directly on physical storage. `LegoArray` provides the same for NumPy.
 
 ### MLIR Backend
 
