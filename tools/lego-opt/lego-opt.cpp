@@ -56,6 +56,7 @@ int main(int argc, char **argv) {
   mlir::lego::registerLegoVerifyBijectivityPass();
   mlir::lego::registerLegoVerifyCoalescingPass();
   mlir::lego::registerLegoVerifyBankConflictsPass();
+  mlir::lego::registerLegoStrengthReductionPass();
   mlir::lego::registerLegoPipelines();
 
   mlir::DialectRegistry registry;

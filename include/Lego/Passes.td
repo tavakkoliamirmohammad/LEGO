@@ -116,4 +116,19 @@ def LegoVerifyBankConflictsPass : Pass<"lego-verify-bank-conflicts", "mlir::Modu
   ];
 }
 
+def LegoStrengthReductionPass : Pass<"lego-strength-reduction", "mlir::ModuleOp"> {
+  let summary = "Convert power-of-2 muli/divui/remui to shift/mask operations";
+  let description = [{
+    This pass converts:
+      muli(x, 2^k)  → shli(x, k)
+      divui(x, 2^k) → shrui(x, k)
+      remui(x, 2^k) → andi(x, 2^k - 1)
+
+    Runs after the main algebraic simplification to avoid interfering
+    with div/rem pattern matchers in the fixed-point loop.
+  }];
+  let constructor = "mlir::lego::createLegoStrengthReductionPass()";
+  let dependentDialects = ["mlir::arith::ArithDialect"];
+}
+
 #endif // LEGO_PASSES_TD

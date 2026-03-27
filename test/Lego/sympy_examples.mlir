@@ -9,20 +9,22 @@
 //   lud_fwd:    32*ii + 16*jj + tidx + 4*tidy
 //   normal_out: (bx*2+i)*64 + (by*2+j)*8 + (bz*2+k)
 //   bricks_out: (bx*16+by*4+bz)*8 + (i*4+j*2+k)
+//
+// After strength reduction, power-of-2 muli become shli.
 // ============================================================================
 
 // -----
 
 // const = OrderBy(Row(8, 8, 8)).TileBy([8, 8, 8])
-// SymPy: 64*a + 8*b + c
+// SymPy: 64*a + 8*b + c  →  (a << 6) + (b << 3) + c
 
 // CHECK-LABEL: func.func @const_3d_apply
 // CHECK-SAME:  (%[[A:.*]]: index, %[[B:.*]]: index, %[[C:.*]]: index)
-// CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK:       %[[T1:.*]] = arith.muli %[[B]], %[[C8]] : index
+// CHECK-DAG:   %[[C6:.*]] = arith.constant 6 : index
+// CHECK-DAG:   %[[C3:.*]] = arith.constant 3 : index
+// CHECK:       %[[T1:.*]] = arith.shli %[[B]], %[[C3]] : index
 // CHECK:       %[[T2:.*]] = arith.addi %[[C]], %[[T1]] : index
-// CHECK:       %[[T3:.*]] = arith.muli %[[A]], %[[C64]] : index
+// CHECK:       %[[T3:.*]] = arith.shli %[[A]], %[[C6]] : index
 // CHECK:       %[[RES:.*]] = arith.addi %[[T2]], %[[T3]] : index
 // CHECK:       return %[[RES]] : index
 func.func @const_3d_apply(%a: index, %b: index, %c: index) -> index {
@@ -37,24 +39,21 @@ func.func @const_3d_apply(%a: index, %b: index, %c: index) -> index {
 // -----
 
 // graphene.py: OrderBy(RegP([2,2,2,2,2], [4,1,3,2,0])).GroupBy([(2,2,2,2,2)])
-// SymPy: i + 2*k + 4*w + 8*j + 16*q
-//
-// With assume_bounds + materialize-assume-bounds + iterated A2/int-range,
-// the flatten/unflatten chain fully simplifies to the permuted expression.
+// SymPy: i + 2*k + 4*w + 8*j + 16*q  →  i + (k<<1) + (w<<2) + (j<<3) + (q<<4)
 
 // CHECK-LABEL: func.func @graphene_apply
 // CHECK-SAME:  (%[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index, %[[W:.*]]: index, %[[Q:.*]]: index)
-// CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
-// CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
 // CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
+// CHECK-DAG:   %[[C3:.*]] = arith.constant 3 : index
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
-// CHECK:       %[[MK:.*]] = arith.muli %[[K]], %[[C2]] : index
+// CHECK-DAG:   %[[C1:.*]] = arith.constant 1 : index
+// CHECK:       %[[MK:.*]] = arith.shli %[[K]], %[[C1]] : index
 // CHECK:       %[[S1:.*]] = arith.addi %[[I]], %[[MK]] : index
-// CHECK:       %[[MW:.*]] = arith.muli %[[W]], %[[C4]] : index
+// CHECK:       %[[MW:.*]] = arith.shli %[[W]], %[[C2]] : index
 // CHECK:       %[[S2:.*]] = arith.addi %[[S1]], %[[MW]] : index
-// CHECK:       %[[MJ:.*]] = arith.muli %[[J]], %[[C8]] : index
+// CHECK:       %[[MJ:.*]] = arith.shli %[[J]], %[[C3]] : index
 // CHECK:       %[[S3:.*]] = arith.addi %[[S2]], %[[MJ]] : index
-// CHECK:       %[[MQ:.*]] = arith.muli %[[Q]], %[[C16]] : index
+// CHECK:       %[[MQ:.*]] = arith.shli %[[Q]], %[[C4]] : index
 // CHECK:       %[[RES:.*]] = arith.addi %[[S3]], %[[MQ]] : index
 // CHECK:       return %[[RES]] : index
 func.func @graphene_apply(%i: index, %j: index, %k: index, %w: index, %q: index) -> index {
@@ -76,25 +75,22 @@ func.func @graphene_apply(%i: index, %j: index, %k: index, %w: index, %q: index)
 
 // normal = OrderBy(Row(8,8,8)).TileBy([4,4,4], [2,2,2])
 // SymPy: (bx*2+i)*64 + (by*2+j)*8 + (bz*2+k)
-//
-// Inner has 1 block, tile has 2 levels → general GroupBy path.
-// The lowered form retains divui/remui (modular arithmetic equivalent).
+//      → (bx*2+i)<<6 + (by*2+j)<<3 + (bz*2+k)
 
-// Direct TileBy lowering produces factored form: (bx*2+i)*64 + (by*2+j)*8 + (bz*2+k)
 // CHECK-LABEL: func.func @normal_3d_apply
 // CHECK-SAME:  (%[[BX:.*]]: index, %[[BY:.*]]: index, %[[BZ:.*]]: index, %[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index)
-// CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
-// CHECK:       %[[MBX:.*]] = arith.muli %[[BX]], %[[C2]] : index
+// CHECK-DAG:   %[[C6:.*]] = arith.constant 6 : index
+// CHECK-DAG:   %[[C3:.*]] = arith.constant 3 : index
+// CHECK-DAG:   %[[C1:.*]] = arith.constant 1 : index
+// CHECK:       %[[MBX:.*]] = arith.shli %[[BX]], %[[C1]] : index
 // CHECK:       %[[CX:.*]] = arith.addi %[[I]], %[[MBX]] : index
-// CHECK:       %[[MBY:.*]] = arith.muli %[[BY]], %[[C2]] : index
+// CHECK:       %[[MBY:.*]] = arith.shli %[[BY]], %[[C1]] : index
 // CHECK:       %[[CY:.*]] = arith.addi %[[J]], %[[MBY]] : index
-// CHECK:       %[[MBZ:.*]] = arith.muli %[[BZ]], %[[C2]] : index
+// CHECK:       %[[MBZ:.*]] = arith.shli %[[BZ]], %[[C1]] : index
 // CHECK:       %[[CZ:.*]] = arith.addi %[[K]], %[[MBZ]] : index
-// CHECK:       %[[S1:.*]] = arith.muli %[[CY]], %[[C8]] : index
+// CHECK:       %[[S1:.*]] = arith.shli %[[CY]], %[[C3]] : index
 // CHECK:       %[[S2:.*]] = arith.addi %[[CZ]], %[[S1]] : index
-// CHECK:       %[[S3:.*]] = arith.muli %[[CX]], %[[C64]] : index
+// CHECK:       %[[S3:.*]] = arith.shli %[[CX]], %[[C6]] : index
 // CHECK:       %[[RES:.*]] = arith.addi %[[S2]], %[[S3]] : index
 // CHECK:       return %[[RES]] : index
 func.func @normal_3d_apply(%bx: index, %by: index, %bz: index,
@@ -123,23 +119,23 @@ func.func @normal_3d_apply(%bx: index, %by: index, %bz: index,
 //
 // TileBy with tile_dims matching inner_dims is identity.
 
-// Identity TileBy (tile dims match inner perm dims) → passes through to inner OrderBy
-// Result: (bx*16 + by*4 + bz) * 8 + (i*4 + j*2 + k)
+// Identity TileBy → passes through to inner OrderBy
+// Result: (bx<<4 + by<<2 + bz) << 3 + (i<<2 + j<<1 + k)
 // CHECK-LABEL: func.func @bricks_3d_apply
 // CHECK-SAME:  (%[[BX:.*]]: index, %[[BY:.*]]: index, %[[BZ:.*]]: index, %[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index)
-// CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
-// CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
+// CHECK-DAG:   %[[C3:.*]] = arith.constant 3 : index
+// CHECK-DAG:   %[[C1:.*]] = arith.constant 1 : index
 // CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
-// CHECK:       %[[MBY:.*]] = arith.muli %[[BY]], %[[C4]] : index
+// CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
+// CHECK:       %[[MBY:.*]] = arith.shli %[[BY]], %[[C2]] : index
 // CHECK:       %[[S1:.*]] = arith.addi %[[BZ]], %[[MBY]] : index
-// CHECK:       %[[MBX:.*]] = arith.muli %[[BX]], %[[C16]] : index
+// CHECK:       %[[MBX:.*]] = arith.shli %[[BX]], %[[C4]] : index
 // CHECK:       %[[BLOCK:.*]] = arith.addi %[[S1]], %[[MBX]] : index
-// CHECK:       %[[MJ:.*]] = arith.muli %[[J]], %[[C2]] : index
+// CHECK:       %[[MJ:.*]] = arith.shli %[[J]], %[[C1]] : index
 // CHECK:       %[[S2:.*]] = arith.addi %[[K]], %[[MJ]] : index
-// CHECK:       %[[MI:.*]] = arith.muli %[[I]], %[[C4]] : index
+// CHECK:       %[[MI:.*]] = arith.shli %[[I]], %[[C2]] : index
 // CHECK:       %[[LOCAL:.*]] = arith.addi %[[S2]], %[[MI]] : index
-// CHECK:       %[[SCALED:.*]] = arith.muli %[[BLOCK]], %[[C8]] : index
+// CHECK:       %[[SCALED:.*]] = arith.shli %[[BLOCK]], %[[C3]] : index
 // CHECK:       %[[RES:.*]] = arith.addi %[[SCALED]], %[[LOCAL]] : index
 // CHECK:       return %[[RES]] : index
 func.func @bricks_3d_apply(%bx: index, %by: index, %bz: index,
@@ -158,7 +154,7 @@ func.func @bricks_3d_apply(%bx: index, %by: index, %bz: index,
 
 // lud.py: OrderBy(Row(R*T, R*T)).GroupBy([(R, R), (T, T)])
 // SymPy: ii*(R*T*T) + jj*(T*T) + tidy*T + tidx
-// With symbolic R and T (matching the Python API).
+// With symbolic R and T — no strength reduction (not constant power-of-2).
 
 // CHECK-LABEL: func.func @lud_groupby_apply
 // CHECK-SAME:  (%[[R:.*]]: index, %[[T:.*]]: index, %[[II:.*]]: index, %[[JJ:.*]]: index, %[[TIDY:.*]]: index, %[[TIDX:.*]]: index)
@@ -188,14 +184,8 @@ func.func @lud_groupby_apply(%R: index, %T: index,
 // -----
 
 // lud.py inverse: l.inv((ii*R+jj)*T*T + tid) = [ii, jj, tid/T, tid%T]
-//
-// Python: expr = (ii * R + jj) * T * T + tid
-//         constraints = [ii < R, jj < R, tid < T*T, 0 <= tid]
-//         i, j, tidy, tidx = l.inv(expr)
-// SymPy result: i=ii, j=jj, tidy=tid/T, tidx=tid%T
+// Symbolic divisor T — no strength reduction.
 
-// With mixed-radix simplification + assume_bounds (ii<R, jj<R, tid<T*T),
-// the inverse fully simplifies to: [ii, jj, tid/T, tid%T]
 // CHECK-LABEL: func.func @lud_groupby_inv
 // CHECK-SAME:  (%[[R:.*]]: index, %[[T:.*]]: index, %[[II:.*]]: index, %[[JJ:.*]]: index, %[[TID:.*]]: index)
 // CHECK:       %[[OUT2:.*]] = arith.divui %[[TID]], %[[T]] : index
@@ -231,24 +221,24 @@ func.func @lud_groupby_inv(%R: index, %T: index,
 
 // Stencil loads
 
-// Direct TileBy lowering produces factored form: (bx*2+io)*64 + (by*2+jo)*8 + (bz*2+ko)
+// Direct TileBy lowering: (bx*2+io)<<6 + (by*2+jo)<<3 + (bz*2+ko)
 // CHECK-LABEL: func.func @normal_stencil_load
 // CHECK-SAME:  (%[[MEM:.*]]: memref<512xf32>, %[[BX:.*]]: index, %[[BY:.*]]: index, %[[BZ:.*]]: index, %[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index, %[[ID:.*]]: index, %[[JD:.*]]: index, %[[KD:.*]]: index)
-// CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
+// CHECK-DAG:   %[[C6:.*]] = arith.constant 6 : index
+// CHECK-DAG:   %[[C3:.*]] = arith.constant 3 : index
+// CHECK-DAG:   %[[C1:.*]] = arith.constant 1 : index
 // CHECK:       %[[IO:.*]] = arith.addi %[[I]], %[[ID]] : index
 // CHECK:       %[[JO:.*]] = arith.addi %[[J]], %[[JD]] : index
 // CHECK:       %[[KO:.*]] = arith.addi %[[K]], %[[KD]] : index
-// CHECK:       %[[MBX:.*]] = arith.muli %[[BX]], %[[C2]] : index
+// CHECK:       %[[MBX:.*]] = arith.shli %[[BX]], %[[C1]] : index
 // CHECK:       %[[CX:.*]] = arith.addi %[[IO]], %[[MBX]] : index
-// CHECK:       %[[MBY:.*]] = arith.muli %[[BY]], %[[C2]] : index
+// CHECK:       %[[MBY:.*]] = arith.shli %[[BY]], %[[C1]] : index
 // CHECK:       %[[CY:.*]] = arith.addi %[[JO]], %[[MBY]] : index
-// CHECK:       %[[MBZ:.*]] = arith.muli %[[BZ]], %[[C2]] : index
+// CHECK:       %[[MBZ:.*]] = arith.shli %[[BZ]], %[[C1]] : index
 // CHECK:       %[[CZ:.*]] = arith.addi %[[KO]], %[[MBZ]] : index
-// CHECK:       %[[S1:.*]] = arith.muli %[[CY]], %[[C8]] : index
+// CHECK:       %[[S1:.*]] = arith.shli %[[CY]], %[[C3]] : index
 // CHECK:       %[[S2:.*]] = arith.addi %[[CZ]], %[[S1]] : index
-// CHECK:       %[[S3:.*]] = arith.muli %[[CX]], %[[C64]] : index
+// CHECK:       %[[S3:.*]] = arith.shli %[[CX]], %[[C6]] : index
 // CHECK:       %[[IDX:.*]] = arith.addi %[[S2]], %[[S3]] : index
 // CHECK:       %[[VAL:.*]] = memref.load %[[MEM]][%[[IDX]]] : memref<512xf32>
 // CHECK:       return %[[VAL]] : f32
@@ -281,22 +271,22 @@ func.func @normal_stencil_load(%mem: memref<512xf32>,
 
 // CHECK-LABEL: func.func @bricks_stencil_load
 // CHECK-SAME:  (%[[MEM:.*]]: memref<512xf32>, %[[BX:.*]]: index, %[[BY:.*]]: index, %[[BZ:.*]]: index, %[[I:.*]]: index, %[[J:.*]]: index, %[[K:.*]]: index, %[[ID:.*]]: index, %[[JD:.*]]: index, %[[KD:.*]]: index)
-// CHECK-DAG:   %[[C16:.*]] = arith.constant 16 : index
-// CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
+// CHECK-DAG:   %[[C3:.*]] = arith.constant 3 : index
+// CHECK-DAG:   %[[C1:.*]] = arith.constant 1 : index
 // CHECK-DAG:   %[[C4:.*]] = arith.constant 4 : index
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
 // CHECK:       %[[IO:.*]] = arith.addi %[[I]], %[[ID]] : index
 // CHECK:       %[[JO:.*]] = arith.addi %[[J]], %[[JD]] : index
 // CHECK:       %[[KO:.*]] = arith.addi %[[K]], %[[KD]] : index
-// CHECK:       %[[MBY:.*]] = arith.muli %[[BY]], %[[C4]] : index
+// CHECK:       %[[MBY:.*]] = arith.shli %[[BY]], %[[C2]] : index
 // CHECK:       %[[S0:.*]] = arith.addi %[[BZ]], %[[MBY]] : index
-// CHECK:       %[[MBX:.*]] = arith.muli %[[BX]], %[[C16]] : index
+// CHECK:       %[[MBX:.*]] = arith.shli %[[BX]], %[[C4]] : index
 // CHECK:       %[[BLOCK:.*]] = arith.addi %[[S0]], %[[MBX]] : index
-// CHECK:       %[[MJ:.*]] = arith.muli %[[JO]], %[[C2]] : index
+// CHECK:       %[[MJ:.*]] = arith.shli %[[JO]], %[[C1]] : index
 // CHECK:       %[[S1:.*]] = arith.addi %[[KO]], %[[MJ]] : index
-// CHECK:       %[[MI:.*]] = arith.muli %[[IO]], %[[C4]] : index
+// CHECK:       %[[MI:.*]] = arith.shli %[[IO]], %[[C2]] : index
 // CHECK:       %[[LOCAL:.*]] = arith.addi %[[S1]], %[[MI]] : index
-// CHECK:       %[[SCALED:.*]] = arith.muli %[[BLOCK]], %[[C8]] : index
+// CHECK:       %[[SCALED:.*]] = arith.shli %[[BLOCK]], %[[C3]] : index
 // CHECK:       %[[IDX:.*]] = arith.addi %[[SCALED]], %[[LOCAL]] : index
 // CHECK:       %[[VAL:.*]] = memref.load %[[MEM]][%[[IDX]]] : memref<512xf32>
 // CHECK:       return %[[VAL]] : f32
@@ -322,14 +312,14 @@ func.func @bricks_stencil_load(%mem: memref<512xf32>,
 
 // CHECK-LABEL: func.func @const_stencil_load
 // CHECK-SAME:  (%[[MEM:.*]]: memref<512xf32>, %[[IDIFF:.*]]: index, %[[JDIFF:.*]]: index, %[[KDIFF:.*]]: index, %[[RAD:.*]]: index)
-// CHECK-DAG:   %[[C64:.*]] = arith.constant 64 : index
-// CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
+// CHECK-DAG:   %[[C6:.*]] = arith.constant 6 : index
+// CHECK-DAG:   %[[C3:.*]] = arith.constant 3 : index
 // CHECK:       %[[A:.*]] = arith.addi %[[IDIFF]], %[[RAD]] : index
 // CHECK:       %[[B:.*]] = arith.addi %[[JDIFF]], %[[RAD]] : index
 // CHECK:       %[[C:.*]] = arith.addi %[[KDIFF]], %[[RAD]] : index
-// CHECK:       %[[MB:.*]] = arith.muli %[[B]], %[[C8]] : index
+// CHECK:       %[[MB:.*]] = arith.shli %[[B]], %[[C3]] : index
 // CHECK:       %[[S0:.*]] = arith.addi %[[C]], %[[MB]] : index
-// CHECK:       %[[MA:.*]] = arith.muli %[[A]], %[[C64]] : index
+// CHECK:       %[[MA:.*]] = arith.shli %[[A]], %[[C6]] : index
 // CHECK:       %[[IDX:.*]] = arith.addi %[[S0]], %[[MA]] : index
 // CHECK:       %[[VAL:.*]] = memref.load %[[MEM]][%[[IDX]]] : memref<512xf32>
 // CHECK:       return %[[VAL]] : f32

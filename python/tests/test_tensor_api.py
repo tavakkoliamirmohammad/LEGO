@@ -716,3 +716,57 @@ class TestCustomOp:
         result = compiled_permute(x, perm)
         expected = x.view(-1)[perm].view(2, 3)
         torch.testing.assert_close(result, expected)
+
+
+# ============================================================================
+# Symbolic JIT Compilation
+# ============================================================================
+
+class TestSymbolicJIT:
+    """Test JIT compilation with symbolic layout dimensions."""
+
+    def test_symbolic_row_major_with_bindings(self):
+        """Row-major with symbolic M, N, bound at compile time."""
+        import sympy as sp
+        M, N = sp.symbols('M N', integer=True, positive=True)
+        layout = OrderBy(Row(M, N)).GroupBy([(M, N)])
+        compiler = LayoutCompiler(layout, (3, 4), "f32",
+                                  dim_bindings={M: 3, N: 4})
+        data = np.arange(12, dtype=np.float32).reshape(3, 4)
+        result = compiler.transform_numpy(data)
+        # Row-major is identity
+        np.testing.assert_array_equal(result, data)
+
+    def test_symbolic_row_major_auto_resolve(self):
+        """Auto-resolve symbolic dims from shape."""
+        import sympy as sp
+        M, N = sp.symbols('M N', integer=True, positive=True)
+        layout = OrderBy(Row(M, N)).GroupBy([(M, N)])
+        compiler = LayoutCompiler(layout, (4, 8), "f32")
+        data = np.arange(32, dtype=np.float32).reshape(4, 8)
+        result = compiler.transform_numpy(data)
+        np.testing.assert_array_equal(result, data)
+
+    def test_symbolic_round_trip(self):
+        """Symbolic layout: transform then inverse == identity."""
+        import sympy as sp
+        M, N = sp.symbols('M N', integer=True, positive=True)
+        layout = OrderBy(Row(M, N)).GroupBy([(M, N)])
+        compiler = LayoutCompiler(layout, (5, 6), "f32",
+                                  dim_bindings={M: 5, N: 6})
+        data = np.arange(30, dtype=np.float32).reshape(5, 6)
+        fwd = compiler.transform_numpy(data)
+        back = compiler.inverse_transform_numpy(fwd)
+        np.testing.assert_array_equal(back, data)
+
+    def test_symbolic_col_major(self):
+        """Symbolic col-major should transpose elements."""
+        import sympy as sp
+        M, N = sp.symbols('M N', integer=True, positive=True)
+        layout = OrderBy(Col(M, N)).GroupBy([(M, N)])
+        compiler = LayoutCompiler(layout, (3, 4), "f32",
+                                  dim_bindings={M: 3, N: 4})
+        data = np.arange(12, dtype=np.float32).reshape(3, 4)
+        result = compiler.transform_numpy(data)
+        back = compiler.inverse_transform_numpy(result)
+        np.testing.assert_array_equal(back, data)

@@ -73,6 +73,12 @@ static void buildLegoLowerPipeline(OpPassManager &pm) {
   pm.addPass(createLegoMaterializeAssumeBoundsPass(/*cleanup=*/true));
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  // Strength-reduce power-of-2 divui/remui to shift/mask.
+  // Runs after algebraic simplification to avoid interfering with
+  // div/rem pattern matchers in the fixed-point loop.
+  pm.addPass(createLegoStrengthReductionPass());
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
 }
 
 /// Populates the full lego-to-llvm pipeline (LEGO → Arith → LLVM).

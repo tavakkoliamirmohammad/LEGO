@@ -1,4 +1,5 @@
 #define GEN_PASS_DEF_LEGOARITHSIMPLIFICATIONPASS
+#define GEN_PASS_DEF_LEGOSTRENGTHREDUCTIONPASS
 #include "Lego/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/PatternMatch.h"
@@ -294,6 +295,35 @@ struct SimplifyMixedRadixRem : public OpRewritePattern<arith::RemUIOp> {
   }
 };
 
+// ---- Distributive law: muli(a,c) + muli(b,c) → muli(addi(a,b), c) --------
+//
+// Factors out a shared multiplicand from two addends.  Handles commutativity
+// of both addi and muli.
+
+struct DistributiveFactor : public OpRewritePattern<arith::AddIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::AddIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto mulL = op.getLhs().getDefiningOp<arith::MulIOp>();
+    auto mulR = op.getRhs().getDefiningOp<arith::MulIOp>();
+    if (!mulL || !mulR)
+      return failure();
+
+    // Try all combinations: mulL = a*c, mulR = b*c (c shared)
+    Value ml[2] = {mulL.getLhs(), mulL.getRhs()};
+    Value mr[2] = {mulR.getLhs(), mulR.getRhs()};
+    for (int i = 0; i < 2; ++i)
+      for (int j = 0; j < 2; ++j)
+        if (ml[i] == mr[j]) {
+          Value c = ml[i], a = ml[1 - i], b = mr[1 - j];
+          Value sum = arith::AddIOp::create(rewriter, op.getLoc(), a, b);
+          rewriter.replaceOpWithNewOp<arith::MulIOp>(op, sum, c);
+          return success();
+        }
+    return failure();
+  }
+};
+
 // ============================================================================
 // Pass
 // ============================================================================
@@ -306,9 +336,94 @@ struct LegoArithSimplificationPass
     patterns.add<SimplifyRemId, SimplifyDivId, SimplifyDivConst,
                  ReconstructId, SimplifyDivOfRem, SimplifyRemOfRem,
                  ExtendedSimplifyDivId, ExtendedSimplifyRemId,
-                 SimplifyMixedRadixDiv, SimplifyMixedRadixRem>(
+                 SimplifyMixedRadixDiv, SimplifyMixedRadixRem,
+                 DistributiveFactor>(
                      &getContext());
 
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
+      signalPassFailure();
+    }
+  }
+};
+
+// ============================================================================
+// Strength Reduction Pass (runs after main simplification)
+//
+// Converts power-of-2 divui/remui to shift/mask operations.
+// Kept separate from the algebraic simplification pass because it
+// would interfere with div/rem pattern matchers in the fixed-point loop.
+// ============================================================================
+
+/// If `value` is a constant equal to a power of 2, return log2.
+static std::optional<unsigned> matchPowerOfTwo(Value value) {
+  APInt val;
+  if (!matchPattern(value, m_ConstantInt(&val)))
+    return std::nullopt;
+  if (val.isPowerOf2())
+    return val.exactLogBase2();
+  return std::nullopt;
+}
+
+struct StrengthReduceDiv : public OpRewritePattern<arith::DivUIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::DivUIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto log2 = matchPowerOfTwo(op.getRhs());
+    if (!log2 || *log2 == 0) // skip divide-by-1
+      return failure();
+    Value shift = arith::ConstantOp::create(
+        rewriter, op.getLoc(),
+        rewriter.getIndexAttr(*log2));
+    rewriter.replaceOpWithNewOp<arith::ShRUIOp>(op, op.getLhs(), shift);
+    return success();
+  }
+};
+
+struct StrengthReduceRem : public OpRewritePattern<arith::RemUIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::RemUIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto log2 = matchPowerOfTwo(op.getRhs());
+    if (!log2 || *log2 == 0) // skip mod-by-1
+      return failure();
+    uint64_t maskValue = (1ULL << *log2) - 1;
+    Value mask = arith::ConstantOp::create(
+        rewriter, op.getLoc(),
+        rewriter.getIndexAttr(maskValue));
+    rewriter.replaceOpWithNewOp<arith::AndIOp>(op, op.getLhs(), mask);
+    return success();
+  }
+};
+
+// muli(x, 2^k) → shli(x, k)   (handles commutativity)
+struct StrengthReduceMul : public OpRewritePattern<arith::MulIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::MulIOp op,
+                                PatternRewriter &rewriter) const override {
+    // Try both operands (muli is commutative)
+    for (int side = 0; side < 2; ++side) {
+      Value constOp = side == 0 ? op.getRhs() : op.getLhs();
+      Value other   = side == 0 ? op.getLhs() : op.getRhs();
+      auto log2 = matchPowerOfTwo(constOp);
+      if (!log2 || *log2 == 0) // skip multiply-by-1
+        continue;
+      Value shift = arith::ConstantOp::create(
+          rewriter, op.getLoc(),
+          rewriter.getIndexAttr(*log2));
+      rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, other, shift);
+      return success();
+    }
+    return failure();
+  }
+};
+
+struct LegoStrengthReductionPass
+    : public mlir::lego::impl::LegoStrengthReductionPassBase<
+          LegoStrengthReductionPass> {
+  void runOnOperation() override {
+    RewritePatternSet patterns(&getContext());
+    patterns.add<StrengthReduceDiv, StrengthReduceRem,
+                 StrengthReduceMul>(&getContext());
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
     }
@@ -321,6 +436,9 @@ namespace mlir {
 namespace lego {
 std::unique_ptr<Pass> createLegoArithSimplificationPass() {
   return std::make_unique<LegoArithSimplificationPass>();
+}
+std::unique_ptr<Pass> createLegoStrengthReductionPass() {
+  return std::make_unique<LegoStrengthReductionPass>();
 }
 } // namespace lego
 } // namespace mlir
