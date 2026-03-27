@@ -14,3 +14,9 @@ from .frontends.python_mlir import (
 )
 from .backend.torch_tensor import LegoTensor, as_lego_tensor
 from .autotune import autotune
+
+# Register torch.compile "lego" backend (if torch available)
+try:
+    from .backend import fx_backend as _fx_backend  # noqa: F401
+except ImportError:
+    pass

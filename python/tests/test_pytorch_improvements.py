@@ -446,12 +446,12 @@ class TestDispatchWarnings:
     """Unregistered ops trigger one-time warning."""
 
     def test_unregistered_op_warns(self):
-        from lego.backend.torch_tensor import as_lego_tensor, _WARNED_OPS
+        from lego.backend.torch_tensor import as_lego_tensor, _warned_fallback_ops
         layout = RowMajor((4, 4))
         x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
         lx = as_lego_tensor(x, layout)
         # Clear warned set for this test
-        _WARNED_OPS.clear()
+        _warned_fallback_ops.clear()
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             result = torch.reshape(lx, (2, 8))

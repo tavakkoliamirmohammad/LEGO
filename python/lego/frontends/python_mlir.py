@@ -121,6 +121,7 @@ class LegoLayout:
         self._cache = {}
         self._perm_cache = {}
         self._composed_perm = None
+        self._compiled_torch = None  # cached (fwd_fn, inv_fns, layout_dims)
 
     @property
     def shape(self):
@@ -187,15 +188,19 @@ class LegoLayout:
                 f"Layout expects shape compatible with {self._shape}."
             )
 
+    def _get_compiled_torch(self):
+        """Get cached compiled layout transform functions for PyTorch."""
+        if self._compiled_torch is None:
+            from lego.backend.torch_layout import compile_layout_transform
+            self._compiled_torch = compile_layout_transform(self._layout, self._shape)
+        return self._compiled_torch
+
     def transform(self, tensor):
         self._validate_numel(tensor)
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
-            from lego.backend.torch_ops import _LegoPermuteFunction
-            if _LegoPermuteFunction is not None:
-                fwd_t, inv_t = self._get_perm_tensors(tensor.device)
-                return _LegoPermuteFunction.apply(
-                    tensor, fwd_t, inv_t
-                ).reshape(self._shape)
+            from lego.backend.torch_layout import apply_layout_torch
+            return apply_layout_torch(tensor, self._layout, self._shape,
+                                      compiled=self._get_compiled_torch())
         if isinstance(tensor, np.ndarray):
             if self._composed_perm is not None:
                 fwd, _ = self._composed_perm
@@ -208,12 +213,9 @@ class LegoLayout:
         self._validate_numel(tensor)
         _check_layout_invertible(self._layout)
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
-            from lego.backend.torch_ops import _LegoPermuteFunction
-            if _LegoPermuteFunction is not None:
-                fwd_t, inv_t = self._get_perm_tensors(tensor.device)
-                return _LegoPermuteFunction.apply(
-                    tensor, inv_t, fwd_t
-                ).reshape(self._shape)
+            from lego.backend.torch_layout import apply_inverse_layout_torch
+            return apply_inverse_layout_torch(tensor, self._layout, self._shape,
+                                              compiled=self._get_compiled_torch())
         if isinstance(tensor, np.ndarray):
             if self._composed_perm is not None:
                 _, inv = self._composed_perm
