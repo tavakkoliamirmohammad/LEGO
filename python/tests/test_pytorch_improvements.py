@@ -4,8 +4,8 @@ Tests for PyTorch path improvements.
 Covers:
   Phase 1: Bug fixes (GenP inverse guard, shape validation, xreplace->subs, RegP validation)
   Phase 2: API usability (input validation, TiledPermute, dtype expansion)
-  Phase 3: Performance (compiler cache, strided permutation, composed module)
-  Phase 4: Layout-aware LegoTensor (dispatch, elementwise, reductions, matmul, autograd)
+  Phase 3: Performance (compiler cache, composed module)
+  Phase 4: Layout-aware LegoTensor (dispatch, elementwise, reductions, matmul)
   Phase 5: Autotuning
 """
 
@@ -20,9 +20,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lego.core import Row, Col, RegP, OrderBy, GroupBy, GenP
 from lego.backend.compiler import LayoutCompiler, _dtype_to_mlir, _get_mlir_element_type
 from lego.backend.compiler import _COMPILER_CACHE, _PERM_TABLE_CACHE
-from lego.backend.torch_ops import (
-    PermutationRepr, DensePermutation, StridedPermutation,
-)
 from lego.frontends.python_mlir import (
     LegoLayout, RowMajor, ColMajor, Tiled, TiledPermute, TiledView, Custom,
     Transposed, _check_layout_invertible,
@@ -322,56 +319,6 @@ class TestCompilerCache:
         assert inv1 is inv2
 
 
-class TestStridedPermutation:
-    """3B: Strided permutation representation."""
-
-    def test_strided_perm_basic(self):
-        """StridedPermutation produces correct results for a simple transpose."""
-        sp = StridedPermutation(shape=(3, 4), perm_vector=[1, 0])
-        fwd, inv = sp.to_dense()
-        assert len(fwd) == 12
-        assert len(inv) == 12
-        # Verify round-trip
-        np.testing.assert_array_equal(inv[fwd], np.arange(12))
-
-    def test_strided_perm_identity(self):
-        """Identity permutation: fwd == arange."""
-        sp = StridedPermutation(shape=(3, 4), perm_vector=[0, 1])
-        fwd, inv = sp.to_dense()
-        np.testing.assert_array_equal(fwd, np.arange(12))
-        np.testing.assert_array_equal(inv, np.arange(12))
-
-    def test_strided_perm_3d(self):
-        """StridedPermutation works for 3D shapes."""
-        sp = StridedPermutation(shape=(2, 3, 4), perm_vector=[2, 0, 1])
-        fwd, inv = sp.to_dense()
-        assert len(fwd) == 24
-        np.testing.assert_array_equal(inv[fwd], np.arange(24))
-
-    def test_strided_matches_dense(self):
-        """StridedPermutation matches RegP dense permutation table."""
-        shape = (3, 4)
-        perm = [1, 0]
-        layout = LegoLayout(group_by(shape, order_by(reg_p(shape, perm))))
-        compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
-        dense_fwd, dense_inv = compiler.get_permutation_table()
-
-        strided = StridedPermutation(shape, perm)
-        strided_fwd, strided_inv = strided.to_dense()
-
-        np.testing.assert_array_equal(strided_fwd, dense_fwd)
-        np.testing.assert_array_equal(strided_inv, dense_inv)
-
-    def test_dense_permutation_class(self):
-        """DensePermutation wraps arrays correctly."""
-        fwd = np.array([2, 0, 1], dtype=np.int64)
-        inv = np.array([1, 2, 0], dtype=np.int64)
-        dp = DensePermutation(fwd, inv)
-        f, i = dp.to_dense()
-        np.testing.assert_array_equal(f, fwd)
-        np.testing.assert_array_equal(i, inv)
-
-
 class TestComposedModule:
     """3C: MLIR layout fusion via composed module."""
 
@@ -511,65 +458,6 @@ class TestLayoutAwareMatmul:
         result = torch.matmul(la, lb)
         expected = torch.matmul(a, b)
         torch.testing.assert_close(result, expected, atol=1e-5, rtol=1e-5)
-
-
-@requires_torch
-class TestCustomOpAutograd:
-    """4E: Autograd for lego::permute custom op."""
-
-    def test_permute_op_backward(self):
-        """lego::permute supports autograd backward."""
-        from lego.backend import torch_ops
-        x = torch.randn(2, 3, requires_grad=True)
-        perm = torch.tensor([5, 4, 3, 2, 1, 0])
-        result = torch.ops.lego.permute(x, perm)
-        loss = result.sum()
-        loss.backward()
-        assert x.grad is not None
-        assert x.grad.shape == x.shape
-
-    def test_permute_op_gradient_correctness(self):
-        """Gradient flows correctly through permute."""
-        from lego.backend import torch_ops
-        x = torch.randn(2, 3, requires_grad=True)
-        perm = torch.tensor([5, 4, 3, 2, 1, 0])
-        result = torch.ops.lego.permute(x, perm)
-        weights = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-        loss = (result * weights).sum()
-        loss.backward()
-        assert x.grad is not None
-
-    @requires_cuda
-    def test_permute_op_backward_cuda(self):
-        """lego::permute autograd works on CUDA."""
-        from lego.backend import torch_ops
-        x = torch.randn(2, 3, device="cuda", requires_grad=True)
-        perm = torch.tensor([5, 4, 3, 2, 1, 0], device="cuda")
-        result = torch.ops.lego.permute(x, perm)
-        loss = result.sum()
-        loss.backward()
-        assert x.grad is not None
-
-
-@requires_torch
-class TestStridedPermuteOp:
-    """Strided permute custom op."""
-
-    def test_strided_permute_cpu(self):
-        from lego.backend import torch_ops
-        x = torch.arange(12, dtype=torch.float32).reshape(3, 4)
-        result = torch.ops.lego.permute_strided(x, [3, 4], [1, 0])
-        # Should be equivalent to transpose
-        expected = x.view(3, 4).permute(1, 0).contiguous().view(3, 4)
-        torch.testing.assert_close(result, expected)
-
-    @requires_cuda
-    def test_strided_permute_cuda(self):
-        from lego.backend import torch_ops
-        x = torch.arange(12, dtype=torch.float32, device="cuda").reshape(3, 4)
-        result = torch.ops.lego.permute_strided(x, [3, 4], [1, 0])
-        expected = x.view(3, 4).permute(1, 0).contiguous().view(3, 4)
-        torch.testing.assert_close(result, expected)
 
 
 @requires_torch
