@@ -22,7 +22,7 @@ if _HAS_TORCH:
     from lego.backend.compiler import LayoutCompiler
 
     # ====================================================================
-    # Layout-aware op dispatch table (4A)
+    # Layout-aware op dispatch table
     # ====================================================================
 
     _LAYOUT_AWARE_OPS = {}  # torch_func -> handler
@@ -69,7 +69,7 @@ if _HAS_TORCH:
         return result
 
     # ====================================================================
-    # Elementwise ops (4B) — operate on physical storage when layouts match
+    # Elementwise ops — operate on physical storage when layouts match
     # ====================================================================
 
     def _make_elementwise_handler(torch_func):
@@ -123,7 +123,7 @@ if _HAS_TORCH:
         _LAYOUT_AWARE_OPS[_op] = _make_elementwise_handler(_op)
 
     # ====================================================================
-    # Reduction ops (4C) — full reductions are order-independent
+    # Reduction ops — full reductions are order-independent
     # ====================================================================
 
     def _make_full_reduction_handler(torch_func):
@@ -159,7 +159,7 @@ if _HAS_TORCH:
         _LAYOUT_AWARE_OPS[_op] = _make_full_reduction_handler(_op)
 
     # ====================================================================
-    # Layout-aware matmul (4D)
+    # Layout-aware matmul
     # ====================================================================
 
     def _matmul_handler(*args, **kwargs):

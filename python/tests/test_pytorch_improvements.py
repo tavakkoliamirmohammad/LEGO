@@ -1,12 +1,7 @@
 """
 Tests for PyTorch path improvements.
 
-Covers:
-  Phase 1: Bug fixes (GenP inverse guard, shape validation, xreplace->subs, RegP validation)
-  Phase 2: API usability (input validation, TiledPermute, dtype expansion)
-  Phase 3: Performance (compiler cache, composed module)
-  Phase 4: Layout-aware LegoTensor (dispatch, elementwise, reductions, matmul)
-  Phase 5: Autotuning
+Covers bug fixes, API usability, performance, layout-aware LegoTensor, and autotuning.
 """
 
 import pytest
@@ -39,11 +34,11 @@ requires_cuda = pytest.mark.skipif(not _HAS_CUDA, reason="CUDA not available")
 
 
 # ============================================================================
-# Phase 1: Bug Fixes
+# Bug Fixes
 # ============================================================================
 
 class TestGenPInverseGuard:
-    """1A: GenP inverse None crash guard."""
+    """GenP inverse None crash guard."""
 
     def test_genp_warns_when_no_inverse(self):
         """GenP warns when inverse cannot be derived."""
@@ -87,7 +82,7 @@ class TestGenPInverseGuard:
 
 
 class TestShapeValidation:
-    """1B: Shape validation on transform/inverse_transform."""
+    """Shape validation on transform/inverse_transform."""
 
     def test_transform_rejects_wrong_numel(self):
         """transform raises ValueError for numel mismatch."""
@@ -112,7 +107,7 @@ class TestShapeValidation:
 
 
 class TestXreplaceToSubs:
-    """1C: xreplace -> subs compatibility."""
+    """xreplace -> subs compatibility."""
 
     def test_getitem_uses_subs(self):
         """GroupBy.__getitem__ uses .subs() and returns valid expression."""
@@ -126,7 +121,7 @@ class TestXreplaceToSubs:
 
 
 class TestRegPValidation:
-    """2A: RegP input validation."""
+    """RegP input validation."""
 
     def test_regp_rejects_length_mismatch(self):
         """RegP raises on perm length != dims length."""
@@ -150,7 +145,7 @@ class TestRegPValidation:
 
 
 class TestLegoLayoutValidation:
-    """2A: LegoLayout dim validation."""
+    """LegoLayout dim validation."""
 
     def test_rejects_zero_dim(self):
         """LegoLayout raises on zero dimension."""
@@ -166,11 +161,11 @@ class TestLegoLayoutValidation:
 
 
 # ============================================================================
-# Phase 2: API Usability
+# API Usability
 # ============================================================================
 
 class TestTiledPermute:
-    """2B: TiledPermute convenience constructor."""
+    """TiledPermute convenience constructor."""
 
     def test_basic_tiled_permute(self):
         """TiledPermute creates a LegoLayout with same shape."""
@@ -217,7 +212,7 @@ class TestTiledPermute:
 
 
 class TestTiledViewErrors:
-    """2A: Improved TiledView error messages."""
+    """Improved TiledView error messages."""
 
     def test_zero_tile_size(self):
         with pytest.raises(ValueError, match="must be > 0"):
@@ -230,7 +225,7 @@ class TestTiledViewErrors:
 
 
 class TestDtypeExpansion:
-    """2C: dtype expansion."""
+    """dtype expansion."""
 
     def test_numpy_bool(self):
         assert _dtype_to_mlir(np.bool_) == "i1"
@@ -274,11 +269,11 @@ class TestDtypeExpansion:
 
 
 # ============================================================================
-# Phase 3: Performance
+# Performance
 # ============================================================================
 
 class TestCompilerCache:
-    """3A: Global in-memory compiler cache."""
+    """Global in-memory compiler cache."""
 
     def test_cache_hit_same_layout(self):
         """Same layout compiled twice uses cache."""
@@ -320,12 +315,12 @@ class TestCompilerCache:
 
 
 # ============================================================================
-# Phase 4: Layout-Aware LegoTensor
+# Layout-Aware LegoTensor
 # ============================================================================
 
 @requires_torch
 class TestLayoutAwareElementwise:
-    """4A+4B: Dispatch table and elementwise ops on physical storage."""
+    """Dispatch table and elementwise ops on physical storage."""
 
     def test_add_preserves_layout(self):
         """Adding two same-layout LegoTensors preserves layout."""
@@ -401,7 +396,7 @@ class TestLayoutAwareElementwise:
 
 @requires_torch
 class TestLayoutAwareReductions:
-    """4C: Layout-aware reductions."""
+    """Layout-aware reductions."""
 
     def test_full_sum_on_physical(self):
         """Full sum (no dim) operates on physical data directly."""
@@ -432,7 +427,7 @@ class TestLayoutAwareReductions:
 
 @requires_torch
 class TestLayoutAwareMatmul:
-    """4D: Layout-aware matmul falls back to logical."""
+    """Layout-aware matmul falls back to logical."""
 
     def test_matmul_correctness(self):
         from lego.backend.torch_tensor import as_lego_tensor
@@ -448,7 +443,7 @@ class TestLayoutAwareMatmul:
 
 @requires_torch
 class TestDispatchWarnings:
-    """4A: Unregistered ops trigger one-time warning."""
+    """Unregistered ops trigger one-time warning."""
 
     def test_unregistered_op_warns(self):
         from lego.backend.torch_tensor import as_lego_tensor, _WARNED_OPS
@@ -466,11 +461,11 @@ class TestDispatchWarnings:
 
 
 # ============================================================================
-# Phase 5: Autotuning
+# Autotuning
 # ============================================================================
 
 class TestAutotuning:
-    """5A: Autotuning for tile sizes."""
+    """Autotuning for tile sizes."""
 
     def test_autotune_returns_tiled_view(self):
         from lego.autotune import autotune
@@ -514,7 +509,7 @@ class TestAutotuning:
 # ============================================================================
 
 class TestPermutationDocstrings:
-    """1D: Verify permutation semantics are documented and correct."""
+    """Verify permutation semantics are documented and correct."""
 
     def test_perm_table_invariant(self):
         """inv[fwd[i]] == i and fwd[inv[i]] == i for all i."""
