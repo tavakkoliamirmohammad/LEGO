@@ -3,11 +3,16 @@ LEGO Layout Compiler
 
 - IRBuilder: constructs LEGO dialect IR from layout objects
 - LayoutCompiler: JIT-compiles via lego-to-llvm pipeline
+
+Supports both concrete and symbolic layout dimensions.  When a layout
+contains SymPy symbols, those symbols become function parameters in the
+generated MLIR and are bound to concrete values at invocation time.
 """
 
 import ctypes
 import sys
 import numpy as np
+import sympy as sp
 
 from mlir.ir import (
     Context, Location, Module, InsertionPoint,
@@ -72,21 +77,44 @@ def _get_mlir_element_type(ctx, dtype_str):
 # ============================================================================
 
 def _get_layout_dims(layout):
-    """Get dims as tuple of ints from a layout object."""
+    """Get dims from a layout object (may be int or SymPy expressions)."""
     dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
-    return tuple(int(d) for d in dims)
+    return tuple(dims)
+
+
+def _collect_symbolic_dims(layout):
+    """Collect all free SymPy symbols from a layout's dimensions."""
+    from lego.backend.symbolic import _collect_free_symbols
+    return sorted(_collect_free_symbols(layout), key=lambda s: s.name)
+
+
+def _has_symbolic_dims(layout):
+    """Check if a layout contains any SymPy symbols."""
+    return len(_collect_symbolic_dims(layout)) > 0
 
 
 class IRBuilder:
-    """Builds a complete MLIR module with @transform / @inverse_transform."""
+    """Builds a complete MLIR module with @transform / @inverse_transform.
+
+    When the layout has symbolic dimensions, they become additional index
+    parameters appended after (src, dst, n).  The caller must provide
+    concrete values for these symbols at invocation time.
+    """
 
     def __init__(self, layout, shape, dtype_str="f32"):
         self._layout = layout
         self._shape = shape
         self._dtype_str = dtype_str
+        self._symbolic = _has_symbolic_dims(layout)
+        self._sym_list = _collect_symbolic_dims(layout) if self._symbolic else []
         self._total = 1
         for s in shape:
             self._total *= int(s)
+
+    @property
+    def sym_list(self):
+        """Ordered list of SymPy symbols that become function parameters."""
+        return self._sym_list
 
     def build_module(self):
         ctx = Context()
@@ -101,24 +129,31 @@ class IRBuilder:
         return ctx, module
 
     def _build_function(self, module, name, idx_ty, memref_ty, forward):
-        func_ty = FunctionType.get([memref_ty, memref_ty, idx_ty], [])
+        # Base args: src, dst, n.  Symbolic dims appended as extra index args.
+        param_types = [memref_ty, memref_ty, idx_ty] + [idx_ty] * len(self._sym_list)
+        func_ty = FunctionType.get(param_types, [])
         with InsertionPoint(module.body):
             f = func_dialect.FuncOp(name, func_ty)
             f.sym_visibility = StringAttr.get("public")
             f.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
         entry = f.add_entry_block()
-        src, dst, n = entry.arguments
+        src, dst, n = entry.arguments[0], entry.arguments[1], entry.arguments[2]
+
+        # Build sym_to_val mapping for symbolic dims
+        sym_to_val = {}
+        for i, sym in enumerate(self._sym_list):
+            sym_to_val[sym] = entry.arguments[3 + i]
 
         with InsertionPoint(entry):
-            from lego.backend.symbolic import emit_layout_from_python
+            from lego.backend.symbolic import emit_layout_from_python, _resolve_dim
 
             layout_dims = _get_layout_dims(self._layout)
-            dim_vals = [_index_const(s) for s in layout_dims]
+            dim_vals = [_resolve_dim(d, sym_to_val) for d in layout_dims]
             rank = len(layout_dims)
 
             identity = _emit_group_by(dim_vals, [_emit_order_by([_emit_row(dim_vals)])])
-            layout_val = emit_layout_from_python(self._layout, {})
+            layout_val = emit_layout_from_python(self._layout, sym_to_val)
 
             loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1))
             with InsertionPoint(loop.body):
@@ -139,15 +174,32 @@ class IRBuilder:
 # JIT Compiler
 # ============================================================================
 
-def get_compiler(layout, shape, dtype="f32"):
+def get_compiler(layout, shape, dtype="f32", dim_bindings=None):
     d = _dtype_to_mlir(dtype) if not isinstance(dtype, str) else dtype
-    return LayoutCompiler(layout, shape, d)
+    return LayoutCompiler(layout, shape, d, dim_bindings=dim_bindings)
 
 
 class LayoutCompiler:
-    """Compiles a layout into a JIT-executable module."""
+    """Compiles a layout into a JIT-executable module.
 
-    def __init__(self, layout, shape, dtype="f32"):
+    Supports layouts with symbolic dimensions.  Concrete dimension values
+    are resolved from the provided ``shape`` via ``dim_bindings``, or
+    inferred automatically when the shape matches the layout's group dims.
+    """
+
+    def __init__(self, layout, shape, dtype="f32", dim_bindings=None):
+        """
+        Parameters
+        ----------
+        layout : GroupBy or TileByLayout
+        shape : tuple of int
+            Concrete tensor shape.
+        dtype : str or numpy/torch dtype
+        dim_bindings : dict, optional
+            Maps SymPy symbols to concrete int values.  If not provided,
+            symbols are resolved by matching the layout's ``_dims`` tuple
+            against ``shape`` positionally.
+        """
         self._layout = layout
         self._shape = tuple(int(s) for s in shape)
         self._dtype = _dtype_to_mlir(dtype) if not isinstance(dtype, str) else dtype
@@ -155,17 +207,61 @@ class LayoutCompiler:
         self._engine = None
         self._mlir_text = None
         self._perm_table = None
+        self._ir_builder = None
+        self._dim_bindings = dim_bindings or {}
+
+    def _get_ir_builder(self):
+        if self._ir_builder is None:
+            self._ir_builder = IRBuilder(self._layout, self._shape, self._dtype)
+        return self._ir_builder
+
+    def _resolve_sym_values(self):
+        """Resolve concrete values for all symbolic parameters."""
+        builder = self._get_ir_builder()
+        if not builder.sym_list:
+            return []
+
+        # Use explicit bindings if provided
+        bindings = dict(self._dim_bindings)
+
+        # Auto-resolve: match layout._dims against shape positionally
+        if not bindings:
+            layout_dims = _get_layout_dims(self._layout)
+            if len(layout_dims) == len(self._shape):
+                for dim_expr, concrete_val in zip(layout_dims, self._shape):
+                    if isinstance(dim_expr, sp.Symbol):
+                        bindings[dim_expr] = concrete_val
+                    elif isinstance(dim_expr, sp.Expr):
+                        # Try to solve for unknown symbols
+                        for sym in dim_expr.free_symbols:
+                            if sym not in bindings:
+                                solutions = sp.solve(dim_expr - concrete_val, sym)
+                                if len(solutions) == 1:
+                                    val = solutions[0]
+                                    if val.is_Integer and int(val) > 0:
+                                        bindings[sym] = int(val)
+
+        values = []
+        for sym in builder.sym_list:
+            if sym not in bindings:
+                raise ValueError(
+                    f"Cannot resolve symbolic dimension '{sym}'. "
+                    f"Provide dim_bindings={{'{sym}': <value>}} to LayoutCompiler."
+                )
+            values.append(int(bindings[sym]))
+        return values
 
     @property
     def mlir_text(self):
         if self._mlir_text is None:
-            _, module = IRBuilder(self._layout, self._shape, self._dtype).build_module()
+            _, module = self._get_ir_builder().build_module()
             self._mlir_text = str(module)
         return self._mlir_text
 
     def compile(self):
         if self._engine is None:
-            self._ctx, module = IRBuilder(self._layout, self._shape, self._dtype).build_module()
+            builder = self._get_ir_builder()
+            self._ctx, module = builder.build_module()
             if self._mlir_text is None:
                 self._mlir_text = str(module)
             with self._ctx:
@@ -197,7 +293,12 @@ class LayoutCompiler:
         dst = np.empty_like(src)
         src_ptr = ctypes.pointer(ctypes.pointer(get_ranked_memref_descriptor(src)))
         dst_ptr = ctypes.pointer(ctypes.pointer(get_ranked_memref_descriptor(dst)))
-        engine.invoke(func_name, src_ptr, dst_ptr, (ctypes.c_int64 * 1)(total))
+
+        # Build invocation args: src, dst, n, [sym_val_0, sym_val_1, ...]
+        sym_values = self._resolve_sym_values()
+        n_arr = (ctypes.c_int64 * 1)(total)
+        sym_args = [(ctypes.c_int64 * 1)(v) for v in sym_values]
+        engine.invoke(func_name, src_ptr, dst_ptr, n_arr, *sym_args)
         return dst.reshape(arr.shape)
 
     def transform_numpy(self, arr):
