@@ -380,7 +380,7 @@ def arith_to_sympy(value, val_to_sym, memo=None):
 
 
 def _collect_free_symbols(layout):
-    """Collect all SymPy symbols used in a layout's dimensions (recursive)."""
+    """Collect all SymPy symbols used in a layout's dimensions and GenP bodies (recursive)."""
     syms = set()
     if hasattr(layout, '_dims'):
         for d in layout._dims:
@@ -388,6 +388,24 @@ def _collect_free_symbols(layout):
                 syms |= d.free_symbols
             elif isinstance(d, sp.Symbol):
                 syms.add(d)
+    if isinstance(layout, GenP):
+        # Evaluate f_apply with dummy index symbols to discover extra free symbols
+        # (e.g., symbolic parameters used in the forward function body).
+        try:
+            rank = len(layout._dims)
+            dummy_idx = sp.symbols([f"_dummy_idx_{k}" for k in range(rank)], integer=True)
+            fwd_expr = layout.f_apply(tuple(dummy_idx))
+            if isinstance(fwd_expr, sp.Expr):
+                syms |= fwd_expr.free_symbols - set(dummy_idx)
+            if layout.f_inv is not None:
+                dummy_flat = sp.Symbol("_dummy_flat", integer=True)
+                inv_result = layout.f_inv(dummy_flat)
+                if inv_result is not None:
+                    for expr in inv_result:
+                        if isinstance(expr, sp.Expr):
+                            syms |= expr.free_symbols - {dummy_flat}
+        except Exception:
+            pass  # Best-effort; fall back to dim-only collection
     if isinstance(layout, TileByLayout):
         for orderby in layout._input_chain:
             syms |= _collect_free_symbols(orderby)
@@ -440,6 +458,18 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
     sym_list = sorted(all_syms, key=lambda s: s.name)
 
     ctx = _get_cached_context()
+
+    try:
+        return _simplify_via_mlir_impl(ctx, layout, mode, args, constraints, sym_list)
+    except Exception:
+        # Invalidate cached context on failure to avoid stale state
+        _thread_local.mlir_ctx = None
+        raise
+
+
+def _simplify_via_mlir_impl(ctx, layout, mode, args, constraints, sym_list):
+    """Inner implementation of simplify_via_mlir (separated for error handling)."""
+    from mlir.ir import IndexType, FunctionType, StringAttr
 
     with ctx, Location.unknown():
         module = Module.create()

@@ -719,7 +719,7 @@ class TestCustomOp:
 
 
 # ============================================================================
-# Symbolic JIT Compilation (C2)
+# Symbolic JIT Compilation
 # ============================================================================
 
 class TestSymbolicJIT:

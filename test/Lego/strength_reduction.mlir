@@ -1,6 +1,6 @@
 // RUN: lego-opt %s -lego-strength-reduction | FileCheck %s
 //
-// Tests for the lego-strength-reduction pass (D2):
+// Tests for the lego-strength-reduction pass:
 //   muli(x, 2^k)  → shli(x, k)
 //   divui(x, 2^k) → shrui(x, k)
 //   remui(x, 2^k) → andi(x, 2^k - 1)
@@ -77,5 +77,41 @@ func.func @non_pow2_unchanged(%x: index) -> (index, index, index) {
 func.func @muli_by_one(%x: index) -> index {
   %c1 = arith.constant 1 : index
   %a = arith.muli %x, %c1 : index
+  return %a : index
+}
+
+// Both operands are power-of-2 constants: should reduce then fold.
+// CHECK-LABEL: func.func @both_const_pow2
+// CHECK:       %[[C:.*]] = arith.constant 32 : index
+// CHECK:       return %[[C]] : index
+func.func @both_const_pow2() -> index {
+  %c4 = arith.constant 4 : index
+  %c8 = arith.constant 8 : index
+  %a = arith.muli %c4, %c8 : index
+  return %a : index
+}
+
+// divui(x, 1) and remui(x, 1) are canonicalized away (not strength-reduced).
+// divui(x,1) → x, remui(x,1) → 0
+// CHECK-LABEL: func.func @div_rem_by_one
+// CHECK-NOT:   arith.shrui
+// CHECK-NOT:   arith.andi
+// CHECK:       return
+func.func @div_rem_by_one(%x: index) -> (index, index) {
+  %c1 = arith.constant 1 : index
+  %a = arith.divui %x, %c1 : index
+  %b = arith.remui %x, %c1 : index
+  return %a, %b : index, index
+}
+
+// Commutative muli: constant on left side should also be reduced.
+// CHECK-LABEL: func.func @muli_const_lhs
+// CHECK-SAME:  (%[[X:.*]]: index)
+// CHECK:       %[[C:.*]] = arith.constant 4 : index
+// CHECK:       %[[R:.*]] = arith.shli %[[X]], %[[C]] : index
+// CHECK:       return %[[R]] : index
+func.func @muli_const_lhs(%x: index) -> index {
+  %c16 = arith.constant 16 : index
+  %a = arith.muli %c16, %x : index
   return %a : index
 }

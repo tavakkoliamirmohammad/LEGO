@@ -654,7 +654,7 @@ class TestEdgeCases:
 
 
 # ============================================================================
-# Tests for _merge_bound fix (A1)
+# Tests for _merge_bound
 # ============================================================================
 
 class TestMergeBound:
@@ -700,7 +700,7 @@ class TestMergeBound:
 
 
 # ============================================================================
-# Tests for expanded _lower_sympy_to_index (B1)
+# Tests for expanded _lower_sympy_to_index
 # ============================================================================
 
 class TestExpandedLowering:
@@ -727,7 +727,7 @@ class TestExpandedLowering:
 
 
 # ============================================================================
-# Tests for GenP auto-inverse (E1)
+# Tests for GenP auto-inverse
 # ============================================================================
 
 class TestGenPAutoInverse:
@@ -798,7 +798,7 @@ class TestGenPAutoInverse:
 
 
 # ============================================================================
-# Tests for MLIR context caching (C1)
+# Tests for MLIR context caching
 # ============================================================================
 
 class TestContextCaching:
@@ -829,6 +829,81 @@ class TestContextCaching:
         L3 = OrderBy(Row(16, 16)).GroupBy([(16, 16)])
         r3 = L3[a, b]
         assert_expr_equal(r3, 16 * a + b)
+
+
+# ============================================================================
+# Tests for _collect_free_symbols GenP body
+# ============================================================================
+
+class TestCollectFreeSymbols:
+    """Test that _collect_free_symbols finds symbols in GenP function bodies."""
+
+    def test_genp_body_symbols_collected(self):
+        from lego.backend.symbolic import _collect_free_symbols
+        K = sym("K")
+        N = sym("N")
+        L = GenP([N], lambda idx: K * idx[0])
+        syms_found = _collect_free_symbols(L)
+        assert K in syms_found, f"K should be found in GenP body, got {syms_found}"
+        assert N in syms_found, f"N should be found in dims, got {syms_found}"
+
+    def test_genp_inv_body_symbols_collected(self):
+        from lego.backend.symbolic import _collect_free_symbols
+        K = sym("K")
+        N = sym("N")
+        L = GenP([N], lambda idx: K * idx[0], lambda flat: (flat / K,))
+        syms_found = _collect_free_symbols(L)
+        assert K in syms_found, f"K should be found in GenP inv body, got {syms_found}"
+
+    def test_plain_genp_no_extra_symbols(self):
+        from lego.backend.symbolic import _collect_free_symbols
+        N = sym("N")
+        L = GenP([N], lambda idx: idx[0])
+        syms_found = _collect_free_symbols(L)
+        assert N in syms_found
+        # Only N should be found (no extra symbols)
+        assert len(syms_found) == 1
+
+
+# ============================================================================
+# Tests for _parse_relational compound LHS
+# ============================================================================
+
+class TestParseRelational:
+    """Test that compound LHS constraints are properly parsed."""
+
+    def test_compound_lhs_strict_gt(self):
+        """2*M > 10 → M > 5 → lb=6"""
+        M = sym("M")
+        constraints = {}
+        rel = sp.StrictGreaterThan(2 * M, 10, evaluate=False)
+        GroupBy._parse_relational(rel, constraints)
+        assert M in constraints, f"M should have a bound, got {constraints}"
+        lb, _ = constraints[M]
+        assert lb is not None
+        # 2*M > 10 → M > 5 → lb = 6
+        assert sp.simplify(lb - 6) == 0, f"Expected lb=6, got {lb}"
+
+    def test_compound_lhs_lt(self):
+        """3*N < 30 → N < 10"""
+        N = sym("N")
+        constraints = {}
+        rel = sp.StrictLessThan(3 * N, 30, evaluate=False)
+        GroupBy._parse_relational(rel, constraints)
+        assert N in constraints, f"N should have a bound, got {constraints}"
+        _, ub = constraints[N]
+        assert ub is not None
+        assert sp.simplify(ub - 10) == 0, f"Expected ub=10, got {ub}"
+
+    def test_plain_symbol_still_works(self):
+        """Ensure simple X > 5 still works."""
+        X = sym("X")
+        constraints = {}
+        rel = sp.StrictGreaterThan(X, 5, evaluate=False)
+        GroupBy._parse_relational(rel, constraints)
+        assert X in constraints
+        lb, _ = constraints[X]
+        assert lb == 6
 
 
 if __name__ == "__main__":

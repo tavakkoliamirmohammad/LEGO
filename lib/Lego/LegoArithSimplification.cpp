@@ -386,11 +386,10 @@ struct StrengthReduceRem : public OpRewritePattern<arith::RemUIOp> {
     auto log2 = matchPowerOfTwo(op.getRhs());
     if (!log2 || *log2 == 0) // skip mod-by-1
       return failure();
-    APInt val;
-    matchPattern(op.getRhs(), m_ConstantInt(&val));
+    uint64_t maskValue = (1ULL << *log2) - 1;
     Value mask = arith::ConstantOp::create(
         rewriter, op.getLoc(),
-        rewriter.getIndexAttr((val - 1).getZExtValue()));
+        rewriter.getIndexAttr(maskValue));
     rewriter.replaceOpWithNewOp<arith::AndIOp>(op, op.getLhs(), mask);
     return success();
   }

@@ -216,7 +216,12 @@ class LayoutCompiler:
         return self._ir_builder
 
     def _resolve_sym_values(self):
-        """Resolve concrete values for all symbolic parameters."""
+        """Resolve concrete values for all symbolic parameters.
+
+        Uses multi-pass resolution: in each pass, substitutes known
+        bindings into unsolved equations before solving.  This handles
+        compound expressions like ``R*T = 120`` where R is already known.
+        """
         builder = self._get_ir_builder()
         if not builder.sym_list:
             return []
@@ -228,18 +233,42 @@ class LayoutCompiler:
         if not bindings:
             layout_dims = _get_layout_dims(self._layout)
             if len(layout_dims) == len(self._shape):
+                # Build equation list: (dim_expr, concrete_value)
+                equations = []
                 for dim_expr, concrete_val in zip(layout_dims, self._shape):
                     if isinstance(dim_expr, sp.Symbol):
                         bindings[dim_expr] = concrete_val
                     elif isinstance(dim_expr, sp.Expr):
-                        # Try to solve for unknown symbols
-                        for sym in dim_expr.free_symbols:
-                            if sym not in bindings:
-                                solutions = sp.solve(dim_expr - concrete_val, sym)
+                        equations.append((dim_expr, concrete_val))
+
+                # Multi-pass: substitute known bindings and solve iteratively
+                max_passes = len(equations) + 1
+                for _ in range(max_passes):
+                    progress = False
+                    remaining = []
+                    for dim_expr, concrete_val in equations:
+                        # Substitute known bindings into the expression
+                        substituted = dim_expr.subs(bindings)
+                        unknowns = substituted.free_symbols - set(bindings.keys())
+                        if not unknowns:
+                            # Fully resolved — verify consistency
+                            continue
+                        if len(unknowns) == 1:
+                            sym = unknowns.pop()
+                            try:
+                                solutions = sp.solve(substituted - concrete_val, sym)
                                 if len(solutions) == 1:
                                     val = solutions[0]
                                     if val.is_Integer and int(val) > 0:
                                         bindings[sym] = int(val)
+                                        progress = True
+                                        continue
+                            except (NotImplementedError, ValueError):
+                                pass
+                        remaining.append((dim_expr, concrete_val))
+                    equations = remaining
+                    if not progress:
+                        break
 
         values = []
         for sym in builder.sym_list:

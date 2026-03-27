@@ -349,11 +349,61 @@ class GroupBy(LayoutBlock):
 
     @staticmethod
     def _parse_relational(rel, constraints):
-        """Parse a SymPy relational into the constraints dict."""
+        """Parse a SymPy relational into the constraints dict.
+
+        Handles both simple (Symbol op Expr) and compound (Expr op Expr)
+        relationals.  For compound LHS, attempts to isolate a single
+        symbol via sp.solve when the LHS has exactly one free symbol.
+        """
         if not isinstance(rel, sp.core.relational.Relational):
             return
 
         lhs, rhs = rel.args
+
+        # Try to extract the target symbol from LHS
+        target = None
+        if isinstance(lhs, sp.Symbol):
+            target = lhs
+        elif isinstance(lhs, sp.Expr):
+            free = lhs.free_symbols - (rhs.free_symbols if isinstance(rhs, sp.Expr) else set())
+            if len(free) == 1:
+                target = free.pop()
+                # Solve: lhs op rhs  →  target op bound
+                try:
+                    # Rearrange lhs = rhs to solve for target
+                    sols = sp.solve(lhs - rhs, target)
+                    if len(sols) == 1:
+                        bound = sols[0]
+                        # Create equivalent relational with target on LHS
+                        # Check if the coefficient of target in lhs is positive
+                        # (if negative, inequality flips)
+                        coeff = sp.diff(lhs, target)
+                        if coeff.is_positive:
+                            rel = type(rel)(target, bound, evaluate=False)
+                            lhs, rhs = target, bound
+                        elif coeff.is_negative:
+                            # Flip the relational direction
+                            flip = {
+                                sp.StrictGreaterThan: sp.StrictLessThan,
+                                sp.StrictLessThan: sp.StrictGreaterThan,
+                                sp.GreaterThan: sp.LessThan,
+                                sp.LessThan: sp.GreaterThan,
+                            }
+                            flipped = flip.get(type(rel))
+                            if flipped:
+                                rel = flipped(target, bound, evaluate=False)
+                                lhs, rhs = target, bound
+                            else:
+                                return
+                        else:
+                            return  # Can't determine sign of coefficient
+                    else:
+                        return
+                except (NotImplementedError, ValueError):
+                    return
+
+        if target is None:
+            return
 
         if isinstance(rel, sp.StrictGreaterThan):
             if isinstance(lhs, sp.Symbol):
