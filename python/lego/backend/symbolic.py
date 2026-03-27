@@ -3,6 +3,7 @@ SymPy lowering pipeline: SymPy layout expressions → MLIR LEGO dialect → arit
 """
 from lego.core import *
 import sys
+import threading
 import sympy as sp
 
 from mlir.dialects import arith, scf
@@ -21,6 +22,19 @@ from lego.backend._ops import (
     _emit_group_by, _emit_tile_by,
     _emit_apply, _emit_apply_inverse, _emit_assume_bounds,
 )
+
+
+# Thread-local cache for MLIR Context with LEGO dialect pre-registered.
+_thread_local = threading.local()
+
+def _get_cached_context():
+    """Return a thread-local MLIR Context with the LEGO dialect registered."""
+    ctx = getattr(_thread_local, 'mlir_ctx', None)
+    if ctx is None:
+        ctx = Context()
+        _register_lego(ctx)
+        _thread_local.mlir_ctx = ctx
+    return ctx
 
 
 def _resolve_dim(dim, sym_to_val):
@@ -73,10 +87,30 @@ def _lower_sympy_to_index(expr, sym_to_val):
         raise KeyError(f"Symbol {expr} not found")
 
     if isinstance(expr, sp.Add):
-        vals = [_lower_sympy_to_index(a, sym_to_val) for a in expr.args]
-        acc = vals[0]
-        for v in vals[1:]:
+        # Separate positive and negative terms for cleaner IR.
+        # SymPy represents a - b as Add(a, Mul(-1, b)).
+        pos_terms = []
+        neg_terms = []
+        for a in expr.args:
+            coeff = a.as_coeff_Mul()[0] if isinstance(a, sp.Mul) else None
+            if isinstance(a, sp.Integer) and int(a) < 0:
+                neg_terms.append(_index_const(-int(a)))
+            elif coeff is not None and coeff.is_Integer and int(coeff) < 0:
+                neg_terms.append(_lower_sympy_to_index(-a, sym_to_val))
+            else:
+                pos_terms.append(_lower_sympy_to_index(a, sym_to_val))
+
+        if not pos_terms:
+            # All negative: 0 - sum(neg)
+            acc = _index_const(0)
+            for v in neg_terms:
+                acc = arith.subi(acc, v)
+            return acc
+        acc = pos_terms[0]
+        for v in pos_terms[1:]:
             acc = arith.addi(acc, v)
+        for v in neg_terms:
+            acc = arith.subi(acc, v)
         return acc
 
     if isinstance(expr, sp.Mul):
@@ -102,6 +136,25 @@ def _lower_sympy_to_index(expr, sym_to_val):
     if isinstance(expr, sp.Mod):
         return arith.remui(_lower_sympy_to_index(expr.args[0], sym_to_val),
                            _lower_sympy_to_index(expr.args[1], sym_to_val))
+
+    if isinstance(expr, sp.Abs):
+        inner = _lower_sympy_to_index(expr.args[0], sym_to_val)
+        zero = _index_const(0)
+        neg = arith.subi(zero, inner)
+        is_nonneg = arith.cmpi(arith.CmpIPredicate.sge, inner, zero)
+        return arith.select(is_nonneg, inner, neg)
+
+    if isinstance(expr, sp.ceiling):
+        # ceiling(a/b) = (a + b - 1) / b  (for positive integers)
+        inner = expr.args[0]
+        num, den = inner.as_numer_denom()
+        if den != sp.S.One:
+            n = _lower_sympy_to_index(num, sym_to_val)
+            d = _lower_sympy_to_index(den, sym_to_val)
+            one = _index_const(1)
+            return arith.divui(arith.addi(arith.subi(n, one), d), d)
+        # If no denominator, ceiling of integer is itself
+        return _lower_sympy_to_index(inner, sym_to_val)
 
     if isinstance(expr, sp.Pow):
         base, exp = expr.args
@@ -238,7 +291,18 @@ def arith_to_sympy(value, val_to_sym, memo=None):
         "arith.muli": lambda a, b: a * b,
         "arith.subi": lambda a, b: a - b,
         "arith.divui": lambda a, b: sp.floor(a / b),
+        "arith.divsi": lambda a, b: sp.floor(a / b),
         "arith.remui": lambda a, b: sp.Mod(a, b),
+        "arith.remsi": lambda a, b: sp.Mod(a, b),
+        "arith.maxui": lambda a, b: sp.Max(a, b),
+        "arith.maxsi": lambda a, b: sp.Max(a, b),
+        "arith.minui": lambda a, b: sp.Min(a, b),
+        "arith.minsi": lambda a, b: sp.Min(a, b),
+        "arith.shli": lambda a, b: a * sp.Pow(2, b),
+        "arith.shrui": lambda a, b: sp.floor(a / sp.Pow(2, b)),
+        "arith.shrsi": lambda a, b: sp.floor(a / sp.Pow(2, b)),
+        "arith.andi": lambda a, b: sp.Function('bitand')(a, b),
+        "arith.ori": lambda a, b: sp.Function('bitor')(a, b),
     }
     if op_name in _BINARY_OPS:
         a = arith_to_sympy(op.operands[0], val_to_sym, memo)
@@ -273,6 +337,16 @@ def arith_to_sympy(value, val_to_sym, memo=None):
             pred = int(ir.IntegerAttr(cond_op.attributes["predicate"]).value)
             cmp_lhs = arith_to_sympy(cond_op.operands[0], val_to_sym, memo)
             cmp_rhs = arith_to_sympy(cond_op.operands[1], val_to_sym, memo)
+
+            # Recognize Abs pattern: select(x >= 0, x, -x) → Abs(x)
+            if (pred in (5, 9)  # sge or uge
+                    and cmp_rhs == sp.Integer(0)
+                    and true_val == cmp_lhs
+                    and false_val == -cmp_lhs):
+                result = sp.Abs(cmp_lhs)
+                memo[value] = result
+                return result
+
             select_patterns = {
                 (5, True): sp.Max, (5, False): sp.Min,
                 (3, True): sp.Min, (3, False): sp.Max,
@@ -365,8 +439,7 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
 
     sym_list = sorted(all_syms, key=lambda s: s.name)
 
-    ctx = Context()
-    _register_lego(ctx)
+    ctx = _get_cached_context()
 
     with ctx, Location.unknown():
         module = Module.create()

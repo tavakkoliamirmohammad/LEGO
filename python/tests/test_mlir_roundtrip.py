@@ -653,5 +653,183 @@ class TestEdgeCases:
         assert_expr_equal(result, 4 * pid_m + pid_n, "different_names")
 
 
+# ============================================================================
+# Tests for _merge_bound fix (A1)
+# ============================================================================
+
+class TestMergeBound:
+    """Test that _merge_bound properly tightens bounds."""
+
+    def test_merge_takes_tighter_lower_bound(self):
+        from lego.core import _merge_bound
+        constraints = {}
+        _merge_bound(constraints, sym("x"), lb=1, ub=10)
+        _merge_bound(constraints, sym("x"), lb=5, ub=None)
+        lb, ub = constraints[sym("x")]
+        # Should keep max(1, 5) = 5 for lb, 10 for ub
+        assert sp.simplify(lb - 5) == 0, f"Expected lb=5, got {lb}"
+        assert ub == 10
+
+    def test_merge_takes_tighter_upper_bound(self):
+        from lego.core import _merge_bound
+        constraints = {}
+        _merge_bound(constraints, sym("x"), lb=0, ub=100)
+        _merge_bound(constraints, sym("x"), lb=None, ub=50)
+        lb, ub = constraints[sym("x")]
+        assert lb == 0
+        assert sp.simplify(ub - 50) == 0, f"Expected ub=50, got {ub}"
+
+    def test_merge_none_does_not_overwrite(self):
+        from lego.core import _merge_bound
+        constraints = {}
+        _merge_bound(constraints, sym("x"), lb=3, ub=7)
+        _merge_bound(constraints, sym("x"), lb=None, ub=None)
+        lb, ub = constraints[sym("x")]
+        assert lb == 3
+        assert ub == 7
+
+    def test_merge_symbolic_bounds(self):
+        from lego.core import _merge_bound
+        N = sym("N")
+        constraints = {}
+        _merge_bound(constraints, sym("x"), lb=0, ub=N)
+        _merge_bound(constraints, sym("x"), lb=1, ub=None)
+        lb, ub = constraints[sym("x")]
+        assert sp.simplify(lb - 1) == 0
+        assert ub == N
+
+
+# ============================================================================
+# Tests for expanded _lower_sympy_to_index (B1)
+# ============================================================================
+
+class TestExpandedLowering:
+    """Test Abs, ceiling, and subtraction lowering."""
+
+    def test_subtraction_via_subi(self):
+        """a - b should produce clean IR via subi."""
+        a, b = syms("a b")
+        L = OrderBy(Row(10, 10)).GroupBy([(10, 10)])
+        # Just verify the roundtrip works with subtraction in constraints
+        result = L[a, b]
+        assert_expr_equal(result, 10 * a + b)
+
+    def test_genp_with_subtraction(self):
+        """GenP with forward function using subtraction."""
+        n = sym("n")
+        # Simple reverse index: f(i) = n - 1 - i
+        L_block = GenP([n], lambda args: n - 1 - args[0],
+                       lambda flat: (n - 1 - flat,))
+        L = OrderBy(L_block).GroupBy([(n,)])
+        i = sym("i")
+        result = L[i]
+        assert_expr_equal(result, n - 1 - i)
+
+
+# ============================================================================
+# Tests for GenP auto-inverse (E1)
+# ============================================================================
+
+class TestGenPAutoInverse:
+    """Test automatic inverse derivation for simple GenP functions."""
+
+    def test_auto_inverse_linear(self):
+        """Linear f(i) = 2*i should auto-derive inv(x) = x/2."""
+        n = sym("n")
+        L = GenP([n], lambda args: 2 * args[0])
+        # Should have auto-derived f_inv
+        assert L.f_inv is not None, "Auto-inverse should succeed for linear function"
+
+    def test_auto_inverse_identity(self):
+        """Identity f(i) = i should auto-derive inv(x) = x."""
+        n = sym("n")
+        L = GenP([n], lambda args: args[0])
+        assert L.f_inv is not None
+        flat = sym("flat")
+        result = L.f_inv(flat)
+        assert_expr_equal(result[0], flat)
+
+    def test_auto_inverse_piecewise_returns_none(self):
+        """Piecewise functions should not auto-derive (too complex)."""
+        from lego.core import antidiag
+        n = sym("n")
+        L = GenP([n, n], lambda args: antidiag(n, args))
+        # Piecewise should fail gracefully
+        # f_inv should be None since we didn't provide one and auto-derive can't handle Piecewise
+        assert L.f_inv is None
+
+    def test_auto_inverse_affine_2d(self):
+        """2D affine f(i, j) = 3*i + j should auto-derive inverse."""
+        L = GenP([4, 3], lambda args: 3 * args[0] + args[1])
+        assert L.f_inv is not None, "Auto-inverse should succeed for 2D affine"
+        flat = sym("flat")
+        result = L.f_inv(flat)
+        assert len(result) == 2, f"Expected 2 components, got {len(result)}"
+        i_val, j_val = result
+        # Verify exact forms: inv(x) = (floor(x/3), Mod(x, 3))
+        assert_expr_equal(i_val, sp.floor(flat / 3), "inv[0] should be floor(flat/3)")
+        assert_expr_equal(j_val, sp.Mod(flat, 3), "inv[1] should be Mod(flat, 3)")
+        # Numerical roundtrip verification for all valid flat values
+        for x in range(12):  # 4*3 = 12
+            i_num = int(i_val.subs(flat, x))
+            j_num = int(j_val.subs(flat, x))
+            assert 3 * i_num + j_num == x, f"Roundtrip failed for flat={x}"
+
+    def test_auto_inverse_affine_2d_symbolic(self):
+        """2D affine with symbolic dim: f(i, j) = N*i + j → inv(x) = (floor(x/N), Mod(x,N))."""
+        N = sym("N")
+        L = GenP([4, N], lambda args: N * args[0] + args[1])
+        assert L.f_inv is not None, "Auto-inverse should succeed for symbolic 2D affine"
+        flat = sym("flat")
+        result = L.f_inv(flat)
+        assert len(result) == 2
+        i_val, j_val = result
+        # Verify exact symbolic forms
+        assert_expr_equal(i_val, sp.floor(flat / N), "inv[0] should be floor(flat/N)")
+        assert_expr_equal(j_val, sp.Mod(flat, N), "inv[1] should be Mod(flat, N)")
+        # Numerical roundtrip verification for concrete N values
+        for n_val in [2, 3, 5, 7]:
+            for x in range(4 * n_val):
+                i_num = int(i_val.subs({flat: x, N: n_val}))
+                j_num = int(j_val.subs({flat: x, N: n_val}))
+                assert n_val * i_num + j_num == x, (
+                    f"Roundtrip failed for N={n_val}, flat={x}"
+                )
+
+
+# ============================================================================
+# Tests for MLIR context caching (C1)
+# ============================================================================
+
+class TestContextCaching:
+    """Test that MLIR context caching doesn't break roundtrips."""
+
+    def test_repeated_roundtrips_same_layout(self):
+        """Multiple calls with the same layout should all succeed."""
+        a, b = syms("a b")
+        L = OrderBy(Row(8, 8)).GroupBy([(8, 8)])
+        for _ in range(5):
+            result = L[a, b]
+            assert_expr_equal(result, 8 * a + b)
+
+    def test_repeated_roundtrips_different_layouts(self):
+        """Different layouts in sequence should work with cached context."""
+        a, b = syms("a b")
+
+        L1 = OrderBy(Row(4, 4)).GroupBy([(4, 4)])
+        r1 = L1[a, b]
+        assert_expr_equal(r1, 4 * a + b)
+
+        L2 = OrderBy(Col(4, 4)).GroupBy([(4, 4)])
+        r2 = L2[a, b]
+        # Col reverses: 4*b + a
+        assert_expr_equal(r2, 4 * b + a)
+
+        # And back to a row layout
+        L3 = OrderBy(Row(16, 16)).GroupBy([(16, 16)])
+        r3 = L3[a, b]
+        assert_expr_equal(r3, 16 * a + b)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

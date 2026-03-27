@@ -98,12 +98,92 @@ class LayoutBlock:
 
 
 class GenP(LayoutBlock):
-    """Generic Permutation. MLIR: lego.gen_p with apply/inv regions."""
+    """Generic Permutation. MLIR: lego.gen_p with apply/inv regions.
+
+    If ``f_inv`` is not provided, attempts to derive it automatically
+    for simple (linear/affine) forward functions using SymPy's solver.
+    """
 
     def __init__(self, nd: Tuple[Symbol, ...], f_apply: Callable, f_inv: Callable = None):
         self._dims = nd
         self.f_apply = f_apply
-        self.f_inv = f_inv
+        self.f_inv = f_inv if f_inv is not None else self._try_derive_inverse(nd, f_apply)
+
+    @staticmethod
+    def _try_derive_inverse(nd, f_apply):
+        """Attempt to symbolically derive the inverse for simple functions.
+
+        Strategy:
+        1. For rank-1: use sp.solve directly.
+        2. For rank-N: detect weighted-sum (mixed-radix) structure
+           ``w0*x0 + w1*x1 + ... + x_{N-1}`` and derive the standard
+           divmod inverse.
+        """
+        rank = len(nd)
+        try:
+            idx_syms = sp.symbols(
+                [f"_auto_inv_{k}" for k in range(rank)],
+                integer=True, positive=True,
+            )
+            flat_sym = sp.Symbol("_auto_inv_flat", integer=True, positive=True)
+            forward_expr = f_apply(tuple(idx_syms))
+
+            # Only handle scalar (non-Piecewise) expressions
+            if isinstance(forward_expr, sp.Piecewise):
+                return None
+
+            # --- Rank 1: direct solve ---
+            if rank == 1:
+                solutions = sp.solve(forward_expr - flat_sym, idx_syms, dict=True)
+                if len(solutions) != 1 or idx_syms[0] not in solutions[0]:
+                    return None
+                inv_expr = solutions[0][idx_syms[0]]
+                allowed = {flat_sym} | set().union(
+                    *(e.free_symbols for e in nd if isinstance(e, sp.Expr)))
+                if not inv_expr.free_symbols <= allowed:
+                    return None
+                def f_inv(flat_val, _e=inv_expr, _s=flat_sym):
+                    return (_e.subs(_s, flat_val),)
+                return f_inv
+
+            # --- Rank N: detect weighted-sum (mixed-radix) pattern ---
+            # Expand and collect coefficients of each index symbol.
+            expanded = sp.expand(forward_expr)
+            coeffs = []
+            for s in idx_syms:
+                c = expanded.coeff(s)
+                if c == 0:
+                    return None
+                coeffs.append(c)
+            # Verify: expanded == sum(c_k * x_k) + constant_term
+            reconstructed = sum(c * s for c, s in zip(coeffs, idx_syms))
+            remainder = sp.simplify(expanded - reconstructed)
+            # remainder must be free of all idx_syms (constant w.r.t. indices)
+            if any(s in remainder.free_symbols for s in idx_syms):
+                return None
+
+            # Build mixed-radix inverse: iterate left-to-right with divmod.
+            # stride[k] = coeffs[k].  inv[k] = floor(rem / stride[k]),
+            # rem = rem % stride[k], with initial rem = flat - constant.
+            inv_exprs = []
+            rem = flat_sym - remainder  # subtract constant offset
+            for k in range(rank):
+                stride = coeffs[k]
+                inv_exprs.append(sp.floor(rem / stride))
+                rem = sp.Mod(rem, stride)
+
+            allowed = {flat_sym} | set().union(
+                *(e.free_symbols for e in nd if isinstance(e, sp.Expr)))
+            for expr in inv_exprs:
+                if not expr.free_symbols <= allowed:
+                    return None
+
+            def f_inv(flat_val, _exprs=inv_exprs, _s=flat_sym):
+                return tuple(e.subs(_s, flat_val) for e in _exprs)
+            return f_inv
+
+        except (NotImplementedError, ValueError, TypeError):
+            return None
 
     def dims(self):
         return self._dims
@@ -173,13 +253,27 @@ class OrderBy(LayoutBlock):
 
 
 def _merge_bound(constraints, sym, lb=None, ub=None):
-    """Merge a new bound into the constraints dict for sym."""
+    """Merge a new bound into the constraints dict for sym.
+
+    When both old and new bounds exist, takes the tighter bound:
+    max for lower bounds, min for upper bounds.
+    """
     if sym not in constraints:
         constraints[sym] = (lb, ub)
     else:
         old_lb, old_ub = constraints[sym]
-        new_lb = lb if old_lb is None else (lb if lb is not None else old_lb)
-        new_ub = ub if old_ub is None else (ub if ub is not None else old_ub)
+        if old_lb is None:
+            new_lb = lb
+        elif lb is None:
+            new_lb = old_lb
+        else:
+            new_lb = sp.Max(old_lb, lb)
+        if old_ub is None:
+            new_ub = ub
+        elif ub is None:
+            new_ub = old_ub
+        else:
+            new_ub = sp.Min(old_ub, ub)
         constraints[sym] = (new_lb, new_ub)
 
 
@@ -383,8 +477,29 @@ class TileByLayout(GroupBy):
         for orderby in self._input_chain:
             for p in orderby.perms:
                 all_dims.extend(p.dims())
-        return list(map(lambda x: sp.Gt(x, 0, evaluate=False),
+        constraints = list(map(lambda x: sp.Gt(x, 0, evaluate=False),
                         set().union(*(e.free_symbols for e in all_dims if isinstance(e, sp.Expr)))))
+
+        # Auto-infer divisibility from tile dimensions containing floor(A/B).
+        # If a tile dim is floor(A/B), infer that B divides A (i.e. A % B == 0).
+        for g in self._tile_groups:
+            for d in g:
+                if isinstance(d, sp.Expr) and not isinstance(d, sp.Symbol):
+                    # SymPy represents M//B as floor(M/B)
+                    if isinstance(d, sp.floor):
+                        inner = d.args[0]
+                        num, den = inner.as_numer_denom()
+                        if den != sp.S.One:
+                            constraints.append(
+                                sp.Eq(sp.Mod(num, den), 0, evaluate=False))
+                    # Also check for Mul with Pow(-1) patterns: M * B**(-1)
+                    elif isinstance(d, sp.Mul):
+                        num, den = d.as_numer_denom()
+                        if den != sp.S.One and isinstance(den, sp.Expr):
+                            constraints.append(
+                                sp.Eq(sp.Mod(num, den), 0, evaluate=False))
+
+        return constraints
 
 
 def antidiag(n, args: Tuple[Symbol, ...]):

@@ -294,6 +294,35 @@ struct SimplifyMixedRadixRem : public OpRewritePattern<arith::RemUIOp> {
   }
 };
 
+// ---- Distributive law: muli(a,c) + muli(b,c) → muli(addi(a,b), c) --------
+//
+// Factors out a shared multiplicand from two addends.  Handles commutativity
+// of both addi and muli.
+
+struct DistributiveFactor : public OpRewritePattern<arith::AddIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::AddIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto mulL = op.getLhs().getDefiningOp<arith::MulIOp>();
+    auto mulR = op.getRhs().getDefiningOp<arith::MulIOp>();
+    if (!mulL || !mulR)
+      return failure();
+
+    // Try all combinations: mulL = a*c, mulR = b*c (c shared)
+    Value ml[2] = {mulL.getLhs(), mulL.getRhs()};
+    Value mr[2] = {mulR.getLhs(), mulR.getRhs()};
+    for (int i = 0; i < 2; ++i)
+      for (int j = 0; j < 2; ++j)
+        if (ml[i] == mr[j]) {
+          Value c = ml[i], a = ml[1 - i], b = mr[1 - j];
+          Value sum = arith::AddIOp::create(rewriter, op.getLoc(), a, b);
+          rewriter.replaceOpWithNewOp<arith::MulIOp>(op, sum, c);
+          return success();
+        }
+    return failure();
+  }
+};
+
 // ============================================================================
 // Pass
 // ============================================================================
@@ -306,7 +335,8 @@ struct LegoArithSimplificationPass
     patterns.add<SimplifyRemId, SimplifyDivId, SimplifyDivConst,
                  ReconstructId, SimplifyDivOfRem, SimplifyRemOfRem,
                  ExtendedSimplifyDivId, ExtendedSimplifyRemId,
-                 SimplifyMixedRadixDiv, SimplifyMixedRadixRem>(
+                 SimplifyMixedRadixDiv, SimplifyMixedRadixRem,
+                 DistributiveFactor>(
                      &getContext());
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
