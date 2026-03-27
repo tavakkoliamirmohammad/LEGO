@@ -194,66 +194,6 @@ class IRBuilder:
                 scf_dialect.YieldOp([])
             func_dialect.ReturnOp([])
 
-    def build_composed_module(self, layout_b, shape):
-        """Build a single MLIR module that composes two layouts.
-
-        The composed transform is: apply(B, apply_inverse(identity, apply(A, indices)))
-        where A = self._layout, B = layout_b.  MLIR simplification passes can
-        cancel redundant apply/apply_inverse pairs.
-        """
-        ctx = Context()
-        register_lego(ctx)
-        with ctx, Location.unknown():
-            module = Module.create()
-            idx_ty = IndexType.get()
-            total = 1
-            for s in shape:
-                total *= int(s)
-            elem_ty = _get_mlir_element_type(ctx, self._dtype_str)
-            memref_ty = MemRefType.get([total], elem_ty)
-
-            # Collect symbolic dims from both layouts
-            sym_list_a = _collect_symbolic_dims(self._layout) if _has_symbolic_dims(self._layout) else []
-            sym_list_b = _collect_symbolic_dims(layout_b) if _has_symbolic_dims(layout_b) else []
-            all_syms = list(dict.fromkeys(sym_list_a + sym_list_b))
-
-            param_types = [memref_ty, memref_ty, idx_ty] + [idx_ty] * len(all_syms)
-            func_ty = FunctionType.get(param_types, [])
-            with InsertionPoint(module.body):
-                f = func_dialect.FuncOp("composed_transform", func_ty)
-                f.sym_visibility = StringAttr.get("public")
-                f.attributes["llvm.emit_c_interface"] = UnitAttr.get()
-
-            entry = f.add_entry_block()
-            src, dst, n = entry.arguments[0], entry.arguments[1], entry.arguments[2]
-
-            sym_to_val = {}
-            for i, sym in enumerate(all_syms):
-                sym_to_val[sym] = entry.arguments[3 + i]
-
-            with InsertionPoint(entry):
-                from lego.backend.symbolic import emit_layout_from_python, _resolve_dim
-
-                layout_dims = _get_layout_dims(self._layout)
-                dim_vals = [_resolve_dim(d, sym_to_val) for d in layout_dims]
-                rank = len(layout_dims)
-
-                identity = _emit_group_by(dim_vals, [_emit_order_by([_emit_row(dim_vals)])])
-                layout_a_val = emit_layout_from_python(self._layout, sym_to_val)
-                layout_b_val = emit_layout_from_python(layout_b, sym_to_val)
-
-                loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1))
-                with InsertionPoint(loop.body):
-                    iv = loop.induction_variable
-                    val = memref_dialect.LoadOp(src, [iv])
-                    # Compose: apply A inverse, then apply B
-                    indices = _emit_apply_inverse(layout_a_val, iv, rank)
-                    logical_idx = _emit_apply(identity, indices)
-                    composed_indices = _emit_apply_inverse(layout_b_val, logical_idx, rank)
-                    memref_dialect.StoreOp(val.result, dst, [_emit_apply(identity, composed_indices)])
-                    scf_dialect.YieldOp([])
-                func_dialect.ReturnOp([])
-        return ctx, module
 
 
 # ============================================================================

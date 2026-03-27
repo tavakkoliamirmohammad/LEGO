@@ -319,20 +319,6 @@ class TestCompilerCache:
         assert inv1 is inv2
 
 
-class TestComposedModule:
-    """3C: MLIR layout fusion via composed module."""
-
-    def test_composed_module_builds(self):
-        """IRBuilder.build_composed_module produces a valid MLIR module."""
-        from lego.backend.compiler import IRBuilder
-        layout_a = GroupBy([(4, 8)], [OrderBy(Col(4, 8))])
-        layout_b = GroupBy([(4, 8)], [OrderBy(Row(4, 8))])
-        builder = IRBuilder(layout_a, (4, 8), "f32")
-        ctx, module = builder.build_composed_module(layout_b, (4, 8))
-        mlir_text = str(module)
-        assert "composed_transform" in mlir_text
-
-
 # ============================================================================
 # Phase 4: Layout-Aware LegoTensor
 # ============================================================================
