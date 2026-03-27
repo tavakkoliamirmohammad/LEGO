@@ -2,10 +2,107 @@ import ast
 import atexit
 import os
 import sys
+from dataclasses import dataclass
+from functools import reduce
+
+import sympy as sp
 
 from lego.python_printer import LEGOPythonCodePrinter
 from lego.frontends._adapter import DSLAdapter
 from lego.rewriter import rewrite
+
+
+# ---------------------------------------------------------------------------
+# Block-ptr metadata (Triton-specific)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BlockPtrInfo:
+    """Structured metadata for generating ``tl.make_block_ptr()`` calls."""
+    shape: tuple         # global tensor shape, e.g. (M, K)
+    strides: tuple       # memory strides in elements, e.g. (K, 1) for Row
+    offsets: tuple        # tile offsets, e.g. (pid_m * BM, k * BK)
+    block_shape: tuple    # tile dimensions, e.g. (BM, BK)
+    order: tuple          # memory layout order, e.g. (1, 0) for Row
+    boundary_dims: tuple  # dimensions needing boundary_check
+
+
+def extract_block_ptr_metadata(layout, subscript_indices):
+    """Extract ``BlockPtrInfo`` from a ``TileByLayout``.
+
+    Only supports single-chain, single-perm (Row or Col) TileBy layouts
+    with exactly 2 tile groups (grid + block).  Returns ``None`` otherwise.
+    """
+    from lego.core import TileByLayout, Row, Col
+
+    if not isinstance(layout, TileByLayout):
+        return None
+
+    # Must have single OrderBy in the chain with a single Row/Col perm
+    if len(layout._input_chain) != 1:
+        return None
+    orderby = layout._input_chain[0]
+    if len(orderby.perms) != 1:
+        return None
+    perm = orderby.perms[0]
+    if not isinstance(perm, (Row, Col)):
+        return None
+
+    # Must have exactly 2 tile groups (grid dims + block dims)
+    if len(layout._tile_groups) != 2:
+        return None
+
+    shape = tuple(perm.dims())
+    ndim = len(shape)
+    grid_shape = tuple(layout._tile_groups[0])
+    block_shape = tuple(layout._tile_groups[1])
+
+    if len(block_shape) != ndim or len(grid_shape) != ndim:
+        return None
+
+    # Compute strides and order based on permutation type
+    if isinstance(perm, Row):
+        strides = tuple(
+            reduce(lambda a, b: a * b, shape[i + 1:], sp.S.One)
+            for i in range(ndim)
+        )
+        order = tuple(range(ndim - 1, -1, -1))
+    else:  # Col
+        strides = tuple(
+            reduce(lambda a, b: a * b, shape[:i], sp.S.One)
+            for i in range(ndim)
+        )
+        order = tuple(range(ndim))
+
+    # Parse subscript: expect [tile_idx, ..., :, :, ...]
+    if not isinstance(subscript_indices, (list, tuple)):
+        subscript_indices = [subscript_indices]
+
+    tile_indices = []
+    slice_count = 0
+    for item in subscript_indices:
+        if isinstance(item, slice):
+            slice_count += 1
+        else:
+            tile_indices.append(item)
+
+    if len(tile_indices) != ndim or slice_count != ndim:
+        return None
+
+    offsets = tuple(tile_indices[i] * block_shape[i] for i in range(ndim))
+
+    # Boundary dims: where grid * block != shape
+    boundary_dims = []
+    for i in range(ndim):
+        diff = sp.simplify(grid_shape[i] * block_shape[i] - shape[i])
+        if diff != 0:
+            boundary_dims.append(i)
+
+    return BlockPtrInfo(
+        shape=shape, strides=strides, offsets=offsets,
+        block_shape=block_shape, order=order,
+        boundary_dims=tuple(boundary_dims),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +126,12 @@ class TritonAdapter(DSLAdapter):
         'load', 'store', 'atomic_add', 'atomic_max', 'atomic_min',
         'atomic_and', 'atomic_or', 'atomic_xor', 'atomic_xchg', 'atomic_cas',
     ))
+
+    def __init__(self, use_block_ptr=False):
+        self.use_block_ptr = use_block_ptr
+
+    def get_rewriter_options(self):
+        return {'use_block_ptr': self.use_block_ptr}
 
     def unwrap(self, fn):
         original_fn = fn
@@ -114,7 +217,7 @@ class TritonAdapter(DSLAdapter):
 # Public API (unchanged)
 # ---------------------------------------------------------------------------
 
-def jit(fn=None, **kwargs):
+def jit(fn=None, use_block_ptr=False, **kwargs):
     """
     Decorator that transforms LEGO layout expressions in Triton kernels.
 
@@ -123,9 +226,14 @@ def jit(fn=None, **kwargs):
         @triton.jit
         def kernel(M, N, K, ...):
             ...
+
+        @lego.jit(use_block_ptr=True)
+        @triton.jit
+        def kernel(M, N, K, ...):
+            ...  # generates tl.make_block_ptr / tl.advance
     """
     def decorator(fn):
-        return rewrite(fn, TritonAdapter(), **kwargs)
+        return rewrite(fn, TritonAdapter(use_block_ptr=use_block_ptr), **kwargs)
 
     if fn is not None:
         return decorator(fn)
