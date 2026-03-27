@@ -16,7 +16,7 @@ import textwrap
 
 import sympy as sp
 
-from lego.core import LayoutBlock
+from lego.core import LayoutBlock, TileByLayout
 from lego.backend._ops import _LEGO_DEBUG
 from lego.frontends._adapter import DSLAdapter
 
@@ -68,6 +68,237 @@ def _build_eval_env(original_fn, func_def):
 
 
 # ---------------------------------------------------------------------------
+# Block-ptr helpers
+# ---------------------------------------------------------------------------
+
+def _format_tuple(items, printer):
+    """Format a sequence of SymPy expressions / ints as a Python tuple string."""
+    parts = []
+    for item in items:
+        if isinstance(item, (sp.Expr, sp.Symbol)):
+            parts.append(printer.doprint(item))
+        else:
+            parts.append(str(item))
+    if len(parts) == 1:
+        return f"({parts[0]},)"
+    return f"({', '.join(parts)})"
+
+
+def _format_make_block_ptr(ptr_name, info, printer):
+    """Generate tl.make_block_ptr(...) code string from BlockPtrInfo."""
+    return (
+        f"tl.make_block_ptr(base={ptr_name}, "
+        f"shape={_format_tuple(info.shape, printer)}, "
+        f"strides={_format_tuple(info.strides, printer)}, "
+        f"offsets={_format_tuple(info.offsets, printer)}, "
+        f"block_shape={_format_tuple(info.block_shape, printer)}, "
+        f"order={_format_tuple(info.order, printer)})"
+    )
+
+
+def _extract_subscript_indices(subscript_node, eval_env):
+    """Extract subscript indices from an AST Subscript node.
+
+    Returns a list of SymPy expressions and ``slice`` objects, or ``None``
+    if parsing fails.
+    """
+    slice_node = subscript_node.slice
+    elements = slice_node.elts if isinstance(slice_node, ast.Tuple) else [slice_node]
+
+    indices = []
+    for elt in elements:
+        if isinstance(elt, ast.Slice):
+            indices.append(slice(None))
+        else:
+            try:
+                code = ast.unparse(elt)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    val = eval(code, eval_env)
+                indices.append(val)
+            except Exception:
+                return None
+    return indices
+
+
+def _try_block_ptr_pattern(stmt, eval_env, printer):
+    """Detect ``var = ptr + L[subscripts]`` and generate make_block_ptr.
+
+    Returns ``(target_name, code_str, ptr_name, BlockPtrInfo)`` or ``None``.
+    """
+    from lego.frontends.triton_jit import extract_block_ptr_metadata
+
+    if not (isinstance(stmt.value, ast.BinOp) and isinstance(stmt.value.op, ast.Add)):
+        return None
+
+    left, right = stmt.value.left, stmt.value.right
+
+    # Try both orderings: ptr + L[...] and L[...] + ptr
+    ptr_node, subscript_node = None, None
+    if isinstance(right, ast.Subscript):
+        ptr_node, subscript_node = left, right
+    elif isinstance(left, ast.Subscript):
+        ptr_node, subscript_node = right, left
+    else:
+        return None
+
+    # The subscript target must be a known TileByLayout
+    if not isinstance(subscript_node.value, ast.Name):
+        return None
+    layout_name = subscript_node.value.id
+    layout = eval_env.get(layout_name)
+    if not isinstance(layout, TileByLayout):
+        return None
+
+    # Extract pointer variable name
+    ptr_name = ast.unparse(ptr_node)
+
+    # Extract and evaluate subscript indices
+    indices = _extract_subscript_indices(subscript_node, eval_env)
+    if indices is None:
+        return None
+
+    # Get structured block_ptr metadata (returns None for incompatible layouts)
+    info = extract_block_ptr_metadata(layout, indices)
+    if info is None:
+        return None
+
+    target_name = stmt.targets[0].id
+    code = _format_make_block_ptr(ptr_name, info, printer)
+    return (target_name, code, ptr_name, info)
+
+
+def _extract_loop_start(for_stmt, eval_env):
+    """Return the start value of a ``for x in range(start, ...)`` loop."""
+    if not isinstance(for_stmt.iter, ast.Call):
+        return sp.Integer(0)
+    call = for_stmt.iter
+    is_range = isinstance(call.func, ast.Name) and call.func.id == 'range'
+    if is_range and len(call.args) >= 2:
+        try:
+            code = ast.unparse(call.args[0])
+            with contextlib.redirect_stdout(io.StringIO()):
+                return eval(code, eval_env)
+        except Exception:
+            pass
+    return sp.Integer(0)
+
+
+def _transform_block_ptr_loop(for_stmt, block_ptr_vars, eval_env, printer):
+    """Hoist block_ptr creation before loop and insert ``tl.advance`` at end.
+
+    Returns ``(hoisted_stmts, new_loop_body)``.
+    """
+    from lego.frontends.triton_jit import BlockPtrInfo
+
+    loop_var = for_stmt.target.id if isinstance(for_stmt.target, ast.Name) else None
+    if not loop_var or not block_ptr_vars:
+        return [], for_stmt.body
+
+    loop_var_sym = eval_env.get(loop_var)
+    loop_start = _extract_loop_start(for_stmt, eval_env)
+
+    hoisted = []
+    new_body = []
+    advance_stmts = []
+
+    for stmt in for_stmt.body:
+        var_name = None
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)):
+            var_name = stmt.targets[0].id
+
+        if var_name and var_name in block_ptr_vars:
+            ptr_name, info = block_ptr_vars[var_name]
+
+            has_loop_dep = any(
+                isinstance(o, sp.Expr) and loop_var_sym in o.free_symbols
+                for o in info.offsets
+            )
+
+            if has_loop_dep:
+                # Initial offsets with loop_var = start
+                initial_offsets = tuple(
+                    sp.simplify(o.subs(loop_var_sym, loop_start))
+                    if isinstance(o, sp.Expr) else o
+                    for o in info.offsets
+                )
+
+                # Per-iteration advance delta
+                deltas = []
+                for o in info.offsets:
+                    if isinstance(o, sp.Expr) and loop_var_sym in o.free_symbols:
+                        deltas.append(sp.simplify(o.diff(loop_var_sym)))
+                    else:
+                        deltas.append(sp.Integer(0))
+
+                # Hoist make_block_ptr before the loop
+                initial_info = BlockPtrInfo(
+                    shape=info.shape, strides=info.strides,
+                    offsets=initial_offsets, block_shape=info.block_shape,
+                    order=info.order, boundary_dims=info.boundary_dims)
+                hoisted_code = _format_make_block_ptr(ptr_name, initial_info, printer)
+                h_stmt = ast.parse(f"{var_name} = {hoisted_code}").body[0]
+                ast.copy_location(h_stmt, stmt)
+                hoisted.append(h_stmt)
+
+                # tl.advance at end of the loop body
+                delta_str = _format_tuple(deltas, printer)
+                a_stmt = ast.parse(
+                    f"{var_name} = tl.advance({var_name}, {delta_str})").body[0]
+                ast.copy_location(a_stmt, stmt)
+                advance_stmts.append(a_stmt)
+
+                block_ptr_vars[var_name] = (ptr_name, initial_info)
+                continue  # remove original assignment from loop body
+
+        new_body.append(stmt)
+
+    new_body.extend(advance_stmts)
+    return hoisted, new_body
+
+
+class _BlockPtrLoadRewriter(ast.NodeTransformer):
+    """Rewrite ``tl.load``/``tl.store`` for block_ptr variables.
+
+    Removes ``mask=`` and adds ``boundary_check=`` when needed.
+    """
+
+    def __init__(self, block_ptr_vars):
+        self.block_ptr_vars = block_ptr_vars
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+
+        if not isinstance(node.func, ast.Attribute):
+            return node
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == 'tl'):
+            return node
+        if node.func.attr not in ('load', 'store'):
+            return node
+
+        # First positional arg must be a tracked block_ptr variable
+        if not node.args or not isinstance(node.args[0], ast.Name):
+            return node
+        var_name = node.args[0].id
+        if var_name not in self.block_ptr_vars:
+            return node
+
+        _, info = self.block_ptr_vars[var_name]
+
+        # Remove mask keyword argument
+        node.keywords = [kw for kw in node.keywords if kw.arg != 'mask']
+
+        # Add boundary_check if there are boundary dimensions
+        if info.boundary_dims:
+            boundary_str = ', '.join(str(d) for d in info.boundary_dims)
+            boundary_node = ast.parse(f"({boundary_str},)").body[0].value
+            node.keywords.append(
+                ast.keyword(arg='boundary_check', value=boundary_node))
+
+        return node
+
+
+# ---------------------------------------------------------------------------
 # AST Transformer
 # ---------------------------------------------------------------------------
 
@@ -103,7 +334,14 @@ class LEGOASTTransformer(ast.NodeTransformer):
 # ---------------------------------------------------------------------------
 
 def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
-                   compile_time_names):
+                   compile_time_names, opts=None, block_ptr_vars=None):
+    if opts is None:
+        opts = {}
+    if block_ptr_vars is None:
+        block_ptr_vars = {}
+
+    use_block_ptr = opts.get('use_block_ptr', False)
+
     new_body = []
     transformer = LEGOASTTransformer(lego_code, eval_env, printer)
 
@@ -118,9 +356,21 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
             if isinstance(stmt.target, ast.Name):
                 loop_var = stmt.target.id
                 eval_env[loop_var] = _symbol_with_assumptions(loop_var)
-            stmt.body = _process_stmts(stmt.body, lego_code, eval_env,
-                                       printer, runtime_vars,
-                                       compile_time_names)
+
+            if use_block_ptr:
+                loop_bpv = {}
+                stmt.body = _process_stmts(
+                    stmt.body, lego_code, eval_env, printer,
+                    runtime_vars, compile_time_names, opts, loop_bpv)
+                hoisted, stmt.body = _transform_block_ptr_loop(
+                    stmt, loop_bpv, eval_env, printer)
+                new_body.extend(hoisted)
+                block_ptr_vars.update(loop_bpv)
+            else:
+                stmt.body = _process_stmts(stmt.body, lego_code, eval_env,
+                                           printer, runtime_vars,
+                                           compile_time_names, opts,
+                                           block_ptr_vars)
             new_body.append(stmt)
             continue
 
@@ -129,7 +379,8 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
             stmt.test = transformer.visit(stmt.test)
             stmt.body = _process_stmts(stmt.body, lego_code, eval_env,
                                        printer, runtime_vars,
-                                       compile_time_names)
+                                       compile_time_names, opts,
+                                       block_ptr_vars)
             new_body.append(stmt)
             continue
 
@@ -138,10 +389,12 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
             stmt.test = transformer.visit(stmt.test)
             stmt.body = _process_stmts(stmt.body, lego_code, eval_env,
                                        printer, runtime_vars,
-                                       compile_time_names)
+                                       compile_time_names, opts,
+                                       block_ptr_vars)
             stmt.orelse = _process_stmts(stmt.orelse, lego_code, eval_env,
                                          printer, runtime_vars,
-                                         compile_time_names)
+                                         compile_time_names, opts,
+                                         block_ptr_vars)
             new_body.append(stmt)
             continue
 
@@ -156,6 +409,21 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
                     var_name = stmt.targets[0].id
                     sym_name = var_name[2:] if var_name.startswith('s_') else var_name
                     value_node.args = [ast.Constant(value=sym_name)]
+
+            # 5a. Block-ptr pattern: var = ptr + L[subscripts]
+            #     Must be checked BEFORE runtime-vars skip, because pointer
+            #     variables (used in tl.load/tl.store) are runtime vars.
+            if use_block_ptr and len(stmt.targets) == 1 \
+                    and isinstance(stmt.targets[0], ast.Name):
+                bp = _try_block_ptr_pattern(stmt, eval_env, printer)
+                if bp is not None:
+                    target_name, code, ptr_name, info = bp
+                    new_stmt = ast.parse(f"{target_name} = {code}").body[0]
+                    ast.copy_location(new_stmt, stmt)
+                    new_body.append(new_stmt)
+                    eval_env[target_name] = _symbol_with_assumptions(target_name)
+                    block_ptr_vars[target_name] = (ptr_name, info)
+                    continue
 
             # Skip evaluation for runtime variables
             if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
@@ -260,13 +528,23 @@ def rewrite(fn, adapter: DSLAdapter, **kwargs):
     printer = adapter.get_code_printer()
     runtime_vars = adapter.find_runtime_vars(func_def)
 
+    opts = adapter.get_rewriter_options()
+    block_ptr_vars = {}
+
     lego_code = {}
     compile_time_names = set()
 
     func_def.body = _process_stmts(
         func_def.body, lego_code, eval_env, printer,
-        runtime_vars, compile_time_names,
+        runtime_vars, compile_time_names, opts, block_ptr_vars,
     )
+
+    # Post-process: rewrite tl.load/tl.store for block_ptr variables
+    if block_ptr_vars:
+        rewriter = _BlockPtrLoadRewriter(block_ptr_vars)
+        for i, stmt in enumerate(func_def.body):
+            func_def.body[i] = rewriter.visit(stmt)
+
     ast.fix_missing_locations(tree)
 
     new_source = ast.unparse(tree)

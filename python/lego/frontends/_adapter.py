@@ -30,3 +30,7 @@ class DSLAdapter(ABC):
                          original_fn: Callable, wrappers: List[Any],
                          return_source: bool) -> Any:
         """Compile transformed source, re-apply DSL decorators, return result."""
+
+    def get_rewriter_options(self) -> dict:
+        """Return DSL-specific options for the rewriter. Default: empty."""
+        return {}
