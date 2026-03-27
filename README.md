@@ -19,8 +19,8 @@ LEGO/
 │   │   ├── rewriter.py      # DSL-agnostic AST rewriting engine
 │   │   ├── python_printer.py# SymPy code printer (base + DSL subclasses)
 │   │   ├── backend/         # MLIR compilation, JIT, SymPy lowering, PyTorch autograd
-│   │   └── frontends/       # DSLAdapter ABC + adapters (Triton, Numba CUDA, JAX, python_mlir)
-│   ├── examples/            # Usage examples (triton, numba_cuda, jax, python_mlir, symbolic)
+│   │   └── frontends/       # DSLAdapter ABC + adapters (Triton, cuTile, Numba CUDA, JAX, python_mlir)
+│   ├── examples/            # Usage examples (triton, numba_cuda, jax, cutile, python_mlir, symbolic)
 │   └── tests/               # Python tests
 │
 ├── include/Lego/           # MLIR dialect headers (ODS definitions, passes)
@@ -51,12 +51,12 @@ The adapters lower through a unified MLIR-based backend:
           +----------+----------+    |
           |          |          |    |
       +---+---+ +---+---+ +---+---+ |
-      |Triton | |Numba  | | JAX   | |
-      |Adapter| |CUDA   | |Adapter| |
-      |       | |Adapter| |       | |
-      +---+---+ +---+---+ +---+---+ |
+      |Triton | |Numba  | | JAX   | |cuTile| |
+      |Adapter| |CUDA   | |Adapter| |Adapt.| |
+      |       | |Adapter| |       | |      | |
+      +---+---+ +---+---+ +---+---+ +--+---+ |
           |          |          |    |
-          +----------+----------+    |
+          +----------+-----+----+    |
                      |               |
             +--------+--------+      |
             |    rewriter.py  |      |
@@ -87,13 +87,14 @@ The adapters lower through a unified MLIR-based backend:
 
 | Frontend | Module | Decorator | Description |
 |----------|--------|-----------|-------------|
-| **Triton** | `lego.frontends.triton_jit` | `@lego.jit` | Transforms Triton GPU kernels via AST rewriting ([vecadd](python/examples/triton/hello_world.py), [matmul](python/examples/triton/matmul_lego.py)) |
+| **Triton** | `lego.frontends.triton_jit` | `@lego.jit` | Transforms Triton GPU kernels via AST rewriting; supports `block_ptr` (TMA) code generation ([vecadd](python/examples/triton/hello_world.py), [matmul](python/examples/triton/matmul_lego.py), [vecadd block_ptr](python/examples/triton/vecadd_block_ptr_lego.py), [matmul block_ptr](python/examples/triton/matmul_block_ptr_lego.py)) |
+| **cuTile** | `lego.frontends.cutile_jit` | `@lego.jit` | Transforms `cuda.tile` (cuTile) kernels via AST rewriting ([vecadd](python/examples/cutile/vecadd.py), [matmul](python/examples/cutile/matmul.py)) |
 | **Numba CUDA** | `lego.frontends.numba_jit` | `@lego_jit` | Transforms Numba CUDA kernels, scalar thread indexing ([vecadd](python/examples/numba_cuda/hello_world.py), [matmul](python/examples/numba_cuda/matmul_lego.py)) |
 | **JAX** | `lego.frontends.jax_jit` | `@lego_jit` | Transforms JAX functions, preserves `static_argnums` ([vecadd](python/examples/jax/hello_world.py), [matmul](python/examples/jax/matmul_lego.py)) |
 | **Tensor API** | `lego.frontends.python_mlir` | -- | JIT-compiled layout transforms for NumPy/PyTorch with `torch.compile` support ([example](python/examples/python_mlir/hello_world.py)) |
 | **Symbolic** | `lego.core` | -- | SymPy-based algebraic layout expressions ([example](python/examples/symbolic/hello_world.py)) |
 
-Each JIT frontend implements the `DSLAdapter` interface (`frontends/_adapter.py`), which defines four hooks: `unwrap`, `find_runtime_vars`, `get_code_printer`, and `compile_and_wrap`. The DSL-agnostic rewriter (`rewriter.py`) handles AST transformation and symbolic evaluation.
+Each JIT frontend implements the `DSLAdapter` interface (`frontends/_adapter.py`), which defines four hooks: `unwrap`, `find_runtime_vars`, `get_code_printer`, and `compile_and_wrap`. The DSL-agnostic rewriter (`rewriter.py`) handles AST transformation and symbolic evaluation. The Triton adapter additionally supports `block_ptr` (TMA) code generation, emitting `tl.make_block_ptr` / `tl.advance` calls with automatic boundary checks.
 
 ### Tensor API
 
@@ -125,11 +126,12 @@ PyTorch integration uses precomputed permutation tables for device-local transfo
 
 ### MLIR Backend
 
-The `lego` MLIR dialect defines layout operations (`gen_p`, `reg_p`, `row`, `col`, `order_by`, `group_by`, `tile_by`, `apply`, `apply_inverse`) with types `!lego.layout` and `!lego.view<T>`. The dialect includes passes for:
+The `lego` MLIR dialect defines layout operations (`gen_p`, `reg_p`, `row`, `col`, `order_by`, `group_by`, `tile_by`, `apply`, `apply_inverse`) with types `!lego.layout` and `!lego.view<T>`. Layouts may contain symbolic (SymPy) dimensions, which are lowered to MLIR function parameters and resolved to concrete values at invocation time. The dialect includes passes for:
 
 - **Normalization** -- desugar `row`/`col`/`tile_by` to primitive `reg_p`/`order_by`/`group_by`
 - **Lowering** -- `lego` ops to `arith`/`scf`/`affine`
-- **Simplification** -- optimize `divui`/`remui` patterns
+- **Simplification** -- optimize `divui`/`remui` patterns, distributive factoring (`muli(a,c) + muli(b,c) → muli(addi(a,b), c)`)
+- **Strength Reduction** -- convert power-of-2 `muli`/`divui`/`remui` to shift/mask operations
 - **Verification** -- bijectivity, GPU bank conflicts, memory coalescing
 
 ## Requirements
@@ -149,6 +151,7 @@ Optional (for GPU frontends):
 |-----------|-------------|
 | PyTorch   | Tensor API, `torch.compile` |
 | Triton    | Triton JIT  |
+| cuda.tile | cuTile JIT  |
 | Numba     | Numba CUDA  |
 | JAX       | JAX JIT     |
 
