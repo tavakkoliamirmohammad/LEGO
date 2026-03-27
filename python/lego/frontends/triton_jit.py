@@ -30,49 +30,35 @@ class BlockPtrInfo:
 def extract_block_ptr_metadata(layout, subscript_indices):
     """Extract ``BlockPtrInfo`` from a ``TileByLayout``.
 
-    Only supports single-chain, single-perm (Row or Col) TileBy layouts
-    with exactly 2 tile groups (grid + block).  Returns ``None`` otherwise.
+    Lowers the inner layout via MLIR to obtain a flat-index expression,
+    then extracts stride coefficients.  Works for any strided (linear)
+    layout — Row, Col, RegP, or multi-perm OrderBy — not just Row/Col.
+
+    Requires exactly 2 tile groups (grid + block).  Returns ``None``
+    for non-strided (non-linear) layouts or structural mismatches.
     """
-    from lego.core import TileByLayout, Row, Col
+    from lego.core import TileByLayout, OrderBy
 
     if not isinstance(layout, TileByLayout):
-        return None
-
-    # Must have single OrderBy in the chain with a single Row/Col perm
-    if len(layout._input_chain) != 1:
-        return None
-    orderby = layout._input_chain[0]
-    if len(orderby.perms) != 1:
-        return None
-    perm = orderby.perms[0]
-    if not isinstance(perm, (Row, Col)):
         return None
 
     # Must have exactly 2 tile groups (grid dims + block dims)
     if len(layout._tile_groups) != 2:
         return None
 
-    shape = tuple(perm.dims())
+    # Build inner layout from the full chain of OrderBy objects
+    all_perms = []
+    for orderby in layout._input_chain:
+        all_perms.extend(orderby.perms)
+    inner = OrderBy(*all_perms)
+    shape = tuple(inner.dims())
     ndim = len(shape)
+
     grid_shape = tuple(layout._tile_groups[0])
     block_shape = tuple(layout._tile_groups[1])
 
     if len(block_shape) != ndim or len(grid_shape) != ndim:
         return None
-
-    # Compute strides and order based on permutation type
-    if isinstance(perm, Row):
-        strides = tuple(
-            reduce(lambda a, b: a * b, shape[i + 1:], sp.S.One)
-            for i in range(ndim)
-        )
-        order = tuple(range(ndim - 1, -1, -1))
-    else:  # Col
-        strides = tuple(
-            reduce(lambda a, b: a * b, shape[:i], sp.S.One)
-            for i in range(ndim)
-        )
-        order = tuple(range(ndim))
 
     # Parse subscript: expect [tile_idx, ..., :, :, ...]
     if not isinstance(subscript_indices, (list, tuple)):
@@ -89,6 +75,11 @@ def extract_block_ptr_metadata(layout, subscript_indices):
     if len(tile_indices) != ndim or slice_count != ndim:
         return None
 
+    # Lower the inner layout via MLIR and extract strides + order
+    strides, order = _extract_strides_from_lowered(inner, shape, ndim)
+    if strides is None:
+        return None
+
     offsets = tuple(tile_indices[i] * block_shape[i] for i in range(ndim))
 
     # Boundary dims: where grid * block != shape
@@ -103,6 +94,101 @@ def extract_block_ptr_metadata(layout, subscript_indices):
         block_shape=block_shape, order=order,
         boundary_dims=tuple(boundary_dims),
     )
+
+
+def _extract_strides_from_lowered(inner_layout, shape, ndim):
+    """Lower *inner_layout* via MLIR and extract ``(strides, order)``.
+
+    Returns ``(None, None)`` if the lowered expression is not a linear
+    function of the indices (i.e. not a strided layout).
+    """
+    from lego.backend.symbolic import simplify_via_mlir
+
+    idx_syms = sp.symbols(
+        [f'_bp_idx_{k}' for k in range(ndim)],
+        integer=True, positive=True,
+    )
+
+    # Constraints: index vars bounded by shape, dim symbols positive
+    constraints = {}
+    for k, s in enumerate(idx_syms):
+        constraints[s] = (0, shape[k])
+    for d in shape:
+        if isinstance(d, sp.Symbol) and d not in constraints:
+            constraints[d] = (1, None)
+
+    # simplify_via_mlir requires layout._dims
+    inner_layout._dims = shape
+    try:
+        flat_expr = simplify_via_mlir(
+            inner_layout, 'apply', list(idx_syms), constraints)
+    except Exception:
+        return None, None
+    finally:
+        if hasattr(inner_layout, '_dims'):
+            del inner_layout._dims
+
+    # Extract coefficient of each index symbol
+    expanded = sp.expand(flat_expr)
+    strides = []
+    for s in idx_syms:
+        c = expanded.coeff(s)
+        if c == 0:
+            return None, None  # degenerate or non-linear dimension
+        strides.append(c)
+
+    # Verify linearity: remainder must be free of index symbols
+    reconstructed = sum(c * s for c, s in zip(strides, idx_syms))
+    remainder = sp.expand(expanded - reconstructed)
+    if any(s in remainder.free_symbols for s in idx_syms):
+        return None, None  # non-linear layout
+
+    strides = tuple(strides)
+    order = _infer_order_from_strides(strides, ndim)
+    if order is None:
+        return None, None
+
+    return strides, order
+
+
+def _infer_order_from_strides(strides, ndim):
+    """Infer Triton memory order from symbolic strides.
+
+    Returns dimension indices sorted innermost-first (ascending stride),
+    or ``None`` if the ordering cannot be determined.
+    """
+    if ndim == 1:
+        return (0,)
+
+    # Collect free symbols across all strides
+    free_syms = set()
+    for s in strides:
+        if isinstance(s, sp.Expr):
+            free_syms |= s.free_symbols
+
+    if not free_syms:
+        # All strides are concrete — sort directly
+        try:
+            return tuple(sorted(range(ndim), key=lambda i: int(strides[i])))
+        except (TypeError, ValueError):
+            return None
+
+    # Substitute dim symbols with distinct large primes to obtain a concrete
+    # ordering that preserves symbolic multiplicative relationships.
+    _PRIMES = [101, 103, 107, 109, 113, 127, 131, 137, 139, 149,
+               151, 157, 163, 167, 173, 179, 181, 191, 193, 197]
+    sub = {sym: _PRIMES[i] for i, sym in enumerate(
+        sorted(free_syms, key=lambda s: s.name))}
+
+    concrete = []
+    for s in strides:
+        v = s.subs(sub) if isinstance(s, sp.Expr) else s
+        try:
+            concrete.append(int(v))
+        except (TypeError, ValueError):
+            return None
+
+    return tuple(sorted(range(ndim), key=lambda i: concrete[i]))
 
 
 # ---------------------------------------------------------------------------
