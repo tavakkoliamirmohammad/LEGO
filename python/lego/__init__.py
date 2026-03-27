@@ -14,3 +14,5 @@ from .frontends.python_mlir import (
     row, col, reg_p, order_by, tile_by, group_by, gen_p,
 )
 from .backend.torch_tensor import LegoTensor, as_lego_tensor
+from .frontends import rust_gen, fortran_gen, cxx_gen
+from .frontends import julia_gen, cuda_c_gen, js_gen, glsl_gen
