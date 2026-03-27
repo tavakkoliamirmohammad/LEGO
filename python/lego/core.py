@@ -1,5 +1,6 @@
 
 import math
+import warnings
 from sympy import Symbol, symbols, Piecewise, Function
 from typing import List, Tuple, Callable
 import sympy as sp
@@ -108,6 +109,17 @@ class GenP(LayoutBlock):
         self._dims = nd
         self.f_apply = f_apply
         self.f_inv = f_inv if f_inv is not None else self._try_derive_inverse(nd, f_apply)
+        if self.f_inv is None:
+            warnings.warn(
+                "GenP: could not derive inverse function automatically. "
+                "Inverse operations will fail. Provide f_inv explicitly.",
+                stacklevel=2,
+            )
+
+    @property
+    def has_inverse(self):
+        """True if this GenP has an inverse function (explicit or derived)."""
+        return self.f_inv is not None
 
     @staticmethod
     def _try_derive_inverse(nd, f_apply):
@@ -193,8 +205,19 @@ class RegP(LayoutBlock):
     """Regular Permutation. MLIR: lego.reg_p with perm vector."""
 
     def __init__(self, nd: Tuple[Symbol, ...], perm: Tuple[int, ...]):
+        perm = list(perm)
+        if len(perm) != len(nd):
+            raise ValueError(
+                f"RegP: perm length ({len(perm)}) != dims length ({len(nd)}). "
+                f"perm must be a permutation of range({len(nd)})."
+            )
+        if sorted(perm) != list(range(len(perm))):
+            raise ValueError(
+                f"RegP: perm {perm} is not a valid permutation of "
+                f"range({len(perm)}). Each index 0..{len(perm)-1} must appear exactly once."
+            )
         self._dims = nd
-        self._perm_vector = list(perm)
+        self._perm_vector = perm
 
     def dims(self):
         return self._dims
@@ -485,7 +508,7 @@ class GroupBy(LayoutBlock):
         constraints = self._build_constraints(self.constraints)
         simplified = simplify_via_mlir(self, 'apply', list(result),
                                        constraints)
-        return simplified.xreplace(dummy_to_tr)
+        return simplified.subs(dummy_to_tr)
 
 
 class TileByLayout(GroupBy):
