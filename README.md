@@ -27,7 +27,7 @@ LEGO/
 │   │   ├── glsl_printer.py  # GLSL code printer
 │   │   ├── backend/         # MLIR compilation, JIT, SymPy lowering, PyTorch autograd
 │   │   └── frontends/       # DSLAdapter ABC + adapters (Triton, cuTile, Numba, JAX, Rust, Fortran, C++, Julia, CUDA C, JS, GLSL, python_mlir)
-│   ├── examples/            # Usage examples (triton, numba_cuda, jax, cutile, python_mlir, symbolic)
+│   ├── examples/            # Usage examples (triton, numba_cuda, jax, cutile, python_mlir, symbolic, rust, cxx, fortran, julia, cuda_c, js, glsl)
 │   └── tests/               # Python tests
 │
 ├── include/Lego/           # MLIR dialect headers (ODS definitions, passes)
@@ -99,13 +99,13 @@ The adapters lower through a unified MLIR-based backend:
 | **Numba CUDA** | `lego.frontends.numba_jit` | `@lego_jit` | Transforms Numba CUDA kernels, scalar thread indexing ([vecadd](python/examples/numba_cuda/hello_world.py), [matmul](python/examples/numba_cuda/matmul_lego.py)) |
 | **JAX** | `lego.frontends.jax_jit` | `@lego_jit` | Transforms JAX functions, preserves `static_argnums` ([vecadd](python/examples/jax/hello_world.py), [matmul](python/examples/jax/matmul_lego.py)) |
 | **Tensor API** | `lego.frontends.python_mlir` | -- | JIT-compiled layout transforms for NumPy/PyTorch with `torch.compile` support ([example](python/examples/python_mlir/hello_world.py)) |
-| **Rust** | `lego.frontends.rust_gen` | `lego.rust_gen.generate()` | Generates Rust source code from LEGO layout expressions |
-| **Fortran** | `lego.frontends.fortran_gen` | `lego.fortran_gen.generate()` | Generates Fortran source code from LEGO layout expressions |
-| **C++** | `lego.frontends.cxx_gen` | `lego.cxx_gen.generate()` | Generates C++ source code from LEGO layout expressions |
-| **Julia** | `lego.frontends.julia_gen` | `lego.julia_gen.generate()` | Generates Julia source code from LEGO layout expressions |
-| **CUDA C** | `lego.frontends.cuda_c_gen` | `lego.cuda_c_gen.generate()` | Generates CUDA C source code (direct kernel codegen without Triton) |
-| **JavaScript** | `lego.frontends.js_gen` | `lego.js_gen.generate()` | Generates JavaScript source code for WebGPU/WASM targets |
-| **GLSL** | `lego.frontends.glsl_gen` | `lego.glsl_gen.generate()` | Generates GLSL shader source code |
+| **Rust** | `lego.frontends.rust_gen` | `lego.rust_gen.generate()` | Generates Rust source code ([example](python/examples/rust/hello_world.py)) |
+| **Fortran** | `lego.frontends.fortran_gen` | `lego.fortran_gen.generate()` | Generates Fortran source code ([example](python/examples/fortran/hello_world.py)) |
+| **C++** | `lego.frontends.cxx_gen` | `lego.cxx_gen.generate()` | Generates C++ source code ([example](python/examples/cxx/hello_world.py)) |
+| **Julia** | `lego.frontends.julia_gen` | `lego.julia_gen.generate()` | Generates Julia source code ([example](python/examples/julia/hello_world.py)) |
+| **CUDA C** | `lego.frontends.cuda_c_gen` | `lego.cuda_c_gen.generate()` | Generates CUDA C kernel source code ([example](python/examples/cuda_c/hello_world.py)) |
+| **JavaScript** | `lego.frontends.js_gen` | `lego.js_gen.generate()` | Generates JavaScript source for WebGPU/WASM ([example](python/examples/js/hello_world.py)) |
+| **GLSL** | `lego.frontends.glsl_gen` | `lego.glsl_gen.generate()` | Generates GLSL shader source code ([example](python/examples/glsl/hello_world.py)) |
 | **Symbolic** | `lego.core` | -- | SymPy-based algebraic layout expressions ([example](python/examples/symbolic/hello_world.py)) |
 
 Each JIT frontend implements the `DSLAdapter` interface (`frontends/_adapter.py`), which defines four hooks: `unwrap`, `find_runtime_vars`, `get_code_printer`, and `compile_and_wrap`. The DSL-agnostic rewriter (`rewriter.py`) handles AST transformation and symbolic evaluation. The Triton adapter additionally supports `block_ptr` (TMA) code generation, emitting `tl.make_block_ptr` / `tl.advance` calls with automatic boundary checks.
