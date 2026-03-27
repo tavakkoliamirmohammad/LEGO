@@ -7,12 +7,14 @@ contains the expected DSL-specific tokens.
 
 import ast
 import pytest
+from sympy import Max, Min
 from lego.core import OrderBy, Row, Col, BroadcastRange, TritonRange, get_arange
 from lego.rewriter import rewrite, _parse_and_normalize, _build_eval_env
 from lego.frontends._adapter import DSLAdapter
 from lego.frontends.triton_jit import TritonAdapter, TritonCodePrinter
 from lego.frontends.numba_jit import NumbaCUDAAdapter, NumbaCUDACodePrinter
 from lego.frontends.jax_jit import JAXAdapter, JAXCodePrinter
+from lego.frontends.cutile_jit import CutileAdapter, CutileCodePrinter
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -234,6 +236,110 @@ class TestJAXPrinter:
         assert '[:, None]' in rendered
 
 
+# ── cuTile backend ──────────────────────────────────────────────────────
+
+class TestCutileParsing:
+    """Verify that the cuTile adapter produces valid cuTile code."""
+
+    def _make_vecadd(self):
+        from lego.core import OrderBy, Row
+
+        def vecadd(A, B, C, N, TILE):
+            bid = 0  # placeholder for ct.bid(0)
+            L = OrderBy(Row(N)).TileBy([N / TILE], [TILE])
+            offsets = L[bid, :]
+
+        return vecadd
+
+    def test_layout_removed(self):
+        fn = self._make_vecadd()
+        src = _rewrite_source(fn, CutileAdapter())
+        assert 'OrderBy' not in src
+        assert 'TileBy' not in src
+        assert 'Row(' not in src
+
+    def test_no_tl_references(self):
+        fn = self._make_vecadd()
+        src = _rewrite_source(fn, CutileAdapter())
+        assert 'tl.' not in src
+
+    def test_output_contains_ct_arange(self):
+        fn = self._make_vecadd()
+        src = _rewrite_source(fn, CutileAdapter())
+        assert 'ct.arange' in src
+
+    def test_offsets_expression(self):
+        fn = self._make_vecadd()
+        src = _rewrite_source(fn, CutileAdapter())
+        assert 'ct.arange(TILE, dtype=ct.int32)' in src
+        assert 'TILE * bid' in src
+
+
+class TestCutileSwizzleParsing:
+    """Verify that cuTile adapter handles .inv() for block scheduling."""
+
+    def _make_swizzle(self):
+        # Max, Min, OrderBy, Col must be in the module globals (not local
+        # imports) so the rewriter can eval them via fn.__globals__.
+        def matmul(A, B, C, M, N, K, tm, tn, GM):
+            bid = 0  # placeholder for ct.bid(0)
+            num_pid_m = M // tm
+            num_pid_n = N // tn
+            L_pid = OrderBy(Col(Max(num_pid_m // GM, 1), 1),
+                            Col(Min(num_pid_m, GM), num_pid_n)).TileBy(
+                                [num_pid_m, num_pid_n])
+            bidx, bidy = L_pid.inv(bid)
+
+        return matmul
+
+    def test_layout_removed(self):
+        fn = self._make_swizzle()
+        src = _rewrite_source(fn, CutileAdapter())
+        assert 'L_pid' not in src
+        assert 'OrderBy' not in src
+        assert 'Col(' not in src
+
+    def test_inv_produces_assignments(self):
+        fn = self._make_swizzle()
+        src = _rewrite_source(fn, CutileAdapter())
+        assert 'bidx =' in src
+        assert 'bidy =' in src
+
+    def test_generated_source_parseable(self):
+        fn = self._make_swizzle()
+        src = _rewrite_source(fn, CutileAdapter())
+        ast.parse(src)
+
+
+class TestCutilePrinter:
+    def test_arange_rendering_zero_start(self):
+        p = CutileCodePrinter()
+        a = get_arange(0, 128)
+        assert p.doprint(a) == 'ct.arange(128, dtype=ct.int32)'
+
+    def test_arange_rendering_nonzero_start(self):
+        p = CutileCodePrinter()
+        a = get_arange(4, 68)
+        rendered = p.doprint(a)
+        assert 'ct.arange(64, dtype=ct.int32)' in rendered
+        assert '+ 4' in rendered
+
+    def test_broadcast_range_1d(self):
+        p = CutileCodePrinter()
+        a = get_arange(0, 64)
+        br = BroadcastRange(a, 0, 1)
+        rendered = p.doprint(br)
+        assert 'ct.arange(64, dtype=ct.int32)' in rendered
+        assert 'None' not in rendered
+
+    def test_broadcast_range_2d(self):
+        p = CutileCodePrinter()
+        a = get_arange(0, 64)
+        br = BroadcastRange(a, 0, 2)
+        rendered = p.doprint(br)
+        assert '[:, None]' in rendered
+
+
 # ── Adapter ABC ──────────────────────────────────────────────────────────
 
 class TestDSLAdapterABC:
@@ -249,6 +355,9 @@ class TestDSLAdapterABC:
 
     def test_jax_adapter_is_dsl_adapter(self):
         assert isinstance(JAXAdapter(), DSLAdapter)
+
+    def test_cutile_adapter_is_dsl_adapter(self):
+        assert isinstance(CutileAdapter(), DSLAdapter)
 
 
 # ── Rewriter internals ──────────────────────────────────────────────────
