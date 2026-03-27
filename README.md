@@ -41,46 +41,46 @@ decoration time, then delegates code generation to a pluggable `DSLAdapter`.
 The adapters lower through a unified MLIR-based backend:
 
 ```
-                          User Code
-                             |
-                     +-------+-------+
-                     |               |
-              @lego.jit        Tensor / Symbolic
-              decorator              API
-                     |               |
-          +----------+----------+    |
-          |          |          |    |
-      +---+---+ +---+---+ +---+---+ |
-      |Triton | |Numba  | | JAX   | |cuTile| |
-      |Adapter| |CUDA   | |Adapter| |Adapt.| |
-      |       | |Adapter| |       | |      | |
-      +---+---+ +---+---+ +---+---+ +--+---+ |
-          |          |          |    |
-          +----------+-----+----+    |
-                     |               |
-            +--------+--------+      |
-            |    rewriter.py  |      |
-            |  AST transform  |      |
-            |  + SymPy eval   |      |
-            +--------+--------+      |
-                     |               |
-                     +-------+-------+
-                             |
-                  +----------+----------+
-                  |    lego dialect     |
-                  |  .................. |
-                  |  normalization      |
-                  |  simplification     |
-                  |  verification       |
-                  |  lowering           |
-                  +----------+----------+
-                             |
-                  +----------+----------+
-                  |     LLVM / MLIR     |
-                  |  .................. |
-                  |  X86 | AArch64 |   |
-                  |       NVPTX        |
-                  +---------------------+
+                              User Code
+                                 |
+                        +--------+--------+
+                        |                 |
+                 @lego.jit          Tensor / Symbolic
+                 decorator                API
+                        |                 |
+     +----------+-------+-------+----+    |
+     |          |               |    |    |
+ +---+----+ +--+----+ +------+ | +--+--+ |
+ |Triton  | | Numba | | JAX  | | |cuTile| |
+ |Adapter | | CUDA  | |Adapt.| | |Adapt.| |
+ +---+----+ +--+----+ +--+---+ | +--+--+ |
+     |          |          |    |    |    |
+     +----------+----------+----+----+    |
+                |                         |
+       +--------+--------+               |
+       |   rewriter.py   |               |
+       |  AST transform  |               |
+       |  + SymPy eval   |               |
+       +--------+--------+               |
+                |                         |
+                +-----------+-------------+
+                            |
+                 +----------+----------+
+                 |    lego dialect     |
+                 |  .................. |
+                 |  normalization      |
+                 |  simplification     |
+                 |  strength reduction |
+                 |  verification       |
+                 |  lowering           |
+                 +----------+----------+
+                            |
+                 +----------+----------+
+                 |     LLVM / MLIR     |
+                 |  .................. |
+                 |  X86 | AArch64 |   |
+                 |       NVPTX        |
+                 +---------------------+
 ```
 
 ### Frontends
