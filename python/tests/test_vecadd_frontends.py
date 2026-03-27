@@ -19,11 +19,13 @@ try:
 except ImportError:
     pytest.skip("GPU dependencies (triton/jax/numba) not available", allow_module_level=True)
 
-from lego.core import OrderBy, Row
+from sympy import Max, Min
+from lego.core import OrderBy, Row, Col
 from lego.rewriter import rewrite
 from lego.frontends.triton_jit import TritonAdapter, jit as triton_lego_jit
 from lego.frontends.numba_jit import jit as numba_lego_jit
 from lego.frontends.jax_jit import jit as jax_lego_jit
+from lego.frontends.cutile_jit import CutileAdapter, get_cutile_kernel_source
 
 
 # ── Triton vecadd (full GPU test) ────────────────────────────────────────
@@ -273,4 +275,88 @@ class TestJAXVecaddSource:
             return x + y
 
         src = rewrite(vecadd, JAXAdapter(), return_source=True)
+        ast.parse(src)
+
+
+# ── cuTile source verification ─────────────────────────────────────────
+
+class TestCutileVecaddSource:
+    """Verify the generated cuTile source is correct."""
+
+    def test_generated_source(self):
+        def vecadd(A, B, C, N, TILE):
+            bid = 0  # placeholder for ct.bid(0)
+            L = OrderBy(Row(N)).TileBy([N / TILE], [TILE])
+            offsets = L[bid, :]
+
+        src = rewrite(vecadd, CutileAdapter(), return_source=True)
+
+        # Must contain cuTile-specific tokens
+        assert 'ct.arange' in src
+        # Must NOT contain Triton or JAX tokens
+        assert 'tl.' not in src
+        assert 'jnp.' not in src
+        # Layout DSL must be fully eliminated
+        assert 'OrderBy' not in src
+        assert 'TileBy' not in src
+
+    def test_generated_source_parseable(self):
+        """The generated source must be valid Python."""
+        import ast
+
+        def vecadd(A, B, C, N, TILE):
+            bid = 0
+            L = OrderBy(Row(N)).TileBy([N / TILE], [TILE])
+            offsets = L[bid, :]
+
+        src = rewrite(vecadd, CutileAdapter(), return_source=True)
+        ast.parse(src)
+
+    def test_offsets_simplified(self):
+        def vecadd(A, B, C, N, TILE):
+            bid = 0
+            L = OrderBy(Row(N)).TileBy([N / TILE], [TILE])
+            offsets = L[bid, :]
+
+        src = rewrite(vecadd, CutileAdapter(), return_source=True)
+        assert 'ct.arange(TILE, dtype=ct.int32)' in src
+        assert 'TILE * bid' in src
+
+
+class TestCutileMatmulSwizzleSource:
+    """Verify swizzled matmul source generation for cuTile."""
+
+    def test_swizzle_inv_simplified(self):
+        def matmul(A, B, C, M, N, K, tm, tn, tk, GM):
+            bid = 0
+            num_pid_m = M // tm
+            num_pid_n = N // tn
+            L_pid = OrderBy(Col(Max(num_pid_m // GM, 1), 1),
+                            Col(Min(num_pid_m, GM), num_pid_n)).TileBy(
+                                [num_pid_m, num_pid_n])
+            bidx, bidy = L_pid.inv(bid)
+
+        src = rewrite(matmul, CutileAdapter(), return_source=True)
+
+        # Layout DSL fully eliminated
+        assert 'L_pid' not in src
+        assert 'OrderBy' not in src
+        assert 'Col(' not in src
+        # bidx and bidy are computed
+        assert 'bidx =' in src
+        assert 'bidy =' in src
+
+    def test_generated_source_parseable(self):
+        import ast
+
+        def matmul(A, B, C, M, N, K, tm, tn, tk, GM):
+            bid = 0
+            num_pid_m = M // tm
+            num_pid_n = N // tn
+            L_pid = OrderBy(Col(Max(num_pid_m // GM, 1), 1),
+                            Col(Min(num_pid_m, GM), num_pid_n)).TileBy(
+                                [num_pid_m, num_pid_n])
+            bidx, bidy = L_pid.inv(bid)
+
+        src = rewrite(matmul, CutileAdapter(), return_source=True)
         ast.parse(src)
