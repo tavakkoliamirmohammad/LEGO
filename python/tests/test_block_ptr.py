@@ -95,7 +95,8 @@ class TestBlockPtrMetadata:
         """GenP with a non-linear apply should return None."""
         from lego.core import GenP
         M, K, BM, BK = sp.symbols('M K BM BK', integer=True, positive=True)
-        genp = GenP((M, K), lambda idx: idx[0]**2 + idx[1])
+        with pytest.warns(UserWarning, match="could not derive inverse"):
+            genp = GenP((M, K), lambda idx: idx[0]**2 + idx[1])
         L = OrderBy(genp).TileBy([M / BM, K / BK], [BM, BK])
         info = extract_block_ptr_metadata(L, [_sym('i'), _sym('j'), slice(None), slice(None)])
         assert info is None

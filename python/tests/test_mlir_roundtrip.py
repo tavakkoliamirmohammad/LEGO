@@ -245,7 +245,8 @@ class TestGenP:
         i, j = syms("i j")
         n = sp.Symbol("n", integer=True, positive=True)
 
-        L = OrderBy(GenP([n, n], lambda x: antidiag(n, x), None)).TileBy((n, n))
+        with pytest.warns(UserWarning, match="could not derive inverse"):
+            L = OrderBy(GenP([n, n], lambda x: antidiag(n, x), None)).TileBy((n, n))
         result = L[i, j]
         expected = antidiag(n, (i, j))
         assert sp.simplify(result - expected) == 0, (
@@ -753,7 +754,8 @@ class TestGenPAutoInverse:
         """Piecewise functions should not auto-derive (too complex)."""
         from lego.core import antidiag
         n = sym("n")
-        L = GenP([n, n], lambda args: antidiag(n, args))
+        with pytest.warns(UserWarning, match="could not derive inverse"):
+            L = GenP([n, n], lambda args: antidiag(n, args))
         # Piecewise should fail gracefully
         # f_inv should be None since we didn't provide one and auto-derive can't handle Piecewise
         assert L.f_inv is None
@@ -842,7 +844,8 @@ class TestCollectFreeSymbols:
         from lego.backend.symbolic import _collect_free_symbols
         K = sym("K")
         N = sym("N")
-        L = GenP([N], lambda idx: K * idx[0])
+        with pytest.warns(UserWarning, match="could not derive inverse"):
+            L = GenP([N], lambda idx: K * idx[0])
         syms_found = _collect_free_symbols(L)
         assert K in syms_found, f"K should be found in GenP body, got {syms_found}"
         assert N in syms_found, f"N should be found in dims, got {syms_found}"

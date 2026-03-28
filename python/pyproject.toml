@@ -16,5 +16,13 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 
+[tool.pytest.ini_options]
+filterwarnings = [
+    # Numba small-grid performance warnings (expected for small test sizes)
+    "ignore:Grid size \\d+ will likely result in GPU under-utilization::numba",
+    # PyTorch torch.jit.script_method deprecation (internal PyTorch, not our code)
+    "ignore:`torch.jit.script_method` is deprecated:DeprecationWarning",
+]
+
 [tool.setuptools.packages.find]
 include = ["mlir", "mlir.*", "lego", "lego.*"]

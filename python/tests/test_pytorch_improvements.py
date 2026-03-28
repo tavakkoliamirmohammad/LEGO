@@ -388,7 +388,8 @@ class TestLayoutAwareElementwise:
         x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
         lx1 = as_lego_tensor(x, layout1)
         lx2 = as_lego_tensor(x, layout2)
-        result = lx1 + lx2
+        with pytest.warns(UserWarning, match="not layout-aware"):
+            result = lx1 + lx2
         # Should return plain tensor (not LegoTensor)
         assert not isinstance(result, LegoTensor)
         torch.testing.assert_close(result, 2 * x)
@@ -421,7 +422,8 @@ class TestLayoutAwareReductions:
         layout = ColMajor((4, 4))
         x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
         lx = as_lego_tensor(x, layout)
-        result = torch.sum(lx, dim=0)
+        with pytest.warns(UserWarning, match="not layout-aware"):
+            result = torch.sum(lx, dim=0)
         torch.testing.assert_close(result, torch.sum(x, dim=0))
 
 
@@ -436,7 +438,8 @@ class TestLayoutAwareMatmul:
         b = torch.randn(4, 4)
         la = as_lego_tensor(a, layout)
         lb = as_lego_tensor(b, layout)
-        result = torch.matmul(la, lb)
+        with pytest.warns(UserWarning, match="not layout-aware"):
+            result = torch.matmul(la, lb)
         expected = torch.matmul(a, b)
         torch.testing.assert_close(result, expected, atol=1e-5, rtol=1e-5)
 

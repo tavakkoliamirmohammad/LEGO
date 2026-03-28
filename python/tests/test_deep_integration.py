@@ -275,6 +275,7 @@ class TestCompileBackend:
         backends = list_backends()
         assert 'lego' in backends
 
+    @pytest.mark.filterwarnings("ignore:`torch.jit.script_method` is deprecated:DeprecationWarning")
     def test_compile_basic(self):
         """torch.compile with lego backend produces correct results."""
         layout = ColMajor((4, 4))
