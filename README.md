@@ -18,9 +18,16 @@ LEGO/
 │   │   ├── core.py          # Layout primitives (Row, Col, RegP, GenP, OrderBy, GroupBy, TileByLayout)
 │   │   ├── rewriter.py      # DSL-agnostic AST rewriting engine
 │   │   ├── python_printer.py# SymPy code printer (base + DSL subclasses)
+│   │   ├── rust_printer.py  # Rust code printer
+│   │   ├── fortran_printer.py # Fortran code printer
+│   │   ├── cxx_printer.py   # C++ code printer
+│   │   ├── julia_printer.py # Julia code printer
+│   │   ├── cuda_c_printer.py# CUDA C code printer
+│   │   ├── js_printer.py    # JavaScript code printer
+│   │   ├── glsl_printer.py  # GLSL code printer
 │   │   ├── backend/         # MLIR compilation, JIT, SymPy lowering, PyTorch autograd
-│   │   └── frontends/       # DSLAdapter ABC + adapters (Triton, cuTile, Numba CUDA, JAX, python_mlir)
-│   ├── examples/            # Usage examples (triton, numba_cuda, jax, cutile, python_mlir, symbolic)
+│   │   └── frontends/       # DSLAdapter ABC + adapters (Triton, cuTile, Numba, JAX, Rust, Fortran, C++, Julia, CUDA C, JS, GLSL, python_mlir)
+│   ├── examples/            # Usage examples (triton, numba_cuda, jax, cutile, python_mlir, symbolic, rust, cxx, fortran, julia, cuda_c, js, glsl)
 │   └── tests/               # Python tests
 │
 ├── include/Lego/           # MLIR dialect headers (ODS definitions, passes)
@@ -48,14 +55,14 @@ The adapters lower through a unified MLIR-based backend:
                  @lego.jit          Tensor / Symbolic
                  decorator                API
                         |                 |
-     +----------+-------+-------+----+    |
-     |          |               |    |    |
- +---+----+ +--+----+ +------+ | +--+--+ |
- |Triton  | | Numba | | JAX  | | |cuTile| |
- |Adapter | | CUDA  | |Adapt.| | |Adapt.| |
- +---+----+ +--+----+ +--+---+ | +--+--+ |
-     |          |          |    |    |    |
-     +----------+----------+----+----+    |
+     +----------+-------+-------+----+----+-------+
+     |          |               |    |    |       |
+ +---+----+ +--+----+ +------+ | +--+--+ | +-----+------+
+ |Triton  | | Numba | | JAX  | | |cuTile| | |Rust/C++/F  |
+ |Adapter | | CUDA  | |Adapt.| | |Adapt.| | |  CodeGen   |
+ +---+----+ +--+----+ +--+---+ | +--+--+ | +-----+------+
+     |          |          |    |    |    |       |
+     +----------+----------+----+----+----+-------+
                 |                         |
        +--------+--------+               |
        |   rewriter.py   |               |
@@ -92,9 +99,47 @@ The adapters lower through a unified MLIR-based backend:
 | **Numba CUDA** | `lego.frontends.numba_jit` | `@lego_jit` | Transforms Numba CUDA kernels, scalar thread indexing ([vecadd](python/examples/numba_cuda/hello_world.py), [matmul](python/examples/numba_cuda/matmul_lego.py)) |
 | **JAX** | `lego.frontends.jax_jit` | `@lego_jit` | Transforms JAX functions, preserves `static_argnums` ([vecadd](python/examples/jax/hello_world.py), [matmul](python/examples/jax/matmul_lego.py)) |
 | **Tensor API** | `lego.frontends.python_mlir` | -- | JIT-compiled layout transforms for NumPy/PyTorch with `torch.compile` support ([example](python/examples/python_mlir/hello_world.py)) |
+| **Rust** | `lego.frontends.rust_gen` | `lego.rust_gen.generate()` | Generates Rust source code ([example](python/examples/rust/hello_world.py)) |
+| **Fortran** | `lego.frontends.fortran_gen` | `lego.fortran_gen.generate()` | Generates Fortran source code ([example](python/examples/fortran/hello_world.py)) |
+| **C++** | `lego.frontends.cxx_gen` | `lego.cxx_gen.generate()` | Generates C++ source code ([example](python/examples/cxx/hello_world.py)) |
+| **Julia** | `lego.frontends.julia_gen` | `lego.julia_gen.generate()` | Generates Julia source code ([example](python/examples/julia/hello_world.py)) |
+| **CUDA C** | `lego.frontends.cuda_c_gen` | `lego.cuda_c_gen.generate()` | Generates CUDA C kernel source code ([example](python/examples/cuda_c/hello_world.py)) |
+| **JavaScript** | `lego.frontends.js_gen` | `lego.js_gen.generate()` | Generates JavaScript source for WebGPU/WASM ([example](python/examples/js/hello_world.py)) |
+| **GLSL** | `lego.frontends.glsl_gen` | `lego.glsl_gen.generate()` | Generates GLSL shader source code ([example](python/examples/glsl/hello_world.py)) |
 | **Symbolic** | `lego.core` | -- | SymPy-based algebraic layout expressions ([example](python/examples/symbolic/hello_world.py)) |
 
 Each JIT frontend implements the `DSLAdapter` interface (`frontends/_adapter.py`), which defines four hooks: `unwrap`, `find_runtime_vars`, `get_code_printer`, and `compile_and_wrap`. The DSL-agnostic rewriter (`rewriter.py`) handles AST transformation and symbolic evaluation. The Triton adapter additionally supports `block_ptr` (TMA) code generation, emitting `tl.make_block_ptr` / `tl.advance` calls with automatic boundary checks.
+
+### Source Code Generation Backends
+
+Seven source-code generation backends take a Python function with LEGO layout expressions and emit equivalent index arithmetic in the target language. Each leverages SymPy's built-in code printers:
+
+```python
+import lego
+from lego.core import OrderBy, Row
+
+def index_kernel(M, N, BM, BN):
+    L = OrderBy(Row(M, N)).TileBy((M // BM, N // BN), (BM, BN))
+    offset = L[pid_m, pid_n, :, :]
+    return offset
+
+rust_src    = lego.rust_gen.generate(index_kernel)
+cxx_src     = lego.cxx_gen.generate(index_kernel)
+fortran_src = lego.fortran_gen.generate(index_kernel)
+julia_src   = lego.julia_gen.generate(index_kernel)
+cuda_src    = lego.cuda_c_gen.generate(index_kernel)
+js_src      = lego.js_gen.generate(index_kernel)
+glsl_src    = lego.glsl_gen.generate(index_kernel)
+```
+
+Key differences by language:
+| Feature | Rust | C++ | Fortran | Julia | CUDA C | JavaScript | GLSL |
+|---------|------|-----|---------|-------|--------|------------|------|
+| Range | `(0..N)` | `std::views::iota(0, N)` | `(/ (i, i=0, N-1) /)` | `(0:N-1)` | comment | `Array.from(...)` | comment |
+| Floor div | `a / b` | `a / b` | `a / b` | `div(a, b)` | `a / b` | `Math.floor(a/b)` | `a / b` |
+| Modulo | `a % b` | `a % b` | `mod(a, b)` | `mod(a, b)` | `a % b` | `a % b` | `a % b` |
+| Power | `.powi(n)` | `std::pow(a, n)` | `a**n` | `a^n` | `pow(a, n)` | `Math.pow(a, n)` | `pow(a, n)` |
+| Sqrt | `(x as f64).sqrt()` | `std::sqrt(x)` | `sqrt(dble(x))` | `sqrt(x)` | `sqrt(x)` | `Math.sqrt(x)` | `sqrt(x)` |
 
 ### Tensor API
 

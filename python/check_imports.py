@@ -6,6 +6,21 @@ print("[check-lego-imports] Testing backend imports...")
 from lego.backend.compiler import LayoutCompiler
 from lego.backend.dialects.lego_dialect import register
 print("[check-lego-imports] Testing frontend imports...")
-from lego.frontends.python_mlir import Tiled
+from lego.frontends._adapter import DSLAdapter
+from lego.frontends.python_mlir import (
+    Tiled, TiledPermute, RowMajor, ColMajor, Custom, Transposed,
+    ZCurve, Swizzle, BlockCyclic, Batched, LegoLayout, LegoArray,
+)
+from lego.frontends.triton_jit import TritonAdapter, jit as triton_jit
+from lego.frontends.numba_jit import NumbaCUDAAdapter, jit as numba_jit
+from lego.frontends.jax_jit import JAXAdapter, jit as jax_jit
+from lego.frontends.cutile_jit import CutileAdapter, cutile_jit
+from lego.frontends.rust_gen import RustAdapter, generate as rust_generate
+from lego.frontends.cxx_gen import CXXAdapter, generate as cxx_generate
+from lego.frontends.fortran_gen import FortranAdapter, generate as fortran_generate
+from lego.frontends.cuda_c_gen import CUDACAdapter, generate as cuda_c_generate
+from lego.frontends.julia_gen import JuliaAdapter, generate as julia_generate
+from lego.frontends.js_gen import JSAdapter, generate as js_generate
+from lego.frontends.glsl_gen import GLSLAdapter, generate as glsl_generate
 from lego.core import le_constraint, divisibility_constraint
 print("[check-lego-imports] All imports OK")
