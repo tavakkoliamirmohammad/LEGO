@@ -102,62 +102,76 @@ def verify_layouts():
 # ============================================================================
 
 def run_cuda_transpose():
-    """Run a small LEGO transpose on the GPU via lego-to-nvvm + mlir-runner."""
-    import subprocess, tempfile
+    """Run NxN LEGO transpose on GPU via lego-to-nvvm + mlir-runner.
 
-    # Use a small 4x4 test — the MLIR test uses lego.row/lego.col directly
-    mlir_src = """\
-module attributes {gpu.container_module} {
-  gpu.module @transpose_module {
-    gpu.func @transpose_kernel(%A: memref<16xf32>, %B: memref<16xf32>)
-        kernel attributes {known_block_size = array<i32: 16, 1, 1>} {
+    Verifies against sequential numpy transpose.
+    """
+    import subprocess, tempfile, re
+
+    SZ = N  # use the actual problem size
+    WG = 256
+    GRID = (SZ * SZ + WG - 1) // WG
+
+    mlir_src = f"""\
+module attributes {{gpu.container_module}} {{
+  gpu.module @transpose_module {{
+    gpu.func @transpose_kernel(%A: memref<{SZ*SZ}xf32>, %B: memref<{SZ*SZ}xf32>)
+        kernel attributes {{known_block_size = array<i32: {WG}, 1, 1>}} {{
       %tid = gpu.thread_id x
-      %c4_0 = arith.constant 4 : index
-      %c4_1 = arith.constant 4 : index
-      %row_layout = lego.row [%c4_0, %c4_1] : !lego.layout
-      %row, %col = lego.apply_inverse %row_layout(%tid) : !lego.layout -> index, index
-      %col_layout = lego.col [%c4_0, %c4_1] : !lego.layout
-      %t_idx = lego.apply %col_layout(%row, %col) : !lego.layout
-      %val = memref.load %A[%tid] : memref<16xf32>
-      memref.store %val, %B[%t_idx] : memref<16xf32>
+      %bid = gpu.block_id x
+      %bdim = gpu.block_dim x
+      %gid_base = arith.muli %bid, %bdim : index
+      %gid = arith.addi %gid_base, %tid : index
+      %c{SZ}_0 = arith.constant {SZ} : index
+      %c{SZ}_1 = arith.constant {SZ} : index
+      %n = arith.constant {SZ*SZ} : index
+      %in_bounds = arith.cmpi ult, %gid, %n : index
+      scf.if %in_bounds {{
+        %row_layout = lego.row [%c{SZ}_0, %c{SZ}_1] : !lego.layout
+        %row, %col = lego.apply_inverse %row_layout(%gid) : !lego.layout -> index, index
+        %col_layout = lego.col [%c{SZ}_0, %c{SZ}_1] : !lego.layout
+        %t_idx = lego.apply %col_layout(%row, %col) : !lego.layout
+        %val = memref.load %A[%gid] : memref<{SZ*SZ}xf32>
+        memref.store %val, %B[%t_idx] : memref<{SZ*SZ}xf32>
+      }}
       gpu.return
-    }
-  }
-  func.func @main() {
+    }}
+  }}
+  func.func @main() {{
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %c16 = arith.constant 16 : index
-    %A = memref.alloc() : memref<16xf32>
-    %B = memref.alloc() : memref<16xf32>
-    scf.for %i = %c0 to %c16 step %c1 {
+    %total = arith.constant {SZ*SZ} : index
+    %grid = arith.constant {GRID} : index
+    %block = arith.constant {WG} : index
+    %A = memref.alloc() : memref<{SZ*SZ}xf32>
+    %B = memref.alloc() : memref<{SZ*SZ}xf32>
+    scf.for %i = %c0 to %total step %c1 {{
       %vi = arith.index_cast %i : index to i32
       %vf = arith.sitofp %vi : i32 to f32
-      memref.store %vf, %A[%i] : memref<16xf32>
-    }
+      memref.store %vf, %A[%i] : memref<{SZ*SZ}xf32>
+    }}
     %zero = arith.constant 0.0 : f32
-    scf.for %i = %c0 to %c16 step %c1 {
-      memref.store %zero, %B[%i] : memref<16xf32>
-    }
-    %Au = memref.cast %A : memref<16xf32> to memref<*xf32>
-    %Bu = memref.cast %B : memref<16xf32> to memref<*xf32>
+    scf.for %i = %c0 to %total step %c1 {{
+      memref.store %zero, %B[%i] : memref<{SZ*SZ}xf32>
+    }}
+    %Au = memref.cast %A : memref<{SZ*SZ}xf32> to memref<*xf32>
+    %Bu = memref.cast %B : memref<{SZ*SZ}xf32> to memref<*xf32>
     gpu.host_register %Au : memref<*xf32>
     gpu.host_register %Bu : memref<*xf32>
     gpu.launch_func @transpose_module::@transpose_kernel
-        blocks in (%c1, %c1, %c1)
-        threads in (%c16, %c1, %c1)
-        args(%A : memref<16xf32>, %B : memref<16xf32>)
+        blocks in (%grid, %c1, %c1)
+        threads in (%block, %c1, %c1)
+        args(%A : memref<{SZ*SZ}xf32>, %B : memref<{SZ*SZ}xf32>)
     func.call @printMemrefF32(%Bu) : (memref<*xf32>) -> ()
-    memref.dealloc %A : memref<16xf32>
-    memref.dealloc %B : memref<16xf32>
+    memref.dealloc %A : memref<{SZ*SZ}xf32>
+    memref.dealloc %B : memref<{SZ*SZ}xf32>
     return
-  }
+  }}
   func.func private @printMemrefF32(memref<*xf32>)
-}
+}}
 """
-    # Find lego-opt and mlir-runner
     build_dir = os.environ.get("LEGO_BUILD_DIR", "")
     lego_opt = os.path.join(build_dir, "tools/lego-opt/lego-opt") if build_dir else "lego-opt"
-    # Try common locations
     for candidate in [lego_opt,
                       os.path.join(os.path.dirname(__file__), "../../../build/tools/lego-opt/lego-opt")]:
         if os.path.isfile(candidate):
@@ -178,7 +192,6 @@ module attributes {gpu.container_module} {
         src_path = f.name
 
     try:
-        # Lower
         lowered = src_path + ".lowered"
         r = subprocess.run([lego_opt, src_path, "--lego-to-nvvm", "-o", lowered],
                            capture_output=True, text=True)
@@ -186,7 +199,6 @@ module attributes {gpu.container_module} {
             print(f"  CUDA execution: FAIL (lego-to-nvvm: {r.stderr[:200]})", file=sys.stderr)
             return False
 
-        # Execute
         env = dict(os.environ, LD_LIBRARY_PATH=libs_dir + ":" + os.environ.get("LD_LIBRARY_PATH", ""))
         r = subprocess.run(
             [mlir_runner, lowered,
@@ -194,17 +206,18 @@ module attributes {gpu.container_module} {
              f"{libs_dir}/libmlir_c_runner_utils.so,"
              f"{libs_dir}/libmlir_runner_utils.so",
              "--entry-point-result=void"],
-            capture_output=True, text=True, env=env, timeout=30)
+            capture_output=True, text=True, env=env, timeout=60)
 
-        expected = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15]
-        # Parse output: "data = \n[0,  4,  8,  12, ...]"
-        import re
+        # Parse output and compare against numpy
         match = re.search(r'data\s*=\s*\n\[([^\]]+)\]', r.stdout)
         if match:
-            values = [int(float(v.strip())) for v in match.group(1).split(",")]
-            ok = values == expected
-            print(f"  CUDA execution (4x4): {'PASS' if ok else 'FAIL'} "
-                  f"{'— B = A^T verified' if ok else f'got {values[:8]}...'}", file=sys.stderr)
+            gpu_values = np.array([float(v.strip()) for v in match.group(1).split(",")])
+            expected = np.arange(SZ * SZ, dtype=np.float32).reshape(SZ, SZ).T.ravel()
+            ok = np.allclose(gpu_values, expected)
+            max_err = np.max(np.abs(gpu_values - expected))
+            print(f"  CUDA execution ({SZ}x{SZ}): {'PASS' if ok else 'FAIL'} "
+                  f"— {SZ*SZ} elements, max error={max_err}",
+                  file=sys.stderr)
             return ok
         else:
             print(f"  CUDA execution: FAIL (no output: {r.stdout[:200]})", file=sys.stderr)
