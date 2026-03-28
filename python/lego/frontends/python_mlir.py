@@ -27,6 +27,25 @@ from lego.core import (
 )
 from lego.backend.compiler import LayoutCompiler, _dtype_to_mlir
 
+
+def _check_layout_invertible(layout):
+    """Walk layout tree and raise if any GenP lacks an inverse function."""
+    if isinstance(layout, GenP):
+        if not layout.has_inverse:
+            raise ValueError(
+                "Cannot compute inverse: GenP has no inverse function. "
+                "Provide f_inv explicitly."
+            )
+    elif isinstance(layout, OrderBy):
+        for p in layout.perms:
+            _check_layout_invertible(p)
+    elif isinstance(layout, TileByLayout):
+        for ob in layout._input_chain:
+            _check_layout_invertible(ob)
+    elif isinstance(layout, GroupBy):
+        for obj in layout.objects:
+            _check_layout_invertible(obj)
+
 try:
     import torch
     _HAS_TORCH = True
@@ -90,12 +109,19 @@ class LegoLayout:
             dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
             shape = dims
         self._shape = tuple(int(s) for s in shape)
+        for i, d in enumerate(self._shape):
+            if d <= 0:
+                raise ValueError(
+                    f"LegoLayout: dimension {i} has non-positive size {d}. "
+                    f"All dimensions must be > 0."
+                )
         self._numel = 1
         for s in self._shape:
             self._numel *= s
         self._cache = {}
         self._perm_cache = {}
         self._composed_perm = None
+        self._compiled_torch = None  # cached (fwd_fn, inv_fns, layout_dims)
 
     @property
     def shape(self):
@@ -148,14 +174,33 @@ class LegoLayout:
             self._perm_cache[key] = (fwd_t, inv_t)
         return self._perm_cache[key]
 
-    def transform(self, tensor):
+    def _validate_numel(self, tensor):
+        """Validate that tensor numel matches layout numel."""
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
-            from lego.backend.torch_ops import _LegoPermuteFunction
-            if _LegoPermuteFunction is not None:
-                fwd_t, inv_t = self._get_perm_tensors(tensor.device)
-                return _LegoPermuteFunction.apply(
-                    tensor, fwd_t, inv_t
-                ).reshape(self._shape)
+            actual = tensor.numel()
+        elif isinstance(tensor, np.ndarray):
+            actual = tensor.size
+        else:
+            return
+        if actual != self._numel:
+            raise ValueError(
+                f"Tensor numel ({actual}) != layout numel ({self._numel}). "
+                f"Layout expects shape compatible with {self._shape}."
+            )
+
+    def _get_compiled_torch(self):
+        """Get cached compiled layout transform functions for PyTorch."""
+        if self._compiled_torch is None:
+            from lego.backend.torch_layout import compile_layout_transform
+            self._compiled_torch = compile_layout_transform(self._layout, self._shape)
+        return self._compiled_torch
+
+    def transform(self, tensor):
+        self._validate_numel(tensor)
+        if _HAS_TORCH and isinstance(tensor, torch.Tensor):
+            from lego.backend.torch_layout import apply_layout_torch
+            return apply_layout_torch(tensor, self._layout, self._shape,
+                                      compiled=self._get_compiled_torch())
         if isinstance(tensor, np.ndarray):
             if self._composed_perm is not None:
                 fwd, _ = self._composed_perm
@@ -165,13 +210,12 @@ class LegoLayout:
         raise TypeError(f"Unsupported tensor type: {type(tensor)}")
 
     def inverse_transform(self, tensor):
+        self._validate_numel(tensor)
+        _check_layout_invertible(self._layout)
         if _HAS_TORCH and isinstance(tensor, torch.Tensor):
-            from lego.backend.torch_ops import _LegoPermuteFunction
-            if _LegoPermuteFunction is not None:
-                fwd_t, inv_t = self._get_perm_tensors(tensor.device)
-                return _LegoPermuteFunction.apply(
-                    tensor, inv_t, fwd_t
-                ).reshape(self._shape)
+            from lego.backend.torch_layout import apply_inverse_layout_torch
+            return apply_inverse_layout_torch(tensor, self._layout, self._shape,
+                                              compiled=self._get_compiled_torch())
         if isinstance(tensor, np.ndarray):
             if self._composed_perm is not None:
                 _, inv = self._composed_perm
@@ -298,9 +342,18 @@ class TiledView:
     def __init__(self, shape, tile_shape):
         if len(shape) != len(tile_shape):
             raise ValueError("shape and tile_shape must have the same rank")
-        for s, t in zip(shape, tile_shape):
+        for i, (s, t) in enumerate(zip(shape, tile_shape)):
+            if t <= 0:
+                raise ValueError(
+                    f"TiledView: tile size at dimension {i} must be > 0, got {t}"
+                )
             if s % t != 0:
-                raise ValueError(f"Dimension {s} not divisible by tile size {t}")
+                raise ValueError(
+                    f"TiledView: dimension {i} (size {s}) not divisible by "
+                    f"tile size {t}. Consider tile sizes that evenly divide "
+                    f"each dimension (e.g., factors of {s}: "
+                    f"{[f for f in range(1, s+1) if s % f == 0]})."
+                )
 
         self._original_shape = tuple(shape)
         self._tile_shape = tuple(tile_shape)
@@ -384,8 +437,46 @@ class TiledView:
 
 
 def Tiled(shape, tile_shape):
-    """Tiled layout — multi-index view with (grid..., tile...) dimensions."""
+    """Tiled layout — multi-index view with (grid..., tile...) dimensions.
+
+    Reshapes data from shape to (grid..., tile...) via reshape+transpose.
+    No physical data reordering — just re-indexing.
+
+    Example:
+        Tiled((8, 8), (4, 4)).transform(data)  # shape becomes (2, 2, 4, 4)
+    """
     return TiledView(shape, tile_shape)
+
+
+def TiledPermute(shape, tile_shape):
+    """Tiled layout that physically permutes data into tile-contiguous order.
+
+    Unlike Tiled() which reshapes to higher rank (grid..., tile...),
+    TiledPermute keeps the same shape but reorders the underlying data
+    so that elements within each tile are contiguous in memory.
+
+    This is useful for cache-friendly access patterns in tiled algorithms.
+
+    Example:
+        layout = TiledPermute((8, 8), (4, 4))
+        result = layout.transform(data)   # shape stays (8, 8)
+        # Elements within each 4x4 tile are now contiguous in memory
+    """
+    if len(shape) != len(tile_shape):
+        raise ValueError("shape and tile_shape must have the same rank")
+    for i, (s, t) in enumerate(zip(shape, tile_shape)):
+        if t <= 0:
+            raise ValueError(
+                f"TiledPermute: tile size at dimension {i} must be > 0, got {t}"
+            )
+        if s % t != 0:
+            raise ValueError(
+                f"TiledPermute: dimension {i} (size {s}) not divisible by "
+                f"tile size {t}."
+            )
+    tile_grid = tuple(s // t for s, t in zip(shape, tile_shape))
+    tile_layout = OrderBy(Row(*shape)).TileBy(tile_grid, tile_shape)
+    return LegoLayout(tile_layout, shape)
 
 
 def Custom(layout_obj, shape):
