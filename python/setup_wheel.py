@@ -13,9 +13,17 @@ package_data = {}
 for top in ("mlir", "lego"):
     for root, dirs, files in os.walk(top):
         pkg = root.replace(os.sep, ".")
+        # Include shared libs, binaries (naga), and other non-Python files
         data = [f for f in files if not f.endswith((".py", ".pyc"))]
         if data:
             package_data[pkg] = data
+
+# Ensure bundled binaries (naga) in lego/bin/ are included
+bin_dir = os.path.join("lego", "bin")
+if os.path.isdir(bin_dir):
+    bins = os.listdir(bin_dir)
+    if bins:
+        package_data["lego.bin"] = bins
 
 setup(
     packages=packages,

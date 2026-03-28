@@ -45,6 +45,8 @@ add_mlir_dialect_library(MLIRLego
   SMTUtils.cpp
   # JIT
   LegoJITEngine.cpp
+  # SPIR-V backend
+  LegoSPIRVPipeline.cpp
 
   DEPENDS
   MLIRLegoDialectIncGen
@@ -71,6 +73,31 @@ add_mlir_dialect_library(MLIRLego
   MLIRTargetLLVMIRExport
   MLIRLLVMToLLVMIRTranslation
   MLIRBuiltinToLLVMIRTranslation
+  # GPU dialect (always available, not gated on NVPTX)
+  MLIRGPUDialect
+  MLIRGPUTransforms
+  # SPIR-V backend
+  MLIRSPIRVDialect
+  MLIRSPIRVConversion
+  MLIRSPIRVTransforms
+  MLIRSPIRVUtils
+  MLIRSPIRVSerialization
+  MLIRGPUToSPIRV
+  MLIRArithToSPIRV
+  MLIRFuncToSPIRV
+  MLIRSCFToSPIRV
+  MLIRMemRefToSPIRV
+  MLIRMathToSPIRV
+  MLIRIndexToSPIRV
+  # NVVM backend (CUDA, guarded by NVPTX target availability)
+  MLIRGPUToNVVMTransforms
+  MLIRNVVMDialect
+  MLIRNVVMTarget
+  MLIRNVVMToLLVM
+  MLIRNVVMToLLVMIRTranslation
+  MLIRGPUToLLVMIRTranslation
+  # Index to LLVM (needed for NVVM host lowering)
+  MLIRIndexToLLVM
 )
 
 add_subdirectory(CAPI)

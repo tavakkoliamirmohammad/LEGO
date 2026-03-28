@@ -26,7 +26,10 @@ std::unique_ptr<Pass> createLegoVerifyBankConflictsPass();
 std::unique_ptr<Pass> createLegoStrengthReductionPass();
 
 void registerLegoPipelines();
+void buildLegoLowerPipeline(OpPassManager &pm);
 void buildLegoToLLVMPipeline(OpPassManager &pm);
+void buildLegoToSPIRVPipeline(OpPassManager &pm);
+void buildLegoToNVVMPipeline(OpPassManager &pm);
 
 #define GEN_PASS_DECL_LEGOTOARITHPASS
 #define GEN_PASS_DECL_LEGONORMALIZATIONPASS

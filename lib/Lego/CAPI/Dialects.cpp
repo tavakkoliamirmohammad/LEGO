@@ -3,6 +3,14 @@
 // Implements the C API for registering the LEGO MLIR dialect, passes, and
 // LLVM translation interfaces.
 //
+// Pass registration strategy:
+//   - Individual LEGO passes: registered (users run them standalone)
+//   - Named pipelines: registered (lego-lower, lego-to-llvm, lego-to-spirv)
+//   - Utility passes (canonicalize, cse): registered (used standalone)
+//   - Arith int-range passes: registered (used in lego-lower fixed-point loop)
+//   - LLVM/SPIR-V/GPU conversion passes: NOT registered — only used internally
+//     by pipelines via createXxxPass(). No need for registry lookup.
+//
 //===----------------------------------------------------------------------===//
 
 #include "Lego/CAPI/Dialects.h"
@@ -13,13 +21,15 @@
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/Target/LLVM/NVVM/Target.h"
+#include "mlir/Target/LLVMIR/Dialect/NVVM/NVVMToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/GPU/GPUToLLVMIRTranslation.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 
 // LEGO dialect
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Lego, lego, mlir::lego::LegoDialect)
 
-// Standard dialects used by the LEGO compiler — register them here so they
-// are available via load_all_available_dialects() without pulling in the
-// heavyweight MLIRCAPIRegisterEverything (which drags in GPU, SparseTensor, etc.).
+// Standard dialects used by the LEGO compiler
 #include "mlir-c/Dialect/Arith.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir-c/Dialect/SCF.h"
@@ -31,17 +41,26 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Arith, arith, mlir::arith::ArithDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(SCF, scf, mlir::scf::SCFDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(MemRef, memref, mlir::memref::MemRefDialect)
 
+// GPU + SPIR-V dialects (needed for lego-to-spirv pipeline, no GPU hardware)
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(GPU, gpu, mlir::gpu::GPUDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(SPIRV, spirv, mlir::spirv::SPIRVDialect)
+
 void legoRegisterPasses() {
   static bool registered = false;
   if (registered)
     return;
   registered = true;
 
-  // Standard MLIR passes
+  // Standard MLIR utility passes (used standalone and in pipelines)
   mlir::registerCanonicalizerPass();
   mlir::registerCSEPass();
 
-  // Individual LEGO passes (from GEN_PASS_REGISTRATION in Passes.h.inc)
+  // Arith int-range passes (used standalone in lit tests and in lego-lower)
+  mlir::arith::registerArithPasses();
+
+  // Individual LEGO passes (users may run standalone)
   mlir::lego::registerLegoToArithPass();
   mlir::lego::registerLegoNormalizationPass();
   mlir::lego::registerLegoArithSimplificationPass();
@@ -50,12 +69,19 @@ void legoRegisterPasses() {
   mlir::lego::registerLegoVerifyBijectivityPass();
   mlir::lego::registerLegoVerifyCoalescingPass();
   mlir::lego::registerLegoVerifyBankConflictsPass();
+  mlir::lego::registerLegoStrengthReductionPass();
 
-  // Named pipelines: "lego-lower" and "lego-to-llvm"
+  // Named pipelines: "lego-lower", "lego-to-llvm", "lego-to-spirv"
+  // Internally these create LLVM/SPIR-V/GPU conversion passes via
+  // createXxxPass() — no registration needed for those.
   mlir::lego::registerLegoPipelines();
 }
 
 void legoRegisterLLVMTranslations(MlirContext context) {
   mlir::registerBuiltinDialectTranslation(*unwrap(context));
   mlir::registerLLVMDialectTranslation(*unwrap(context));
+
+  // Register NVVM/GPU translation interfaces for gpu-module-to-binary pass
+  mlir::registerNVVMDialectTranslation(*unwrap(context));
+  mlir::registerGPUDialectTranslation(*unwrap(context));
 }

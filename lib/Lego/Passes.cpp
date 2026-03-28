@@ -55,7 +55,7 @@ namespace mlir {
 namespace lego {
 
 /// Populates the standard lego-lower pipeline (LEGO → Arith).
-static void buildLegoLowerPipeline(OpPassManager &pm) {
+void buildLegoLowerPipeline(OpPassManager &pm) {
   pm.addPass(createLegoMaterializeAssumeBoundsPass());
   // Normalize Row/Col to RegP first so LegoToArith sees uniform ops.
   pm.addPass(createLegoNormalizationPass(/*skipTileBy=*/true));
@@ -106,6 +106,16 @@ void registerLegoPipelines() {
   PassPipelineRegistration<>("lego-to-llvm",
     "Full LEGO lowering to LLVM dialect (LEGO -> Arith -> LLVM)",
     buildLegoToLLVMPipeline);
+
+  PassPipelineRegistration<>("lego-to-spirv",
+    "Lower LEGO dialect through GPU to SPIR-V "
+    "(LEGO -> Arith -> GPU outlined -> SPIR-V)",
+    buildLegoToSPIRVPipeline);
+
+  PassPipelineRegistration<>("lego-to-nvvm",
+    "Lower LEGO dialect through GPU to NVVM/CUDA "
+    "(LEGO -> Arith -> GPU outlined -> NVVM -> PTX/cubin)",
+    buildLegoToNVVMPipeline);
 }
 
 } // namespace lego

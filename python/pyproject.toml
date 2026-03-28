@@ -14,7 +14,12 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: System :: Hardware",
 ]
+
+[project.optional-dependencies]
+spirv = []  # naga binary is bundled; no extra Python deps needed
 
 [tool.pytest.ini_options]
 filterwarnings = [
@@ -26,3 +31,6 @@ filterwarnings = [
 
 [tool.setuptools.packages.find]
 include = ["mlir", "mlir.*", "lego", "lego.*"]
+
+[tool.setuptools.package-data]
+"lego.bin" = ["*"]

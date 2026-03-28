@@ -2,6 +2,7 @@
 # Only list libs that lego-opt needs directly beyond what MLIRLego provides.
 set(LIBS
   MLIRLego
+  MLIRLegoCAPI
   MLIRParser
   MLIRPass
   MLIRSupport
@@ -13,10 +14,9 @@ set(LIBS
   MLIRMemRefDialect
   MLIRMathDialect
   MLIRArithTransforms
+  MLIRGPUDialect
+  MLIRSPIRVDialect
 )
-if(LEGO_HAS_NVPTX)
-  list(APPEND LIBS MLIRGPUDialect)
-endif()
 
 add_llvm_executable(lego-opt lego-opt.cpp)
 llvm_update_compile_flags(lego-opt)

@@ -12,3 +12,13 @@ third_party/**
 *.egg-info/
 python/lego/backend/dialects/_lego_ops_gen.py
 .cache
+
+# SPIR-V backend artifacts
+dist/
+*.spv
+*.wgsl
+*.metal
+*.comp
+python/examples/spirv_backends/output/
+python/lego/bin/naga
+python/lego/bin/naga.exe

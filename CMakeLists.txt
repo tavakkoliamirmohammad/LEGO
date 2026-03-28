@@ -121,14 +121,16 @@ else()
   list(APPEND MLIR_TABLEGEN_FLAGS -I${LLVM_INCLUDE_DIRS})
 endif()
 
-# --- GPU / NVPTX detection (works for both monolithic and decoupled) ---
-# In monolithic mode LLVM_TARGETS_TO_BUILD is set from LEGO_LLVM_TARGETS above.
-# In decoupled mode find_package(LLVM) exports LLVM_TARGETS_TO_BUILD.
+# --- GPU dialect (always available) ---
+add_definitions(-DLEGO_HAS_GPU)
+message(STATUS "GPU + SPIR-V dialect support enabled")
+
+# --- NVPTX detection (runners require NVPTX target + explicit opt-in) ---
 set(LEGO_HAS_NVPTX OFF)
 if("${LLVM_TARGETS_TO_BUILD}" MATCHES "NVPTX" AND LEGO_ENABLE_RUNNERS)
   set(LEGO_HAS_NVPTX ON)
   add_definitions(-DLEGO_HAS_NVPTX)
-  message(STATUS "NVPTX backend + runners enabled — enabling GPU dialect support")
+  message(STATUS "NVPTX backend + runners enabled — enabling CUDA runner support")
 endif()
 
 set(MLIR_TABLEGEN_EXE mlir-tblgen)
@@ -172,10 +174,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     DIALECT_NAME lego)
 
   # Build the nanobind extension for dialect registration
-  set(_lego_extension_capi_libs MLIRLegoCAPI)
-  if(LEGO_ENABLE_RUNNERS)
-    list(APPEND _lego_extension_capi_libs MLIRCAPIGPU)
-  endif()
+  set(_lego_extension_capi_libs MLIRLegoCAPI MLIRCAPIGPU MLIRCAPISPIRV)
   declare_mlir_python_extension(LegoPythonSources.Extension
     MODULE_NAME _legoDialects
     ADD_TO_PARENT LegoPythonSources
@@ -203,12 +202,11 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     LegoPythonSources
   )
 
-  # GPU dialect Python bindings (only when runners are enabled)
-  if(LEGO_ENABLE_RUNNERS)
-    list(APPEND _lego_python_sources
-      MLIRPythonSources.Dialects.gpu
-    )
-  endif()
+  # GPU dialect Python bindings (always available — needed for SPIR-V
+  # cross-compilation, does not require GPU hardware)
+  list(APPEND _lego_python_sources
+    MLIRPythonSources.Dialects.gpu
+  )
 
   # Create a unified CAPI shared library.  Embeds all EMBED_CAPI_LINK_LIBS
   # collected from the declared sources plus explicit per-dialect CAPI libs
