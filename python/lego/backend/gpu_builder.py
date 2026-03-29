@@ -1,9 +1,9 @@
 """
-Shared GPU kernel builder for all GPU backends (SPIR-V, CUDA, etc.).
+Shared GPU kernel builder for all GPU backends (SPIR-V, CUDA, ROCm, etc.).
 
 This is the single source of truth for generating GPU MLIR from LEGO layouts.
-Both the SPIR-V path and the CUDA path use this builder, then apply
-target-specific lowering.
+All backends use KernelBuilder to produce target-agnostic GPU MLIR, then
+apply target-specific lowering via registered GPUTarget descriptors.
 
 Supports:
   - Multiple buffers with different LEGO layouts
@@ -14,6 +14,21 @@ Supports:
   - User-defined kernel bodies via KernelContext
 
 No GPU hardware required for IR generation.
+
+Adding a new GPU backend
+========================
+1. Add a C++ pipeline (see LegoNVVMPipeline.cpp / LegoROCDLPipeline.cpp).
+2. Register it here::
+
+       GPUTarget(
+           name="xevm",
+           pipeline="lego-to-xevm",
+           default_chip="pvc",
+           default_format="assembly",
+       ).register()
+
+   That's it — ``builder.compile(target="xevm")`` and
+   ``lego.compile(..., target="xevm")`` will work automatically.
 """
 
 import os
@@ -69,6 +84,101 @@ class CompileResult:
     kernel_source: str = ""
     spv_path: str = ""
     metadata: Dict = field(default_factory=dict)
+
+
+# ============================================================================
+# GPU target registry — add new backends here
+# ============================================================================
+
+# Global registry: name → GPUTarget
+_GPU_TARGETS: Dict[str, "GPUTarget"] = {}
+
+
+@dataclass
+class GPUTarget:
+    """Describes a GPU compilation backend.
+
+    Each target maps to a named MLIR pass pipeline (e.g. ``lego-to-nvvm``)
+    that is registered on the C++ side.  The Python side only needs this
+    descriptor to drive compilation.
+
+    Attributes:
+        name:           User-facing target name (e.g. "cuda", "rocm").
+        pipeline:       MLIR pipeline name (e.g. "lego-to-nvvm").
+        default_chip:   Default chip/arch when the user doesn't specify one.
+        default_format: Default binary format ("fatbin", "assembly", …).
+        tmp_prefix:     Prefix for temp directories.
+    """
+    name: str
+    pipeline: str
+    default_chip: str
+    default_format: str
+    default_features: Optional[str] = None
+    tmp_prefix: str = "lego_gpu_"
+
+    def pipeline_string(self, chip: Optional[str] = None,
+                        format: Optional[str] = None,
+                        features: Optional[str] = None,
+                        opt_level: Optional[int] = None) -> str:
+        """Build the ``builtin.module(...)`` pipeline string."""
+        chip = chip or self.default_chip
+        fmt = format or self.default_format
+        features = features or self.default_features
+        opts = f"chip={chip} format={fmt}"
+        if features is not None:
+            opts += f" features={features}"
+        if opt_level is not None:
+            opts += f" opt-level={opt_level}"
+        return f"builtin.module({self.pipeline}{{{opts}}})"
+
+    def register(self):
+        """Add this target to the global registry."""
+        _GPU_TARGETS[self.name] = self
+        return self
+
+
+# --- Built-in targets ---------------------------------------------------
+
+def _detect_cuda_target():
+    """Auto-detect GPU compute capability → (chip, features).
+
+    Returns (sm_XX, +ptxYY) matching the host GPU, or safe defaults.
+    """
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            cap = r.stdout.strip().split("\n")[0].strip()
+            chip = "sm_" + cap.replace(".", "")
+            major = int(cap.split(".")[0])
+            ptx = {7: "+ptx70", 8: "+ptx78", 9: "+ptx80",
+                   10: "+ptx85", 11: "+ptx86", 12: "+ptx87"}.get(major, "+ptx78")
+            return chip, ptx
+    except Exception:
+        pass
+    return "sm_80", "+ptx78"
+
+
+_cuda_chip, _cuda_features = _detect_cuda_target()
+
+GPUTarget(
+    name="cuda",
+    pipeline="lego-to-nvvm",
+    default_chip=_cuda_chip,
+    default_format="fatbin",
+    default_features=_cuda_features,
+    tmp_prefix="lego_cuda_",
+).register()
+
+GPUTarget(
+    name="rocm",
+    pipeline="lego-to-rocdl",
+    default_chip="gfx900",
+    default_format="assembly",
+    tmp_prefix="lego_rocm_",
+).register()
 
 
 # ============================================================================
@@ -423,48 +533,59 @@ class KernelBuilder:
         ).result
 
     # ------------------------------------------------------------------
-    # Target-specific compilation
+    # Compilation
     # ------------------------------------------------------------------
 
     def compile(self, target: str = "webgpu", **kwargs) -> CompileResult:
         """Compile the kernel to the given target.
 
         Args:
-            target: "vulkan", "webgpu", "metal", "webgl", "cuda"
+            target: Any registered GPU target ("cuda", "rocm", …) or
+                    SPIR-V target ("vulkan", "webgpu", "metal", "webgl").
+            **kwargs: Forwarded to the backend (chip, format, output_dir, …).
         """
-        if target == "cuda":
-            return self._compile_cuda(**kwargs)
+        if target in _GPU_TARGETS:
+            return self._compile_gpu_target(_GPU_TARGETS[target], **kwargs)
         from lego.backend.spirv import compile_to_target
         return compile_to_target(self, target=target, **kwargs)
 
-    def _compile_cuda(self, output_dir=None, name=None, **kwargs) -> CompileResult:
-        """Compile to CUDA via lego-to-nvvm (includes PTX/cubin compilation)."""
+    def _compile_gpu_target(self, gpu_target: GPUTarget, output_dir=None,
+                            name=None, chip=None, format=None,
+                            **kwargs) -> CompileResult:
+        """Generic GPU compilation via a registered MLIR pipeline."""
         ctx, module = self.build_module()
         if name is None:
             name = self._name
 
+        pipeline_str = gpu_target.pipeline_string(
+            chip=chip, format=format, **kwargs)
         with ctx:
             try:
-                pm = PassManager.parse("builtin.module(lego-to-nvvm)")
+                pm = PassManager.parse(pipeline_str)
                 pm.run(module.operation)
             except Exception as e:
                 raise RuntimeError(
-                    f"CUDA compilation failed (lego-to-nvvm):\n{e}\n"
-                    f"Ensure LEGO was built with LEGO_ENABLE_RUNNERS=ON "
-                    f"and LLVM_TARGETS_TO_BUILD includes NVPTX."
+                    f"{gpu_target.name} compilation failed "
+                    f"({gpu_target.pipeline}):\n{e}"
                 ) from e
 
-        llvm_ir = str(module)
+        lowered_ir = str(module)
         if output_dir is None:
-            output_dir = tempfile.mkdtemp(prefix="lego_cuda_")
+            output_dir = tempfile.mkdtemp(prefix=gpu_target.tmp_prefix)
         os.makedirs(output_dir, exist_ok=True)
 
         out_path = os.path.join(output_dir, f"{name}.mlir")
-        Path(out_path).write_text(llvm_ir)
+        Path(out_path).write_text(lowered_ir)
 
         return CompileResult(
-            target="cuda", kernel_path=out_path, kernel_source=llvm_ir,
-            metadata={"pipeline": "lego-to-nvvm"},
+            target=gpu_target.name,
+            kernel_path=out_path,
+            kernel_source=lowered_ir,
+            metadata={
+                "pipeline": gpu_target.pipeline,
+                "chip": chip or gpu_target.default_chip,
+                "format": format or gpu_target.default_format,
+            },
         )
 
 

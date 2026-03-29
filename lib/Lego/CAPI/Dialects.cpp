@@ -5,7 +5,7 @@
 //
 // Pass registration strategy:
 //   - Individual LEGO passes: registered (users run them standalone)
-//   - Named pipelines: registered (lego-lower, lego-to-llvm, lego-to-spirv)
+//   - Named pipelines: registered (lego-lower, lego-to-llvm, lego-to-spirv, lego-to-nvvm, lego-to-rocdl)
 //   - Utility passes (canonicalize, cse): registered (used standalone)
 //   - Arith int-range passes: registered (used in lego-lower fixed-point loop)
 //   - LLVM/SPIR-V/GPU conversion passes: NOT registered — only used internally
@@ -21,8 +21,14 @@
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Transforms/Passes.h"
+#ifdef LEGO_HAS_NVPTX
 #include "mlir/Target/LLVM/NVVM/Target.h"
 #include "mlir/Target/LLVMIR/Dialect/NVVM/NVVMToLLVMIRTranslation.h"
+#endif
+#ifdef LEGO_HAS_AMDGPU
+#include "mlir/Target/LLVM/ROCDL/Target.h"
+#include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
+#endif
 #include "mlir/Target/LLVMIR/Dialect/GPU/GPUToLLVMIRTranslation.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 
@@ -81,7 +87,11 @@ void legoRegisterLLVMTranslations(MlirContext context) {
   mlir::registerBuiltinDialectTranslation(*unwrap(context));
   mlir::registerLLVMDialectTranslation(*unwrap(context));
 
-  // Register NVVM/GPU translation interfaces for gpu-module-to-binary pass
+#ifdef LEGO_HAS_NVPTX
   mlir::registerNVVMDialectTranslation(*unwrap(context));
+#endif
+#ifdef LEGO_HAS_AMDGPU
+  mlir::registerROCDLDialectTranslation(*unwrap(context));
+#endif
   mlir::registerGPUDialectTranslation(*unwrap(context));
 }

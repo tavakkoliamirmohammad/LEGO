@@ -25,6 +25,32 @@ find_program(Z3_BIN_PATH NAMES z3 HINTS "${PYTHON_BIN_DIR}" REQUIRED)
 message(STATUS "Using Z3: ${Z3_BIN_PATH}")
 add_definitions(-DLEGO_Z3_EXECUTABLE="${Z3_BIN_PATH}")
 
+# --- GPU backend sources (conditional on LLVM targets) ---
+set(_GPU_BACKEND_SOURCES LegoSPIRVPipeline.cpp)
+set(_GPU_BACKEND_LIBS)
+
+if(LEGO_HAS_NVPTX)
+  list(APPEND _GPU_BACKEND_SOURCES LegoNVVMPipeline.cpp)
+  list(APPEND _GPU_BACKEND_LIBS
+    MLIRGPUToNVVMTransforms
+    MLIRNVVMDialect
+    MLIRNVVMTarget
+    MLIRNVVMToLLVM
+    MLIRNVVMToLLVMIRTranslation
+    MLIRGPUToLLVMIRTranslation
+  )
+endif()
+
+if(LEGO_HAS_AMDGPU)
+  list(APPEND _GPU_BACKEND_SOURCES LegoROCDLPipeline.cpp)
+  list(APPEND _GPU_BACKEND_LIBS
+    MLIRGPUToROCDLTransforms
+    MLIRROCDLDialect
+    MLIRROCDLTarget
+    MLIRROCDLToLLVMIRTranslation
+  )
+endif()
+
 # --- Core dialect library ---
 add_mlir_dialect_library(MLIRLego
   # Dialect core
@@ -45,9 +71,8 @@ add_mlir_dialect_library(MLIRLego
   SMTUtils.cpp
   # JIT
   LegoJITEngine.cpp
-  # GPU backends
-  LegoSPIRVPipeline.cpp
-  LegoNVVMPipeline.cpp
+  # GPU backends (conditional)
+  ${_GPU_BACKEND_SOURCES}
 
   DEPENDS
   MLIRLegoDialectIncGen
@@ -74,10 +99,10 @@ add_mlir_dialect_library(MLIRLego
   MLIRTargetLLVMIRExport
   MLIRLLVMToLLVMIRTranslation
   MLIRBuiltinToLLVMIRTranslation
-  # GPU dialect (always available, not gated on NVPTX)
+  # GPU dialect (always available)
   MLIRGPUDialect
   MLIRGPUTransforms
-  # SPIR-V backend
+  # SPIR-V backend (always available)
   MLIRSPIRVDialect
   MLIRSPIRVConversion
   MLIRSPIRVTransforms
@@ -90,14 +115,9 @@ add_mlir_dialect_library(MLIRLego
   MLIRMemRefToSPIRV
   MLIRMathToSPIRV
   MLIRIndexToSPIRV
-  # NVVM backend (CUDA, guarded by NVPTX target availability)
-  MLIRGPUToNVVMTransforms
-  MLIRNVVMDialect
-  MLIRNVVMTarget
-  MLIRNVVMToLLVM
-  MLIRNVVMToLLVMIRTranslation
-  MLIRGPUToLLVMIRTranslation
-  # Index to LLVM (needed for NVVM host lowering)
+  # GPU backends (conditional on LLVM targets)
+  ${_GPU_BACKEND_LIBS}
+  # Index to LLVM (needed for GPU host lowering)
   MLIRIndexToLLVM
 )
 

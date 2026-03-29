@@ -18,9 +18,10 @@ from .frontends import rust_gen, fortran_gen, cxx_gen
 from .frontends import julia_gen, cuda_c_gen, js_gen, glsl_gen
 from .autotune import autotune
 
-# Unified compile API — dispatches to CPU JIT or GPU SPIR-V based on target
+# Unified compile API — dispatches to CPU JIT, GPU pipeline, or SPIR-V
 from .backend.gpu_builder import (
     KernelBuilder, LayoutBuffer, CompileResult,
+    GPUTarget, _GPU_TARGETS,
 )
 from .backend.spirv import (
     compile_to_target as _compile_gpu,
@@ -30,7 +31,10 @@ from .backend.spirv import (
 from .backend.compiler import DType, get_compiler as _get_cpu_compiler
 
 _SPIRV_TARGETS = {"vulkan", "webgpu", "metal", "webgl"}
-_ALL_TARGETS = {"cpu", "cuda"} | _SPIRV_TARGETS
+
+
+def _all_targets():
+    return {"cpu"} | set(_GPU_TARGETS) | _SPIRV_TARGETS
 
 
 def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
@@ -39,9 +43,10 @@ def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
     Args:
         layout_or_builder: LEGO layout object, KernelBuilder, or GPUIRBuilder.
         shape: Tensor shape (required for layout input).
-        target: "cpu", "cuda", "vulkan", "webgpu", "metal", "webgl".
+        target: Any registered target — "cpu", "cuda", "rocm",
+                "vulkan", "webgpu", "metal", "webgl", or custom.
         dtype: Element type.
-        **kwargs: Passed to the target compiler (workgroup_size, output_dir, etc.)
+        **kwargs: Forwarded to the backend (chip, format, output_dir, …).
 
     Returns:
         For CPU: LayoutCompiler (use .transform_numpy(arr) to execute).
@@ -49,19 +54,19 @@ def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
     """
     if target == "cpu":
         return _get_cpu_compiler(layout_or_builder, shape, dtype)
-    if target == "cuda":
-        # CUDA goes through the shared KernelBuilder → lego-to-llvm
+    if target in _GPU_TARGETS:
         if isinstance(layout_or_builder, KernelBuilder):
-            return layout_or_builder.compile(target="cuda", **kwargs)
+            return layout_or_builder.compile(target=target, **kwargs)
         from lego.backend.gpu_builder import make_permutation_kernel
         builder = make_permutation_kernel(layout_or_builder, shape, dtype,
                                           kwargs.pop("workgroup_size", 64))
-        return builder.compile(target="cuda", **kwargs)
+        return builder.compile(target=target, **kwargs)
     if target in _SPIRV_TARGETS:
         return _compile_gpu(layout_or_builder, shape=shape, target=target,
                             dtype=dtype, **kwargs)
     raise ValueError(
-        f"Unknown target '{target}'. Supported: {', '.join(sorted(_ALL_TARGETS))}"
+        f"Unknown target '{target}'. "
+        f"Supported: {', '.join(sorted(_all_targets()))}"
     )
 
 
