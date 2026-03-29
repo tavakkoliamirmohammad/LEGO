@@ -27,7 +27,7 @@ from .backend.spirv import (
     compile_to_spirv as _compile_spirv,
     compile_all as compile_all,
 )
-from .backend.compiler import get_compiler as _get_cpu_compiler
+from .backend.compiler import DType, get_compiler as _get_cpu_compiler
 
 _SPIRV_TARGETS = {"vulkan", "webgpu", "metal", "webgl"}
 _ALL_TARGETS = {"cpu", "cuda"} | _SPIRV_TARGETS

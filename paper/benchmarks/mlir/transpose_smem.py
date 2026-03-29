@@ -5,6 +5,7 @@ WebGPU not available for this kernel due to shared memory limitation.
 """
 import sys
 from lego.core import OrderBy, Row, Col
+from lego.backend.compiler import DType
 from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer
 
 if len(sys.argv) != 3:
@@ -35,9 +36,9 @@ B_layout = OrderBy(Row(N, N)).TileBy(
 # --- Shared memory layout (initial — will be swapped between phases) ---
 smem_layout = OrderBy(Row(TILE_DIM, TILE_DIM)).TileBy([TILE_DIM, TILE_DIM])
 
-A = LayoutBuffer(A_layout, shape=(N, N), dtype="f32")
-B = LayoutBuffer(B_layout, shape=(N, N), dtype="f32")
-Smem = LayoutBuffer(smem_layout, shape=(TILE_DIM, TILE_DIM), dtype="f32", shared=True)
+A = LayoutBuffer(A_layout, shape=(N, N), dtype=DType.f32)
+B = LayoutBuffer(B_layout, shape=(N, N), dtype=DType.f32)
+Smem = LayoutBuffer(smem_layout, shape=(TILE_DIM, TILE_DIM), dtype=DType.f32, shared=True)
 
 
 def transpose_smem_kernel(ctx):

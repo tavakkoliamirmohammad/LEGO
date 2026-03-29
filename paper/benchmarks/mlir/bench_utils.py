@@ -17,12 +17,12 @@ def verify_layouts(layouts, N):
 
     Returns True if all layouts are bijective.
     """
-    from lego.backend.compiler import LayoutCompiler
+    from lego.backend.compiler import DType, LayoutCompiler
 
     all_ok = True
     parts = []
     for name, layout in layouts.items():
-        compiler = LayoutCompiler(layout, (N, N), "f32")
+        compiler = LayoutCompiler(layout, (N, N), DType.f32)
         fwd, inv = compiler.get_permutation_table()
         ok = len(np.unique(fwd)) == N * N and np.all(inv[fwd] == np.arange(N * N))
         parts.append(f"{name} bijective={ok}")
@@ -35,28 +35,25 @@ def verify_layouts(layouts, N):
     return all_ok
 
 
-def find_lego_opt():
-    """Locate the lego-opt binary."""
-    build_dir = os.environ.get("LEGO_BUILD_DIR", "")
-    lego_opt = os.path.join(build_dir, "tools/lego-opt/lego-opt") if build_dir else "lego-opt"
-    for candidate in [lego_opt,
-                      os.path.join(os.path.dirname(__file__),
-                                   "../../../build/tools/lego-opt/lego-opt")]:
-        if os.path.isfile(candidate):
-            return candidate
-    return lego_opt
-
-
 def find_mlir_runner():
     """Locate mlir-runner and its shared libs directory.
 
+    Set MLIR_BUILD_DIR to the LLVM/MLIR build directory containing
+    bin/mlir-runner and lib/libmlir_*_runtime.so, e.g.:
+        export MLIR_BUILD_DIR=/path/to/llvm-project/build
+
     Returns (mlir_runner_path, libs_dir) or (None, None) if not found.
     """
-    parent_build = os.environ.get("LEGO_PARENT_BUILD",
-                                  "/scratch/general/vast/u1419116/LEGO/build")
-    mlir_runner = os.path.join(parent_build, "llvm-build/bin/mlir-runner")
-    libs_dir = os.path.join(parent_build, "llvm-build/lib")
+    build_dir = os.environ.get("MLIR_BUILD_DIR")
+    if not build_dir:
+        print("  CUDA execution: SKIP (set MLIR_BUILD_DIR to your LLVM build dir)",
+              file=sys.stderr)
+        return None, None
+    mlir_runner = os.path.join(build_dir, "bin/mlir-runner")
+    libs_dir = os.path.join(build_dir, "lib")
     if not os.path.isfile(mlir_runner):
+        print(f"  CUDA execution: SKIP (mlir-runner not found in {build_dir}/bin)",
+              file=sys.stderr)
         return None, None
     return mlir_runner, libs_dir
 
@@ -171,13 +168,9 @@ def run_transpose_benchmark(builder, layouts, N, targets, extra_verify=None):
 def run_cuda_verify(builder, expected, label=None):
     """Run the builder's generated kernel on GPU and verify against expected output.
 
-    Builds the actual LEGO kernel (not a handwritten template), injects a @main
-    wrapper, lowers through lego-to-nvvm, and executes via mlir-runner.
-
-    Args:
-        builder: KernelBuilder instance
-        expected: numpy array of expected flat output values for the last global buffer
-        label: display label (e.g., "32x32")
+    Builds the actual LEGO kernel, injects a @main wrapper, lowers through
+    lego-to-nvvm via the Python PassManager API (no lego-opt binary needed),
+    and executes via mlir-runner.
 
     Returns True/False/None (None = skipped).
     """
@@ -186,35 +179,44 @@ def run_cuda_verify(builder, expected, label=None):
         print("  CUDA execution: SKIP (mlir-runner not found)", file=sys.stderr)
         return None
 
-    lego_opt = find_lego_opt()
+    from mlir.ir import Context, Location, Module
+    from mlir.passmanager import PassManager
+    from lego.backend.dialects.lego_dialect import register as register_lego
 
-    # Build the actual kernel module
-    ctx, module = builder.build_module()
-    with ctx:
-        mlir_str = str(module)
+    # Build the kernel module and get MLIR text
+    build_ctx, build_mod = builder.build_module()
+    with build_ctx:
+        mlir_str = str(build_mod)
 
     # Inject @main wrapper before the closing }
     main_code = _make_main_wrapper(builder)
     idx = mlir_str.rstrip().rfind("}")
     mlir_src = mlir_str[:idx] + main_code + "\n}\n"
 
+    # Lower via Python PassManager (replaces lego-opt subprocess)
+    ctx = Context()
+    register_lego(ctx)
+    ctx.load_all_available_dialects()
+    try:
+        with ctx, Location.unknown():
+            module = Module.parse(mlir_src)
+            pm = PassManager.parse("builtin.module(lego-to-nvvm)")
+            pm.run(module.operation)
+        lowered_ir = str(module)
+    except Exception as e:
+        print(f"  CUDA execution: FAIL (lego-to-nvvm: {e})", file=sys.stderr)
+        return False
+
+    # Write lowered IR and run mlir-runner
     with tempfile.NamedTemporaryFile(suffix=".mlir", mode="w", delete=False) as f:
-        f.write(mlir_src)
-        src_path = f.name
+        f.write(lowered_ir)
+        lowered_path = f.name
 
     try:
-        lowered = src_path + ".lowered"
-        r = subprocess.run([lego_opt, src_path, "--lego-to-nvvm", "-o", lowered],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            print(f"  CUDA execution: FAIL (lego-to-nvvm: {r.stderr[:200]})",
-                  file=sys.stderr)
-            return False
-
         env = dict(os.environ,
                    LD_LIBRARY_PATH=libs_dir + ":" + os.environ.get("LD_LIBRARY_PATH", ""))
         r = subprocess.run(
-            [mlir_runner, lowered,
+            [mlir_runner, lowered_path,
              f"--shared-libs={libs_dir}/libmlir_cuda_runtime.so,"
              f"{libs_dir}/libmlir_c_runner_utils.so,"
              f"{libs_dir}/libmlir_runner_utils.so",
@@ -239,9 +241,7 @@ def run_cuda_verify(builder, expected, label=None):
         print(f"  CUDA execution: FAIL ({e})", file=sys.stderr)
         return False
     finally:
-        os.unlink(src_path)
-        if os.path.exists(lowered):
-            os.unlink(lowered)
+        os.unlink(lowered_path)
 
 
 def _init_data(n):

@@ -40,7 +40,7 @@ from lego.backend._ops import (
     _emit_row, _emit_col, _emit_order_by, _emit_group_by,
 )
 from lego.backend.compiler import (
-    _dtype_to_mlir, _get_mlir_element_type, _get_layout_dims,
+    DType, _dtype_to_mlir, _get_mlir_element_type, _get_layout_dims,
 )
 from lego.backend.symbolic import emit_layout_from_python, _resolve_dim
 
@@ -82,12 +82,12 @@ class LayoutBuffer:
     Args:
         layout: LEGO layout object (Row, Col, TileBy, GroupBy, etc.)
         shape:  Tensor shape tuple
-        dtype:  Element type string ("f32", "i32", etc.)
+        dtype:  Element type (DType.f32, DType.i32, or string "f32", "i32", etc.)
         shared: If True, this buffer is in workgroup (shared) memory.
     """
     layout: object
     shape: Tuple[int, ...]
-    dtype: str = "f32"
+    dtype: Union[DType, str] = DType.f32
     shared: bool = False
 
     @property

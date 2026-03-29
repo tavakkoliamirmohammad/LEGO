@@ -5,6 +5,7 @@ and WebGPU (wgpu/Vulkan).
 """
 import sys
 from lego.core import OrderBy, Row, Col
+from lego.backend.compiler import DType
 from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer
 
 if len(sys.argv) != 3:
@@ -32,8 +33,8 @@ B_layout = OrderBy(Row(N, N)).TileBy(
     [TILE_DIM // BRY, TILE_DIM // BRX],
     [BRY, BRX])
 
-A = LayoutBuffer(A_layout, shape=(N, N), dtype="f32")
-B = LayoutBuffer(B_layout, shape=(N, N), dtype="f32")
+A = LayoutBuffer(A_layout, shape=(N, N), dtype=DType.f32)
+B = LayoutBuffer(B_layout, shape=(N, N), dtype=DType.f32)
 
 
 def transpose_kernel(ctx):
