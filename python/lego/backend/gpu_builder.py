@@ -102,6 +102,25 @@ class LayoutBuffer:
 # Kernel context — passed to user kernel body functions
 # ============================================================================
 
+class _DimAccessor:
+    """Attribute-style access to GPU dimension ops: accessor.x, .y, .z."""
+
+    def __init__(self, op):
+        self._op = op
+
+    @property
+    def x(self):
+        return self._op(gpu_dialect.Dimension.x)
+
+    @property
+    def y(self):
+        return self._op(gpu_dialect.Dimension.y)
+
+    @property
+    def z(self):
+        return self._op(gpu_dialect.Dimension.z)
+
+
 class KernelContext:
     """Context object passed to user kernel body functions.
 
@@ -121,19 +140,19 @@ class KernelContext:
         # Cached layout IR values per buffer
         self._layout_cache = {}
 
-    # --- GPU thread/block IDs ---
+    # --- GPU thread/block IDs (use as ctx.block_id.x, ctx.thread_id.y, etc.) ---
 
-    def block_id(self, dim="x"):
-        d = {"x": gpu_dialect.Dimension.x, "y": gpu_dialect.Dimension.y, "z": gpu_dialect.Dimension.z}[dim]
-        return gpu_dialect.block_id(d)
+    @property
+    def block_id(self):
+        return _DimAccessor(gpu_dialect.block_id)
 
-    def thread_id(self, dim="x"):
-        d = {"x": gpu_dialect.Dimension.x, "y": gpu_dialect.Dimension.y, "z": gpu_dialect.Dimension.z}[dim]
-        return gpu_dialect.thread_id(d)
+    @property
+    def thread_id(self):
+        return _DimAccessor(gpu_dialect.thread_id)
 
-    def block_dim(self, dim="x"):
-        d = {"x": gpu_dialect.Dimension.x, "y": gpu_dialect.Dimension.y, "z": gpu_dialect.Dimension.z}[dim]
-        return gpu_dialect.block_dim(d)
+    @property
+    def block_dim(self):
+        return _DimAccessor(gpu_dialect.block_dim)
 
     # --- Layout index computation ---
 
@@ -396,9 +415,9 @@ class KernelBuilder:
     @staticmethod
     def global_id_1d(ctx):
         """Compute 1D global thread ID = block_id_x * block_dim_x + thread_id_x."""
-        bid = ctx.block_id("x")
-        bdim = ctx.block_dim("x")
-        tid = ctx.thread_id("x")
+        bid = ctx.block_id.x
+        bdim = ctx.block_dim.x
+        tid = ctx.thread_id.x
         return arith_dialect.AddIOp(
             arith_dialect.MulIOp(bid, bdim).result, tid
         ).result

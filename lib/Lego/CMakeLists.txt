@@ -45,8 +45,9 @@ add_mlir_dialect_library(MLIRLego
   SMTUtils.cpp
   # JIT
   LegoJITEngine.cpp
-  # SPIR-V backend
+  # GPU backends
   LegoSPIRVPipeline.cpp
+  LegoNVVMPipeline.cpp
 
   DEPENDS
   MLIRLegoDialectIncGen

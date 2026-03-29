@@ -107,12 +107,12 @@ void registerLegoPipelines() {
     "Full LEGO lowering to LLVM dialect (LEGO -> Arith -> LLVM)",
     buildLegoToLLVMPipeline);
 
-  PassPipelineRegistration<>("lego-to-spirv",
+  PassPipelineRegistration<LegoToSPIRVPipelineOptions>("lego-to-spirv",
     "Lower LEGO dialect through GPU to SPIR-V "
     "(LEGO -> Arith -> GPU outlined -> SPIR-V)",
     buildLegoToSPIRVPipeline);
 
-  PassPipelineRegistration<>("lego-to-nvvm",
+  PassPipelineRegistration<LegoToNVVMPipelineOptions>("lego-to-nvvm",
     "Lower LEGO dialect through GPU to NVVM/CUDA "
     "(LEGO -> Arith -> GPU outlined -> NVVM -> PTX/cubin)",
     buildLegoToNVVMPipeline);
