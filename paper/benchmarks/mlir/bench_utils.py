@@ -35,6 +35,28 @@ def verify_layouts(layouts, N):
     return all_ok
 
 
+def detect_nvvm_target():
+    """Detect GPU compute capability and return (chip, features) for lego-to-nvvm.
+
+    Falls back to sm_80 / +ptx78 which works with CUDA 12+ and most modern GPUs.
+    """
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            # e.g. "8.6" → "sm_86"
+            cap = r.stdout.strip().split("\n")[0].strip()
+            chip = "sm_" + cap.replace(".", "")
+            # Pick a PTX version that matches the arch generation
+            major = int(cap.split(".")[0])
+            ptx = {7: "+ptx70", 8: "+ptx78", 9: "+ptx80"}.get(major, "+ptx78")
+            return chip, ptx
+    except Exception:
+        pass
+    return "sm_80", "+ptx78"
+
+
 def find_mlir_runner():
     """Locate mlir-runner and its shared libs directory.
 
@@ -145,9 +167,14 @@ def run_transpose_benchmark(builder, layouts, N, targets, extra_verify=None):
     print(module)
 
     # Compile to GPU backends
+    chip, features = detect_nvvm_target()
     for target in targets:
         try:
-            result = builder.compile(target=target, name=f"{builder._name}_{target}")
+            kwargs = {"name": f"{builder._name}_{target}"}
+            if target == "cuda":
+                kwargs["chip"] = chip
+                kwargs["features"] = features
+            result = builder.compile(target=target, **kwargs)
             print(f"\n--- {target}: {result.kernel_path} ---", file=sys.stderr)
         except Exception as e:
             print(f"\n--- {target}: FAILED ({e}) ---", file=sys.stderr)
@@ -200,7 +227,10 @@ def run_cuda_verify(builder, expected, label=None):
     try:
         with ctx, Location.unknown():
             module = Module.parse(mlir_src)
-            pm = PassManager.parse("builtin.module(lego-to-nvvm)")
+            chip, features = detect_nvvm_target()
+            pm = PassManager.parse(
+                f"builtin.module(lego-to-nvvm{{chip={chip} features={features}}})"
+            )
             pm.run(module.operation)
         lowered_ir = str(module)
     except Exception as e:

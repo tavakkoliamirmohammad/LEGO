@@ -126,10 +126,30 @@ def _numba_vecadd_kernel(x, y, z, N):
         z[idx] = x[idx] + y[idx]
 
 
+def _numba_cuda_compatible():
+    """Check if Numba CUDA can compile and run on the current driver."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        @cuda.jit
+        def _probe(x):
+            pass
+        x = np.zeros(1, dtype=np.float32)
+        _probe[1, 1](x)
+        return True
+    except Exception:
+        return False
+
+_skip_numba_gpu = pytest.mark.skipif(
+    not _numba_cuda_compatible(),
+    reason="Numba CUDA not compatible with current driver/toolkit",
+)
+
+
 class TestNumbaCUDAVecadd:
     """Full GPU test: LEGO-rewritten Numba CUDA vecadd vs PyTorch."""
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+    @_skip_numba_gpu
     def test_vecadd_matches_pytorch(self):
         N = 2**16
         x_torch = torch.randn(N)
@@ -149,7 +169,7 @@ class TestNumbaCUDAVecadd:
 
         assert np.allclose(z_np, expected, atol=1e-5)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+    @_skip_numba_gpu
     def test_vecadd_multiple_sizes(self):
         for N in [128, 1024, 8192, 2**16]:
             x_np = np.random.randn(N).astype(np.float32)
@@ -370,9 +390,27 @@ class TestCutileMatmulSwizzleSource:
 
 # ── cuTile GPU execution tests ─────────────────────────────────────────
 
+def _cuda_toolkit_version():
+    """Return the CUDA toolkit major version from nvcc, or 0 if unavailable."""
+    import subprocess, re
+    try:
+        r = subprocess.run(["nvcc", "--version"], capture_output=True, text=True, timeout=5)
+        m = re.search(r"release (\d+)\.", r.stdout)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return 0
+
+def _cuda_version_at_least(major):
+    """Check if the CUDA toolkit on PATH is >= major and a GPU is available."""
+    if not torch.cuda.is_available():
+        return False
+    return _cuda_toolkit_version() >= major
+
 _skip_cutile_gpu = pytest.mark.skipif(
-    not (_has_cutile and torch.cuda.is_available()),
-    reason="cuda.tile and CUDA GPU required",
+    not (_has_cutile and _cuda_version_at_least(13)),
+    reason="cuda.tile requires CUDA >= 13 and a GPU",
 )
 
 

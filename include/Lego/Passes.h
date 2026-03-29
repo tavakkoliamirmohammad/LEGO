@@ -39,6 +39,7 @@ struct LegoToSPIRVPipelineOptions
       llvm::cl::init("vulkan")};
 };
 
+#ifdef LEGO_HAS_NVPTX
 /// Options for the lego-to-nvvm pipeline.
 struct LegoToNVVMPipelineOptions
     : public PassPipelineOptions<LegoToNVVMPipelineOptions> {
@@ -59,14 +60,64 @@ struct LegoToNVVMPipelineOptions
       llvm::cl::desc("Output format: fatbin, assembly, or binary"),
       llvm::cl::init("fatbin")};
 };
+#endif
+
+#ifdef LEGO_HAS_AMDGPU
+/// Options for the lego-to-rocdl pipeline.
+struct LegoToROCDLPipelineOptions
+    : public PassPipelineOptions<LegoToROCDLPipelineOptions> {
+  PassOptions::Option<std::string> chip{
+      *this, "chip",
+      llvm::cl::desc("AMD GPU chip (e.g., gfx900, gfx90a, gfx1100)"),
+      llvm::cl::init("gfx900")};
+  PassOptions::Option<std::string> features{
+      *this, "features",
+      llvm::cl::desc("AMDGPU feature string"),
+      llvm::cl::init("")};
+  PassOptions::Option<int> optLevel{
+      *this, "opt-level",
+      llvm::cl::desc("ROCDL optimization level (0-3)"),
+      llvm::cl::init(2)};
+  PassOptions::Option<std::string> format{
+      *this, "format",
+      llvm::cl::desc("Output format: fatbin, assembly, or binary"),
+      llvm::cl::init("fatbin")};
+};
+#endif
 
 void registerLegoPipelines();
 void buildLegoLowerPipeline(OpPassManager &pm);
 void buildLegoToLLVMPipeline(OpPassManager &pm);
 void buildLegoToSPIRVPipeline(OpPassManager &pm,
                                const LegoToSPIRVPipelineOptions &options);
+#ifdef LEGO_HAS_NVPTX
 void buildLegoToNVVMPipeline(OpPassManager &pm,
                               const LegoToNVVMPipelineOptions &options);
+#endif
+#ifdef LEGO_HAS_AMDGPU
+void buildLegoToROCDLPipeline(OpPassManager &pm,
+                               const LegoToROCDLPipelineOptions &options);
+#endif
+
+// =========================================================================
+// Shared GPU pipeline building blocks.
+//
+// Every GPU backend (NVVM, ROCDL, future XeVM, …) follows the same
+// three-phase pattern:
+//
+//   1. buildLegoGPUOutlinePipeline    — LEGO lower → canonicalize → outline
+//   2. <backend-specific passes>      — set target attr + GPU→dialect
+//   3. buildGPUToLLVMAndBinaryPipeline — host LLVM lowering → binary
+//
+// Adding a new backend only requires writing phase 2 (a SetTargetPass +
+// one createConvertGpuOpsTo*() call) and registering the pipeline.
+// =========================================================================
+
+/// Phase 1: LEGO lower + canonicalize/CSE + GPU kernel outlining.
+void buildLegoGPUOutlinePipeline(OpPassManager &pm);
+
+/// Phase 3: host-side LLVM lowering + gpu-module-to-binary compilation.
+void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format);
 
 #define GEN_PASS_DECL_LEGOTOARITHPASS
 #define GEN_PASS_DECL_LEGONORMALIZATIONPASS

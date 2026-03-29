@@ -39,8 +39,8 @@ if(TARGET LegoPythonModules)
   list(APPEND LEGO_TEST_DEPENDS LegoPythonModules)
 endif()
 
-# CUDA runner tools (only needed when runners are enabled)
-if(LEGO_ENABLE_RUNNERS)
+# CUDA runner tools (only needed when runners are enabled in monolithic build)
+if(LEGO_ENABLE_RUNNERS AND LEGO_MONOLITHIC_LLVM)
   list(APPEND LEGO_TEST_DEPENDS mlir-opt mlir_cuda_runtime mlir_c_runner_utils mlir-runner)
 endif()
 

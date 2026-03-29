@@ -3,6 +3,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/IR/OperationSupport.h"
 
 using namespace mlir;
@@ -98,6 +99,38 @@ void buildLegoToLLVMPipeline(OpPassManager &pm) {
   pm.addPass(createCSEPass());
 }
 
+void buildLegoGPUOutlinePipeline(OpPassManager &pm) {
+  buildLegoLowerPipeline(pm);
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+  pm.addPass(createGpuKernelOutliningPass());
+}
+
+void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format) {
+  // Lower arith/scf/cf/index/func everywhere (host + kernel).
+  pm.addPass(createSCFToControlFlowPass());
+  pm.addPass(createConvertIndexToLLVMPass());
+  pm.addPass(createArithToLLVMConversionPass());
+  pm.addPass(createConvertControlFlowToLLVMPass());
+  pm.addPass(createConvertFuncToLLVMPass());
+
+  // gpu-to-llvm converts host GPU runtime ops AND finishes memref type
+  // conversion.  Must run while memref types still exist.
+  pm.addPass(createGpuToLLVMConversionPass());
+
+  // Finalize memref (converts remaining memref ops to LLVM).
+  pm.addPass(createFinalizeMemRefToLLVMConversionPass());
+  pm.addPass(createReconcileUnrealizedCastsPass());
+
+  // Compile gpu.module → binary (kernel is fully LLVM now).
+  GpuModuleToBinaryPassOptions binOpts;
+  binOpts.compilationTarget = std::string(format);
+  pm.addPass(createGpuModuleToBinaryPass(binOpts));
+
+  // Clean up any remaining casts.
+  pm.addPass(createReconcileUnrealizedCastsPass());
+}
+
 void registerLegoPipelines() {
   PassPipelineRegistration<>("lego-lower",
     "Lego e2e lowering pipeline (LEGO -> Arith)",
@@ -112,10 +145,19 @@ void registerLegoPipelines() {
     "(LEGO -> Arith -> GPU outlined -> SPIR-V)",
     buildLegoToSPIRVPipeline);
 
+#ifdef LEGO_HAS_NVPTX
   PassPipelineRegistration<LegoToNVVMPipelineOptions>("lego-to-nvvm",
     "Lower LEGO dialect through GPU to NVVM/CUDA "
     "(LEGO -> Arith -> GPU outlined -> NVVM -> PTX/cubin)",
     buildLegoToNVVMPipeline);
+#endif
+
+#ifdef LEGO_HAS_AMDGPU
+  PassPipelineRegistration<LegoToROCDLPipelineOptions>("lego-to-rocdl",
+    "Lower LEGO dialect through GPU to ROCDL/AMD "
+    "(LEGO -> Arith -> GPU outlined -> ROCDL -> HSACO)",
+    buildLegoToROCDLPipeline);
+#endif
 }
 
 } // namespace lego

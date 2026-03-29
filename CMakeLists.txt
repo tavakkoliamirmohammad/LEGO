@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(LEGO_MONOLITHIC_LLVM "Build LLVM/MLIR as part of the project" OFF)
 option(LEGO_ENABLE_CCACHE "Enable ccache for faster recompilation" ON)
 option(LEGO_BUILD_TESTS "Build LEGO tests" ON)
-set(LEGO_LLVM_TARGETS "X86;NVPTX" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AArch64)")
+set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;AArch64)")
 
 # --- Python & Venv Support ---
 # Prioritize the local virtual environment
@@ -66,10 +66,10 @@ if(LEGO_MONOLITHIC_LLVM)
   set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
   set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
 
-  option(LEGO_ENABLE_RUNNERS "Enable MLIR execution engine runners (CUDA, ROCm, etc.)" OFF)
+  # LEGO_ENABLE_RUNNERS is auto-detected below; if the user sets it
+  # explicitly we honour that and forward to the MLIR CUDA runner.
   if(LEGO_ENABLE_RUNNERS)
     set(MLIR_ENABLE_CUDA_RUNNER ON CACHE BOOL "" FORCE)
-    message(STATUS "LEGO_ENABLE_RUNNERS=ON — enabling MLIR runners")
   endif()
 
   # Minimal LLVM/MLIR build: disable components LEGO does not need
@@ -125,12 +125,73 @@ endif()
 add_definitions(-DLEGO_HAS_GPU)
 message(STATUS "GPU + SPIR-V dialect support enabled")
 
-# --- NVPTX detection (runners require NVPTX target + explicit opt-in) ---
+# --- Host GPU detection ---
+# Probe for GPUs on the host.  This determines whether to auto-enable
+# GPU execution tests (Triton examples, CUDA runners, ROCm runners).
+
+set(LEGO_HOST_HAS_NVIDIA_GPU OFF)
+find_program(_NVIDIA_SMI nvidia-smi)
+if(_NVIDIA_SMI)
+  execute_process(
+    COMMAND "${_NVIDIA_SMI}" --query-gpu=name --format=csv,noheader
+    RESULT_VARIABLE _NVIDIA_SMI_RESULT
+    OUTPUT_VARIABLE _GPU_NAME OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(_NVIDIA_SMI_RESULT EQUAL 0 AND _GPU_NAME)
+    set(LEGO_HOST_HAS_NVIDIA_GPU ON)
+    message(STATUS "Detected NVIDIA GPU: ${_GPU_NAME}")
+  endif()
+endif()
+
+set(LEGO_HOST_HAS_AMD_GPU OFF)
+find_program(_ROCM_SMI rocm-smi)
+if(_ROCM_SMI)
+  execute_process(
+    COMMAND "${_ROCM_SMI}" --showproductname
+    RESULT_VARIABLE _ROCM_SMI_RESULT
+    OUTPUT_VARIABLE _AMD_GPU_NAME OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(_ROCM_SMI_RESULT EQUAL 0 AND _AMD_GPU_NAME)
+    set(LEGO_HOST_HAS_AMD_GPU ON)
+    # Extract just the first card name from rocm-smi output
+    string(REGEX MATCH "Card series:[ \t]*([^\n]+)" _AMD_MATCH "${_AMD_GPU_NAME}")
+    if(_AMD_MATCH)
+      message(STATUS "Detected AMD GPU: ${CMAKE_MATCH_1}")
+    else()
+      message(STATUS "Detected AMD GPU (via rocm-smi)")
+    endif()
+  endif()
+endif()
+
+# --- NVPTX detection ---
 set(LEGO_HAS_NVPTX OFF)
-if("${LLVM_TARGETS_TO_BUILD}" MATCHES "NVPTX" AND LEGO_ENABLE_RUNNERS)
+if("${LLVM_TARGETS_TO_BUILD}" MATCHES "NVPTX")
   set(LEGO_HAS_NVPTX ON)
   add_definitions(-DLEGO_HAS_NVPTX)
-  message(STATUS "NVPTX backend + runners enabled — enabling CUDA runner support")
+  message(STATUS "NVPTX backend enabled — NVVM compilation support available")
+endif()
+
+# Auto-enable runners when NVPTX target is built and a GPU is present,
+# unless the user explicitly set LEGO_ENABLE_RUNNERS.
+if(NOT DEFINED LEGO_ENABLE_RUNNERS)
+  if(LEGO_HAS_NVPTX AND LEGO_HOST_HAS_NVIDIA_GPU)
+    set(LEGO_ENABLE_RUNNERS ON)
+    message(STATUS "Auto-enabled CUDA runners (NVPTX target + GPU detected)")
+  else()
+    set(LEGO_ENABLE_RUNNERS OFF)
+  endif()
+endif()
+
+# --- AMDGPU detection ---
+set(LEGO_HAS_AMDGPU OFF)
+if("${LLVM_TARGETS_TO_BUILD}" MATCHES "AMDGPU")
+  set(LEGO_HAS_AMDGPU ON)
+  add_definitions(-DLEGO_HAS_AMDGPU)
+  if(LEGO_HOST_HAS_AMD_GPU)
+    message(STATUS "AMDGPU backend enabled — ROCDL compilation + GPU execution available")
+  else()
+    message(STATUS "AMDGPU backend enabled — ROCDL cross-compilation only (no AMD GPU detected)")
+  endif()
 endif()
 
 set(MLIR_TABLEGEN_EXE mlir-tblgen)
@@ -323,6 +384,42 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     endforeach()
   endif()
 
+  # --- LEGO transpose GPU examples (require NVPTX + GPU + runners) ---
+  if(LEGO_ENABLE_RUNNERS AND LEGO_HOST_HAS_NVIDIA_GPU)
+    # MLIR_BUILD_DIR is needed by bench_utils.py to locate mlir-runner
+    if(LEGO_MONOLITHIC_LLVM)
+      set(_MLIR_BUILD_DIR "${CMAKE_BINARY_DIR}/llvm-build")
+    else()
+      # Decoupled build — derive from the MLIR we found
+      get_filename_component(_MLIR_BUILD_DIR "${MLIR_DIR}/../../.." ABSOLUTE)
+    endif()
+
+    set(_transpose_examples
+      transpose_naive.py
+      transpose_smem.py
+    )
+    foreach(_example ${_transpose_examples})
+      string(REPLACE ".py" "" _name ${_example})
+      add_custom_target(check-transpose-${_name}
+        COMMAND ${CMAKE_COMMAND} -E env
+          "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+          "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
+          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_example}" "1024" "1024"
+        DEPENDS LegoPythonModules
+        COMMENT "Running transpose example: ${_example} 1024 1024"
+        USES_TERMINAL
+      )
+    endforeach()
+
+    add_custom_target(check-transpose-examples
+      COMMENT "Running all LEGO transpose GPU examples"
+    )
+    foreach(_example ${_transpose_examples})
+      string(REPLACE ".py" "" _name ${_example})
+      add_dependencies(check-transpose-examples check-transpose-${_name})
+    endforeach()
+  endif()
+
   # --- Wheel build + verification target ---
   add_custom_target(check-lego-wheel
     COMMAND ${CMAKE_COMMAND} -E env
@@ -354,5 +451,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   add_dependencies(check-lego-all check-lego-wheel)
   if(LEGO_HAS_NVPTX)
     add_dependencies(check-lego-all check-triton-examples)
+  endif()
+  if(TARGET check-transpose-examples)
+    add_dependencies(check-lego-all check-transpose-examples)
   endif()
 endif()
