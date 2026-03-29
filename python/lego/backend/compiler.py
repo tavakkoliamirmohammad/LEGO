@@ -50,8 +50,28 @@ def _mlir_cache_key(mlir_text: str) -> str:
 
 
 # ============================================================================
-# Dtype mapping
+# Dtype enum + mapping
 # ============================================================================
+
+from enum import Enum
+
+class DType(str, Enum):
+    """Element types for LEGO buffers and kernels.
+
+    Inherits from str so DType.f32 == "f32" — works as a drop-in
+    replacement anywhere a dtype string is expected.
+    """
+    f16 = "f16"
+    bf16 = "bf16"
+    f32 = "f32"
+    f64 = "f64"
+    i8 = "i8"
+    i16 = "i16"
+    i32 = "i32"
+    i64 = "i64"
+    ui8 = "ui8"
+    i1 = "i1"
+
 
 def _dtype_to_mlir(dtype):
     """Map numpy/torch dtype to MLIR element type string."""

@@ -1,13 +1,15 @@
-"""Naive matrix transpose — pure MLIR LEGO dialect (no SymPy index math)."""
-from lego.backend.gpu import (
-    MLIRTensor, printer,
-    mlir_apply_inverse, mlir_load, mlir_store, mlir_loop,
-)
-from lego.core import OrderBy, Row, Col
+"""Naive matrix transpose — unified KernelBuilder API (all GPU backends).
+
+Includes host-side GPU execution verification via both CUDA (mlir-runner)
+and WebGPU (wgpu/Vulkan).
+"""
 import sys
+from lego.core import OrderBy, Row, Col
+from lego.backend.compiler import DType
+from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer
 
 if len(sys.argv) != 3:
-    print("Usage: python script_name.py NX NY")
+    print("Usage: python transpose_naive.py NX NY")
     sys.exit(1)
 
 NX = int(sys.argv[1])
@@ -15,60 +17,68 @@ NY = int(sys.argv[2])
 N = NX
 
 TILE_DIM = 32
-BLOCK_ROWS_X = 8
-BLOCK_ROWS_Y = 32
-NUM_REPETITION = 125
+BRX = 8   # BLOCK_ROWS_X
+BRY = 32  # BLOCK_ROWS_Y
 
 dimGrid = (NX // TILE_DIM * NY // TILE_DIM, 1, 1)
-dimBlock = (BLOCK_ROWS_Y * BLOCK_ROWS_X, 1, 1)
+dimBlock = (BRY * BRX, 1, 1)
+
+# --- Layouts ---
+A_layout = OrderBy(Row(N, N)).TileBy(
+    [N // TILE_DIM, N // TILE_DIM],
+    [TILE_DIM // BRX, TILE_DIM // BRY],
+    [BRX, BRY])
+B_layout = OrderBy(Row(N, N)).TileBy(
+    [N // TILE_DIM, N // TILE_DIM],
+    [TILE_DIM // BRY, TILE_DIM // BRX],
+    [BRY, BRX])
+
+A = LayoutBuffer(A_layout, shape=(N, N), dtype=DType.f32)
+B = LayoutBuffer(B_layout, shape=(N, N), dtype=DType.f32)
+
+
+def transpose_kernel(ctx):
+    bX = ctx.block_id.x
+    tX = ctx.thread_id.x
+
+    rby, rbx = ctx.apply_inverse(
+        OrderBy(Row(N // TILE_DIM, N // TILE_DIM))
+        .TileBy([N // TILE_DIM, N // TILE_DIM]), bX)
+    wby, wbx = ctx.apply_inverse(
+        OrderBy(Col(N // TILE_DIM, N // TILE_DIM))
+        .TileBy([N // TILE_DIM, N // TILE_DIM]), bX)
+
+    rty, rtx = ctx.apply_inverse(
+        OrderBy(Row(BRX, BRY)).TileBy([BRX, BRY]), tX)
+    wty, wtx = ctx.apply_inverse(
+        OrderBy(Col(BRY, BRX)).TileBy([BRY, BRX]), tX)
+
+    tile_loop = OrderBy(
+        Row(TILE_DIM // BRX, TILE_DIM // BRY)
+    ).TileBy([TILE_DIM // BRX, TILE_DIM // BRY])
+
+    def transpose_body(indices, _):
+        j, i = indices
+        value = ctx.load(0, [rby, rbx, j, i, rty, rtx])
+        ctx.store(value, 1, [wby, wbx, i, j, wty, wtx])
+
+    ctx.tile_loop(tile_loop, transpose_body)
+
+
+builder = KernelBuilder(
+    buffers=[A, B],
+    kernel_body=transpose_kernel,
+    name="transpose_naive",
+    grid=dimGrid,
+    block=dimBlock,
+)
+
+
+from bench_utils import run_transpose_benchmark
+
 
 if __name__ == "__main__":
-    @printer.generate_mlir()
-    def main():
-        A = OrderBy(Row(N, N)).TileBy(
-            [N // TILE_DIM, N // TILE_DIM],
-            [TILE_DIM // BLOCK_ROWS_X, TILE_DIM // BLOCK_ROWS_Y],
-            [BLOCK_ROWS_X, BLOCK_ROWS_Y])
-        B = OrderBy(Row(N, N)).TileBy(
-            [N // TILE_DIM, N // TILE_DIM],
-            [TILE_DIM // BLOCK_ROWS_Y, TILE_DIM // BLOCK_ROWS_X],
-            [BLOCK_ROWS_Y, BLOCK_ROWS_X])
-
-        TA = MLIRTensor(A, "f32")
-        TB = MLIRTensor(B, "f32")
-
-        rep_layout = OrderBy(Row(NUM_REPETITION)).TileBy([NUM_REPETITION])
-
-        def main_body(_, __):
-            @printer.generate_gpu_kernel([TA], [TB], dimGrid, dimBlock)
-            def kernel(_):
-                from mlir.dialects import gpu
-                bX = gpu.block_id(gpu.Dimension.x)
-                tX = gpu.thread_id(gpu.Dimension.x)
-
-                rby, rbx = mlir_apply_inverse(
-                    OrderBy(Row(N // TILE_DIM, N // TILE_DIM))
-                    .TileBy([N // TILE_DIM, N // TILE_DIM]), bX)
-                wby, wbx = mlir_apply_inverse(
-                    OrderBy(Col(N // TILE_DIM, N // TILE_DIM))
-                    .TileBy([N // TILE_DIM, N // TILE_DIM]), bX)
-
-                rty, rtx = mlir_apply_inverse(
-                    OrderBy(Row(BLOCK_ROWS_X, BLOCK_ROWS_Y))
-                    .TileBy([BLOCK_ROWS_X, BLOCK_ROWS_Y]), tX)
-                wty, wtx = mlir_apply_inverse(
-                    OrderBy(Col(BLOCK_ROWS_Y, BLOCK_ROWS_X))
-                    .TileBy([BLOCK_ROWS_Y, BLOCK_ROWS_X]), tX)
-
-                tile_loop = OrderBy(
-                    Row(TILE_DIM // BLOCK_ROWS_X, TILE_DIM // BLOCK_ROWS_Y)
-                ).TileBy([TILE_DIM // BLOCK_ROWS_X, TILE_DIM // BLOCK_ROWS_Y])
-
-                def transpose_body(pargs, _):
-                    j, i = pargs
-                    value = mlir_load(TA, [rby, rbx, j, i, rty, rtx])
-                    mlir_store(value, TB, [wby, wbx, i, j, wty, wtx])
-
-                mlir_loop(tile_loop, transpose_body)
-
-        mlir_loop(rep_layout, main_body)
+    run_transpose_benchmark(
+        builder, {"A": A_layout, "B": B_layout}, N,
+        targets=["cuda", "vulkan", "webgpu", "metal"],
+    )

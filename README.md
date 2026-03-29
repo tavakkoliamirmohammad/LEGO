@@ -43,51 +43,75 @@ LEGO/
 
 ## Architecture
 
-All frontends share a DSL-agnostic rewriter that evaluates layout algebra at
-decoration time, then delegates code generation to a pluggable `DSLAdapter`.
-The adapters lower through a unified MLIR-based backend:
+All paths flow through the MLIR `lego` dialect, which normalizes, simplifies,
+and strength-reduces layout expressions before handing off to target-specific
+backends. **JIT frontends** lower through the dialect, extract simplified
+patterns, then return control to the original framework. **Source code
+generators** lower through the dialect, extract SymPy expressions from the
+optimized arith IR, then emit target-language source. **GPU/CPU backends**
+lower the dialect all the way to machine code:
 
 ```
-                              User Code
-                                 |
-                        +--------+--------+
-                        |                 |
-                 @lego.jit          Tensor / Symbolic
-                 decorator                API
-                        |                 |
-     +----------+-------+-------+----+----+-------+
-     |          |               |    |    |       |
- +---+----+ +--+----+ +------+ | +--+--+ | +-----+------+
- |Triton  | | Numba | | JAX  | | |cuTile| | |Rust/C++/F  |
- |Adapter | | CUDA  | |Adapt.| | |Adapt.| | |  CodeGen   |
- +---+----+ +--+----+ +--+---+ | +--+--+ | +-----+------+
-     |          |          |    |    |    |       |
-     +----------+----------+----+----+----+-------+
-                |                         |
-       +--------+--------+               |
-       |   rewriter.py   |               |
-       |  AST transform  |               |
-       |  + SymPy eval   |               |
-       +--------+--------+               |
-                |                         |
-                +-----------+-------------+
-                            |
-                 +----------+----------+
-                 |    lego dialect     |
-                 |  .................. |
-                 |  normalization      |
-                 |  simplification     |
-                 |  strength reduction |
-                 |  verification       |
-                 |  lowering           |
-                 +----------+----------+
-                            |
-                 +----------+----------+
-                 |     LLVM / MLIR     |
-                 |  .................. |
-                 |  X86 | AArch64 |   |
-                 |       NVPTX        |
-                 +---------------------+
+                                  User Code
+                                      |
+            +-------------------------+-------------------------+
+            |                         |                         |
+  +---------+---------+  +-----------+----------+  +------------+----------+
+  |  JIT Frontends    |  |     GPU / CPU        |  |   Source CodeGen      |
+  |  Triton, Numba,   |  |   KernelBuilder,     |  |  Rust, C++, Fortran, |
+  |  JAX, cuTile      |  |   Tensor API         |  |  Julia, CUDA C,      |
+  +---------+---------+  +-----------+----------+  |  JS, GLSL            |
+            |                        |              +------------+----------+
+            +------------+-----------+---------------------------+
+                         |
+            +------------+------------+
+            |    lego MLIR dialect    |
+            |  ...................    |
+            |  normalization          |
+            |  lowering               |
+            |  simplification         |
+            |  strength reduction     |
+            |  verification (SMT)     |
+            +-----+-------+--------+-+
+                  |       |        |
+                  v       v        v
+  +---------------+  +----+----+  ++----------------+
+  | extract       |  | extract |  | compile         |
+  | patterns      |  | SymPy   |  | to target       |
+  +-------+-------+  +----+----+  +---+-----+-----++
+          |                |           |     |     |
+  +-------+--------+  +---+------+    |     |     |
+  | return to      |  | code     |    |     |     |
+  | original       |  | printers |    |     |     |
+  | framework      |  +---+------+    |     |     |
+  |                |      |           |     |     |
+  | Triton PTX,    |  +---+------+    |     |     |
+  | Numba CUDA,    |  | target   |    |     |     |
+  | JAX XLA,       |  | source   |    |     |     |
+  | cuTile         |  | code     |    |     |     |
+  +----------------+  +----------+    |     |     |
+                                      |     |     |
+              +-----------------------+     |     +------------------+
+              |                             |                        |
+     +--------+--------+          +--------+--------+     +---------+--------+
+     |  lego-to-llvm   |          |  lego-to-nvvm   |     |  lego-to-spirv   |
+     +--------+--------+          +--------+--------+     +---------+--------+
+              |                            |                        |
+       +------+------+             +------+------+          +------+------+
+       |     CPU     |             |    CUDA     |          |   SPIR-V    |
+       |  X86, ARM   |             |  PTX/cubin  |          |  (Vulkan)   |
+       +-------------+             +-------------+          +------+------+
+                                                                   |
+                                                             +-----+-----+
+                                                             |           |
+                                                        +----+---+  +---+----+
+                                                        |  naga  |  |  naga  |
+                                                        +----+---+  +---+----+
+                                                             |           |
+                                                        +----+---+  +---+----+
+                                                        |  WGSL  |  |  MSL   |
+                                                        |(WebGPU)|  |(Metal) |
+                                                        +--------+  +--------+
 ```
 
 ### Frontends
@@ -203,6 +227,19 @@ The `lego` MLIR dialect defines layout operations (`gen_p`, `reg_p`, `row`, `col
 - **Strength Reduction** -- convert power-of-2 `muli`/`divui`/`remui` to shift/mask operations
 - **Verification** -- bijectivity, GPU bank conflicts, memory coalescing
 
+Three lowering pipelines target different backends:
+
+| Pipeline | Target | Output | Configurable options |
+|----------|--------|--------|---------------------|
+| `lego-to-llvm` | CPU | LLVM IR (X86, AArch64) | -- |
+| `lego-to-nvvm` | CUDA | PTX/cubin via NVPTX | `chip` (default sm_70), `features`, `opt-level`, `format` |
+| `lego-to-spirv` | Vulkan/WebGPU/Metal | SPIR-V binary | `spirv-version` (default 1.5), `client-api` |
+
+Example: compile for sm_80 with max optimization:
+```
+lego-to-nvvm{chip=sm_80 opt-level=3}
+```
+
 ## Requirements
 
 | Dependency | Version          | Notes                         |
@@ -214,15 +251,17 @@ The `lego` MLIR dialect defines layout operations (`gen_p`, `reg_p`, `row`, `col
 | NumPy     | 2.1.2            |                               |
 | SymPy     | 1.14.0           |                               |
 
-Optional (for GPU frontends):
+Optional:
 
-| Dependency | Frontend    |
-|-----------|-------------|
+| Dependency | Used by |
+|-----------|---------|
 | PyTorch   | Tensor API, `torch.compile` |
-| Triton    | Triton JIT  |
-| cuda.tile | cuTile JIT  |
-| Numba     | Numba CUDA  |
-| JAX       | JAX JIT     |
+| Triton    | Triton JIT frontend |
+| cuda.tile | cuTile JIT frontend |
+| Numba     | Numba CUDA frontend |
+| JAX       | JAX JIT frontend |
+| wgpu      | Vulkan/WebGPU execution verification |
+| naga-cli  | SPIR-V to WGSL/MSL conversion (`cargo install naga-cli`) |
 
 ## Installation
 

@@ -56,6 +56,20 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ninja ccache
 
+      - name: Install Rust toolchain (for naga-cli)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache naga binary
+        id: cache-naga
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/naga
+          key: naga-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install naga-cli
+        if: steps.cache-naga.outputs.cache-hit != 'true'
+        run: cargo install naga-cli
+
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
@@ -109,6 +123,18 @@ jobs:
 
       - name: Prepare wheel
         run: cmake --build build --target lego-prepare-wheel
+
+      - name: Bundle naga into wheel
+        run: |
+          mkdir -p build/python_packages/lego/lego/bin
+          NAGA_BIN=$(which naga || echo "$HOME/.cargo/bin/naga")
+          if [ -f "$NAGA_BIN" ]; then
+            cp "$NAGA_BIN" build/python_packages/lego/lego/bin/
+            chmod +x build/python_packages/lego/lego/bin/naga
+            echo "Bundled naga: $(du -h build/python_packages/lego/lego/bin/naga | cut -f1)"
+          else
+            echo "WARNING: naga binary not found, wheel will not include naga"
+          fi
 
       - name: Tar build artifacts
         run: tar czf build-artifacts.tar.gz build/python_packages

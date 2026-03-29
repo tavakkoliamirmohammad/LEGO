@@ -23,4 +23,8 @@ from lego.frontends.julia_gen import JuliaAdapter, generate as julia_generate
 from lego.frontends.js_gen import JSAdapter, generate as js_generate
 from lego.frontends.glsl_gen import GLSLAdapter, generate as glsl_generate
 from lego.core import le_constraint, divisibility_constraint
+print("[check-lego-imports] Testing GPU builder + SPIR-V backend imports...")
+from lego.backend.gpu_builder import KernelBuilder, KernelContext, LayoutBuffer, CompileResult, make_permutation_kernel
+from lego.backend.spirv import GPUIRBuilder, compile_to_spirv, compile_to_target, compile_all
+from lego.backend.naga import convert, spv_to_wgsl, spv_to_metal, spv_to_glsl, spv_bytes_to_file, validate
 print("[check-lego-imports] All imports OK")

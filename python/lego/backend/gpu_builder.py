@@ -1,0 +1,530 @@
+"""
+Shared GPU kernel builder for all GPU backends (SPIR-V, CUDA, etc.).
+
+This is the single source of truth for generating GPU MLIR from LEGO layouts.
+Both the SPIR-V path and the CUDA path use this builder, then apply
+target-specific lowering.
+
+Supports:
+  - Multiple buffers with different LEGO layouts
+  - Shared memory (workgroup memory) with dynamic layout reassignment
+  - Barriers (gpu.barrier)
+  - Inner tile loops (scf.for with layout-derived indices)
+  - Symbolic dimensions
+  - User-defined kernel bodies via KernelContext
+
+No GPU hardware required for IR generation.
+"""
+
+import os
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+
+from mlir.ir import (
+    Context, Location, Module, InsertionPoint,
+    IndexType, MemRefType, FunctionType, StringAttr, IntegerAttr,
+)
+from mlir.dialects import func as func_dialect
+from mlir.dialects import scf as scf_dialect
+from mlir.dialects import memref as memref_dialect
+from mlir.dialects import arith as arith_dialect
+from mlir.dialects import gpu as gpu_dialect
+from mlir.passmanager import PassManager
+
+from lego.backend.dialects.lego_dialect import register as register_lego
+from lego.backend._ops import (
+    _index_const,
+    _emit_apply, _emit_apply_inverse,
+    _emit_row, _emit_col, _emit_order_by, _emit_group_by,
+)
+from lego.backend.compiler import (
+    DType, _dtype_to_mlir, _get_mlir_element_type, _get_layout_dims,
+)
+from lego.backend.symbolic import emit_layout_from_python, _resolve_dim
+
+
+def _ensure_stack_size():
+    """Increase stack size for deeply nested LEGO IR (TileBy on large dims)."""
+    import sys, resource
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        if soft != resource.RLIM_INFINITY:
+            resource.setrlimit(resource.RLIMIT_STACK, (resource.RLIM_INFINITY, hard))
+    except (ValueError, resource.error):
+        pass
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
+
+
+# ============================================================================
+# Compile result
+# ============================================================================
+
+@dataclass
+class CompileResult:
+    """Result of a multi-target compilation."""
+    target: str
+    kernel_path: str = ""
+    kernel_source: str = ""
+    spv_path: str = ""
+    metadata: Dict = field(default_factory=dict)
+
+
+# ============================================================================
+# Layout-aware buffer descriptor
+# ============================================================================
+
+@dataclass
+class LayoutBuffer:
+    """A buffer with an associated LEGO layout.
+
+    Args:
+        layout: LEGO layout object (Row, Col, TileBy, GroupBy, etc.)
+        shape:  Tensor shape tuple
+        dtype:  Element type (DType.f32, DType.i32, or string "f32", "i32", etc.)
+        shared: If True, this buffer is in workgroup (shared) memory.
+    """
+    layout: object
+    shape: Tuple[int, ...]
+    dtype: Union[DType, str] = DType.f32
+    shared: bool = False
+
+    @property
+    def numel(self) -> int:
+        n = 1
+        for s in self.shape:
+            n *= int(s)
+        return n
+
+
+# ============================================================================
+# Kernel context — passed to user kernel body functions
+# ============================================================================
+
+class _DimAccessor:
+    """Attribute-style access to GPU dimension ops: accessor.x, .y, .z."""
+
+    def __init__(self, op):
+        self._op = op
+
+    @property
+    def x(self):
+        return self._op(gpu_dialect.Dimension.x)
+
+    @property
+    def y(self):
+        return self._op(gpu_dialect.Dimension.y)
+
+    @property
+    def z(self):
+        return self._op(gpu_dialect.Dimension.z)
+
+
+class KernelContext:
+    """Context object passed to user kernel body functions.
+
+    Provides:
+      - Layout-aware load/store via LEGO ops
+      - GPU thread/block ID access
+      - Layout apply/apply_inverse for index computation
+      - Inner loops with layout-derived indices
+      - Barriers for shared memory synchronization
+      - Arithmetic helpers
+    """
+
+    def __init__(self, buf_vals, buf_descs, shared_vals=None):
+        self._buf_vals = buf_vals
+        self._buf_descs = buf_descs
+        self._shared_vals = shared_vals or {}
+        # Cached layout IR values per buffer
+        self._layout_cache = {}
+
+    # --- GPU thread/block IDs (use as ctx.block_id.x, ctx.thread_id.y, etc.) ---
+
+    @property
+    def block_id(self):
+        return _DimAccessor(gpu_dialect.block_id)
+
+    @property
+    def thread_id(self):
+        return _DimAccessor(gpu_dialect.thread_id)
+
+    @property
+    def block_dim(self):
+        return _DimAccessor(gpu_dialect.block_dim)
+
+    # --- Layout index computation ---
+
+    def apply_inverse(self, layout, flat_idx):
+        """Apply layout inverse: flat_idx → multi-dim indices."""
+        layout_val = emit_layout_from_python(layout, {})
+        dims = _get_layout_dims(layout)
+        return _emit_apply_inverse(layout_val, flat_idx, len(dims))
+
+    def apply(self, layout, *indices):
+        """Apply layout forward: multi-dim indices → flat index."""
+        layout_val = emit_layout_from_python(layout, {})
+        return _emit_apply(layout_val, list(indices))
+
+    # --- Layout-aware load/store ---
+
+    def _get_buf_layout_ir(self, buf_index):
+        """Get or create MLIR layout IR for a buffer."""
+        desc = self._buf_descs[buf_index]
+        return emit_layout_from_python(desc.layout, {})
+
+    def load(self, buf_index: int, indices: list):
+        """Load from buffer using LEGO layout with explicit multi-dim indices."""
+        layout_val = self._get_buf_layout_ir(buf_index)
+        memref = self._buf_vals[buf_index]
+        flat_idx = _emit_apply(layout_val, indices)
+        return memref_dialect.LoadOp(memref, [flat_idx]).result
+
+    def store(self, value, buf_index: int, indices: list):
+        """Store to buffer using LEGO layout with explicit multi-dim indices."""
+        layout_val = self._get_buf_layout_ir(buf_index)
+        memref = self._buf_vals[buf_index]
+        flat_idx = _emit_apply(layout_val, indices)
+        memref_dialect.StoreOp(value, memref, [flat_idx])
+
+    def load_flat(self, buf_index: int, flat_idx):
+        """Load from buffer at a flat index (no layout)."""
+        return memref_dialect.LoadOp(self._buf_vals[buf_index], [flat_idx]).result
+
+    def store_flat(self, value, buf_index: int, flat_idx):
+        """Store to buffer at a flat index (no layout)."""
+        memref_dialect.StoreOp(value, self._buf_vals[buf_index], [flat_idx])
+
+    def set_layout(self, buf_index: int, new_layout):
+        """Change the layout of a buffer (for shared memory phase changes)."""
+        self._buf_descs[buf_index] = LayoutBuffer(
+            layout=new_layout,
+            shape=self._buf_descs[buf_index].shape,
+            dtype=self._buf_descs[buf_index].dtype,
+            shared=self._buf_descs[buf_index].shared,
+        )
+
+    # --- Loops ---
+
+    def tile_loop(self, layout, body_fn):
+        """Generate an scf.for loop with layout-derived multi-dim indices.
+
+        body_fn receives (indices, flat_idx) where indices is a tuple
+        from apply_inverse(layout, flat_idx).
+        """
+        dims = _get_layout_dims(layout)
+        total = 1
+        for d in dims:
+            total *= int(d)
+
+        loop = scf_dialect.ForOp(
+            _index_const(0), _index_const(total), _index_const(1)
+        )
+        with InsertionPoint(loop.body):
+            flat_idx = loop.induction_variable
+            indices = self.apply_inverse(layout, flat_idx)
+            body_fn(indices, flat_idx)
+            scf_dialect.YieldOp([])
+
+    # --- Barriers ---
+
+    def barrier(self):
+        """Insert a GPU barrier (thread synchronization)."""
+        gpu_dialect.BarrierOp()
+
+    # --- Arithmetic helpers ---
+
+    def addf(self, a, b):
+        return arith_dialect.AddFOp(a, b).result
+
+    def mulf(self, a, b):
+        return arith_dialect.MulFOp(a, b).result
+
+    def subf(self, a, b):
+        return arith_dialect.SubFOp(a, b).result
+
+    def addi(self, a, b):
+        return arith_dialect.AddIOp(a, b).result
+
+    def muli(self, a, b):
+        return arith_dialect.MulIOp(a, b).result
+
+    # Keep old simple API as aliases
+    def add(self, a, b):
+        return self.addf(a, b)
+
+    def mul(self, a, b):
+        return self.mulf(a, b)
+
+    # Legacy flat-index API (for simple element-wise kernels)
+    def load_raw(self, buf_index, gid=None):
+        if gid is None:
+            raise ValueError("load_raw requires a gid argument")
+        return self.load_flat(buf_index, gid)
+
+    def store_raw(self, value, buf_index, gid=None):
+        if gid is None:
+            raise ValueError("store_raw requires a gid argument")
+        self.store_flat(value, buf_index, gid)
+
+
+# ============================================================================
+# KernelBuilder — shared GPU kernel builder for all backends
+# ============================================================================
+
+class KernelBuilder:
+    """Build a GPU kernel with multiple layout-aware buffers.
+
+    Supports both simple element-wise kernels and complex tiled kernels
+    with shared memory, barriers, and inner loops.
+
+    Example — simple vecadd::
+
+        a = LayoutBuffer(Row(N), shape=(N,))
+        b = LayoutBuffer(Row(N), shape=(N,))
+        c = LayoutBuffer(Row(N), shape=(N,))
+
+        def vecadd(ctx):
+            gid = ctx.global_id()
+            va = ctx.load_flat(0, gid)
+            vb = ctx.load_flat(1, gid)
+            ctx.store_flat(ctx.addf(va, vb), 2, gid)
+
+        builder = KernelBuilder(buffers=[a, b, c], kernel_body=vecadd)
+
+    Example — tiled transpose with shared memory::
+
+        smem = LayoutBuffer(smem_layout, shape=(TD, TD), shared=True)
+        builder = KernelBuilder(
+            buffers=[src_buf, dst_buf, smem],
+            kernel_body=transpose_body,
+            grid=(NX//TD * NY//TD, 1, 1),
+            block=(TD*TD, 1, 1),
+        )
+    """
+
+    def __init__(
+        self,
+        buffers: Sequence[LayoutBuffer],
+        kernel_body: Callable[[KernelContext], None],
+        name: str = "kernel",
+        workgroup_size: int = 64,
+        grid: Optional[Tuple[int, ...]] = None,
+        block: Optional[Tuple[int, ...]] = None,
+    ):
+        self._buffers = list(buffers)
+        self._kernel_body = kernel_body
+        self._name = name
+
+        # Separate global vs shared buffers
+        self._global_bufs = [b for b in self._buffers if not b.shared]
+        self._shared_bufs = [b for b in self._buffers if b.shared]
+
+        # Grid/block can be explicit or derived from workgroup_size
+        if grid is not None and block is not None:
+            self._grid = tuple(grid) + (1,) * (3 - len(grid))
+            self._block = tuple(block) + (1,) * (3 - len(block))
+        else:
+            # Derive from first global buffer size
+            if self._global_bufs:
+                total = self._global_bufs[0].numel
+            else:
+                total = self._shared_bufs[0].numel
+            self._grid = ((total + workgroup_size - 1) // workgroup_size, 1, 1)
+            self._block = (workgroup_size, 1, 1)
+
+    def build_module(self):
+        """Build target-agnostic MLIR module with gpu.launch + LEGO ops."""
+        _ensure_stack_size()
+        ctx = Context()
+        register_lego(ctx)
+        ctx.load_all_available_dialects()
+
+        with ctx, Location.unknown():
+            module = Module.create()
+
+            # Function args = global buffers only (shared mem is allocated in kernel)
+            memref_types = []
+            for buf in self._global_bufs:
+                elem_ty = _get_mlir_element_type(ctx, buf.dtype)
+                memref_types.append(MemRefType.get([buf.numel], elem_ty))
+
+            with InsertionPoint(module.body):
+                self._build_host_func(ctx, memref_types)
+
+        return ctx, module
+
+    def _build_host_func(self, mlir_ctx, memref_types):
+        func_ty = FunctionType.get(memref_types, [])
+        f = func_dialect.FuncOp(self._name, func_ty)
+        f.sym_visibility = StringAttr.get("public")
+
+        entry = f.add_entry_block()
+        global_vals = list(entry.arguments)
+
+        with InsertionPoint(entry):
+            grid_vals = [_index_const(g) for g in self._grid]
+            block_vals = [_index_const(b) for b in self._block]
+
+            launch = gpu_dialect.LaunchOp(
+                grid_size=tuple(grid_vals),
+                block_size=tuple(block_vals),
+            )
+
+            body = launch.body.blocks[0]
+
+            # Add workgroup memory attributions for shared buffers
+            # Must be done BEFORE entering the InsertionPoint for body
+            if self._shared_bufs:
+                launch.attributes["workgroup_attributions"] = IntegerAttr.get(
+                    IndexType.get(), len(self._shared_bufs)
+                )
+                for sbuf in self._shared_bufs:
+                    elem_ty = _get_mlir_element_type(mlir_ctx, sbuf.dtype)
+                    smem_ty = MemRefType.get(
+                        [sbuf.numel], elem_ty,
+                        memory_space=IntegerAttr.get(IndexType.get(), 3),
+                    )
+                    body.add_argument(smem_ty, Location.unknown())
+
+            with InsertionPoint(body):
+                # Map each buffer to its MLIR value
+                buf_vals = []
+                buf_descs = list(self._buffers)
+                global_idx = 0
+                shared_arg_idx = 12  # after 12 standard gpu.launch args
+
+                for buf in self._buffers:
+                    if buf.shared:
+                        buf_vals.append(body.arguments[shared_arg_idx])
+                        shared_arg_idx += 1
+                    else:
+                        buf_vals.append(global_vals[global_idx])
+                        global_idx += 1
+
+                kctx = KernelContext(buf_vals, buf_descs)
+                self._kernel_body(kctx)
+
+                gpu_dialect.TerminatorOp()
+
+            func_dialect.ReturnOp([])
+
+    # --- Convenience: global thread ID for element-wise kernels ---
+
+    @staticmethod
+    def global_id_1d(ctx):
+        """Compute 1D global thread ID = block_id_x * block_dim_x + thread_id_x."""
+        bid = ctx.block_id.x
+        bdim = ctx.block_dim.x
+        tid = ctx.thread_id.x
+        return arith_dialect.AddIOp(
+            arith_dialect.MulIOp(bid, bdim).result, tid
+        ).result
+
+    # ------------------------------------------------------------------
+    # Target-specific compilation
+    # ------------------------------------------------------------------
+
+    def compile(self, target: str = "webgpu", **kwargs) -> CompileResult:
+        """Compile the kernel to the given target.
+
+        Args:
+            target: "vulkan", "webgpu", "metal", "webgl", "cuda"
+        """
+        if target == "cuda":
+            return self._compile_cuda(**kwargs)
+        from lego.backend.spirv import compile_to_target
+        return compile_to_target(self, target=target, **kwargs)
+
+    def _compile_cuda(self, output_dir=None, name=None, **kwargs) -> CompileResult:
+        """Compile to CUDA via lego-to-nvvm (includes PTX/cubin compilation)."""
+        ctx, module = self.build_module()
+        if name is None:
+            name = self._name
+
+        with ctx:
+            try:
+                pm = PassManager.parse("builtin.module(lego-to-nvvm)")
+                pm.run(module.operation)
+            except Exception as e:
+                raise RuntimeError(
+                    f"CUDA compilation failed (lego-to-nvvm):\n{e}\n"
+                    f"Ensure LEGO was built with LEGO_ENABLE_RUNNERS=ON "
+                    f"and LLVM_TARGETS_TO_BUILD includes NVPTX."
+                ) from e
+
+        llvm_ir = str(module)
+        if output_dir is None:
+            output_dir = tempfile.mkdtemp(prefix="lego_cuda_")
+        os.makedirs(output_dir, exist_ok=True)
+
+        out_path = os.path.join(output_dir, f"{name}.mlir")
+        Path(out_path).write_text(llvm_ir)
+
+        return CompileResult(
+            target="cuda", kernel_path=out_path, kernel_source=llvm_ir,
+            metadata={"pipeline": "lego-to-nvvm"},
+        )
+
+
+# ============================================================================
+# Convenience: simple element-wise kernels
+# ============================================================================
+
+def make_elementwise_kernel(
+    buffers: Sequence[LayoutBuffer],
+    body_fn: Callable,
+    name: str = "kernel",
+    workgroup_size: int = 64,
+) -> KernelBuilder:
+    """Create a KernelBuilder where each thread handles one element.
+
+    body_fn receives (ctx, gid) where gid is the global flat index.
+    Includes automatic bounds checking.
+    """
+    total = buffers[0].numel
+
+    def wrapped_body(ctx):
+        gid = KernelBuilder.global_id_1d(ctx)
+        in_bounds = arith_dialect.CmpIOp(
+            arith_dialect.CmpIPredicate.ult, gid, _index_const(total)
+        )
+        if_op = scf_dialect.IfOp(in_bounds, has_else=False)
+        with InsertionPoint(if_op.then_block):
+            body_fn(ctx, gid)
+            scf_dialect.YieldOp([])
+
+    return KernelBuilder(
+        buffers=buffers, kernel_body=wrapped_body,
+        name=name, workgroup_size=workgroup_size,
+    )
+
+
+def make_permutation_kernel(
+    layout, shape, dtype="f32", workgroup_size=64
+) -> KernelBuilder:
+    """Create a kernel that permutes data according to a LEGO layout.
+
+    Equivalent to: dst[identity(inv(layout, gid))] = src[gid]
+    """
+    src = LayoutBuffer(layout, shape, dtype)
+    dst = LayoutBuffer(layout, shape, dtype)
+
+    def permute_body(ctx, gid):
+        val = memref_dialect.LoadOp(ctx._buf_vals[0], [gid]).result
+        layout_dims = _get_layout_dims(layout)
+        dim_vals = [_resolve_dim(d, {}) for d in layout_dims]
+        rank = len(layout_dims)
+        identity = _emit_group_by(
+            dim_vals, [_emit_order_by([_emit_row(dim_vals)])]
+        )
+        layout_val = emit_layout_from_python(layout, {})
+        indices = _emit_apply_inverse(layout_val, gid, rank)
+        out_idx = _emit_apply(identity, indices)
+        memref_dialect.StoreOp(val, ctx._buf_vals[1], [out_idx])
+
+    return make_elementwise_kernel(
+        buffers=[src, dst], body_fn=permute_body,
+        name="transform", workgroup_size=workgroup_size,
+    )
