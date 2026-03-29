@@ -62,4 +62,7 @@ if(TARGET LegoPythonModules)
     COMMENT "Running LEGO Python tests"
     USES_TERMINAL
   )
+  if(TARGET lego-naga)
+    add_dependencies(check-lego-python lego-naga)
+  endif()
 endif()
