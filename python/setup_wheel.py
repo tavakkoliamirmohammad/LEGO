@@ -18,13 +18,6 @@ for top in ("mlir", "lego"):
         if data:
             package_data[pkg] = data
 
-# Ensure bundled binaries (naga) in lego/bin/ are included
-bin_dir = os.path.join("lego", "bin")
-if os.path.isdir(bin_dir):
-    bins = os.listdir(bin_dir)
-    if bins:
-        package_data["lego.bin"] = bins
-
 setup(
     packages=packages,
     package_data=package_data,
