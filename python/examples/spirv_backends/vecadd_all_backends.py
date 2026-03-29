@@ -19,27 +19,25 @@ _project_root = os.path.abspath(os.path.join(_script_dir, "..", ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-import lego
-from lego.core import Row, Col, OrderBy
+from lego.core import Row
+from lego.backend.compiler import DType
 from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer
 
 
 def main():
     N = 256
 
-    # ---- Define buffers with different LEGO layouts ----
-    # A: column-major (non-trivial index arithmetic)
-    # B: row-major
-    # C: row-major (output)
-    a = LayoutBuffer(Col(16, 16), shape=(16, 16), dtype="f32")
-    b = LayoutBuffer(Row(N),      shape=(N,),      dtype="f32")
-    c = LayoutBuffer(Row(N),      shape=(N,),      dtype="f32")
+    # ---- Define buffers with LEGO layouts ----
+    a = LayoutBuffer(Row(N), shape=(N,), dtype=DType.f32)
+    b = LayoutBuffer(Row(N), shape=(N,), dtype=DType.f32)
+    c = LayoutBuffer(Row(N), shape=(N,), dtype=DType.f32)
 
     # ---- Define the kernel body ----
     def vecadd_body(ctx):
-        va = ctx.load(0)            # load A[gid] via Col layout
-        vb = ctx.load(1)            # load B[gid] via Row layout
-        ctx.store(ctx.add(va, vb), 2)  # store C[gid] = A + B
+        gid = KernelBuilder.global_id_1d(ctx)
+        va = ctx.load_flat(0, gid)
+        vb = ctx.load_flat(1, gid)
+        ctx.store_flat(ctx.addf(va, vb), 2, gid)
 
     builder = KernelBuilder(
         buffers=[a, b, c],
