@@ -10,6 +10,7 @@ No GPU hardware required — all tests are pure cross-compilation.
 """
 
 import os
+import shutil
 import struct
 import tempfile
 import pytest
@@ -55,6 +56,11 @@ requires_spirv = pytest.mark.skipif(
 requires_naga = pytest.mark.skipif(
     not _has_naga(),
     reason="naga binary not found (install with: cargo install naga-cli)",
+)
+
+requires_ptxas = pytest.mark.skipif(
+    shutil.which("ptxas") is None,
+    reason="ptxas not found in PATH (load a CUDA toolkit module)",
 )
 
 
@@ -477,6 +483,7 @@ class TestUnifiedCompile:
         assert "@compute" in result.kernel_source
 
     @requires_spirv
+    @requires_ptxas
     def test_compile_cuda_produces_llvm_ir(self):
         """CUDA target goes through lego-to-llvm, produces LLVM IR."""
         import lego

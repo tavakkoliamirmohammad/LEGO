@@ -257,6 +257,32 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     COMMENT "Preparing wheel directory"
   )
 
+  # --- Naga CLI (SPIR-V → WGSL / MSL / GLSL converter) ---
+  # Build naga-cli via cargo and place the binary where _find_naga_binary() looks.
+  # Must come after lego-prepare-wheel because copy_directory overwrites bin/.
+  find_program(CARGO_EXECUTABLE cargo)
+  set(LEGO_NAGA_BIN "${LEGO_WHEEL_DIR}/lego/bin/naga")
+  if(CARGO_EXECUTABLE)
+    add_custom_command(
+      OUTPUT "${LEGO_NAGA_BIN}"
+      COMMAND "${CARGO_EXECUTABLE}" install naga-cli
+        --root "${CMAKE_BINARY_DIR}/naga-install"
+        --quiet
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_BINARY_DIR}/naga-install/bin/naga"
+        "${LEGO_NAGA_BIN}"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_BINARY_DIR}/naga-install/bin/naga"
+        "${CMAKE_SOURCE_DIR}/python/lego/bin/naga"
+      COMMENT "Building naga-cli via cargo"
+    )
+    add_custom_target(lego-naga DEPENDS "${LEGO_NAGA_BIN}")
+    add_dependencies(lego-naga lego-prepare-wheel)
+    message(STATUS "cargo found — naga-cli will be built automatically at ${LEGO_NAGA_BIN}")
+  else()
+    message(STATUS "cargo not found — naga-cli will not be built (some tests will be skipped)")
+  endif()
+
   # --- Import verification target ---
   add_custom_target(check-lego-imports
     COMMAND ${CMAKE_COMMAND} -E env
