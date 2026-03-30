@@ -228,22 +228,78 @@ def _link_wasm(obj_bytes, exports):
 def compile_mapping_json(layout, shape):
     """Compile layout and return mapping as JSON-serializable dict.
 
-    Fallback for when WASM is not needed (server-side evaluation).
-    Uses the existing MLIR JIT compiler to compute the permutation table.
+    For TileBy layouts, the permutation table's identity is N-D (e.g. 4D
+    for 2D+tiling), not 2D row-major.  We invert the inv table to get
+    the correct physical address for each 2D logical coordinate:
+      physical_addr_of[rowmajor_pos] = p  where  inv[p] == rowmajor_pos
+
+    For GroupBy (non-tiled) layouts, the identity matches the shape dims,
+    so fwd[i*N+j] directly gives the physical address.
 
     Returns:
         dict with keys: mapping (list of [i, j, flat]), shape, total
     """
     from lego.backend.compiler import LayoutCompiler
+    from lego.core import TileByLayout
 
     compiler = LayoutCompiler(layout, shape, "i64")
     fwd, inv = compiler.get_permutation_table()
 
-    mapping = []
     total = 1
     for s in shape:
         total *= int(s)
 
+    layout_dims = [int(d) for d in (layout._dims if hasattr(layout, '_dims') else layout.dims())]
+    layout_rank = len(layout_dims)
+
+    if isinstance(layout, TileByLayout) and layout_rank > len(shape):
+        # TileBy normalization applies a sigma permutation that interleaves
+        # tile dimensions: the 4D identity coords are
+        #   (tile_M, inner_M, tile_N, inner_N)
+        # NOT (tile_M, tile_N, inner_M, inner_N).
+        #
+        # So the 2D→4D mapping is:
+        #   (i, j) → (i//BM, i%BM, j//BN, j%BN)
+        #
+        # Then fwd[4D_identity_pos] gives the physical address.
+        tile_groups = layout._tile_groups
+        nd = len(shape)
+        inner_sizes = [int(d) for d in tile_groups[-1]]
+        id_strides = _compute_strides(layout_dims)
+
+        mapping = []
+        if nd == 2:
+            M, N = int(shape[0]), int(shape[1])
+            BM, BN = inner_sizes[0], inner_sizes[1]
+            for i in range(M):
+                for j in range(N):
+                    # Sigma-interleaved 4D: (tile_M, inner_M, tile_N, inner_N)
+                    d0 = i // BM   # tile_M
+                    d1 = i % BM    # inner_M
+                    d2 = j // BN   # tile_N
+                    d3 = j % BN    # inner_N
+                    k = d0 * id_strides[0] + d1 * id_strides[1] + d2 * id_strides[2] + d3
+                    phys = int(fwd[k])
+                    mapping.append([i, j, phys])
+        else:
+            # General N-D tiling: interleave (outer_k, inner_k) per dim
+            import itertools
+            dims = [int(s) for s in shape]
+            for coords in itertools.product(*[range(d) for d in dims]):
+                interleaved = []
+                for k_dim in range(nd):
+                    interleaved.append(coords[k_dim] // inner_sizes[k_dim])
+                    interleaved.append(coords[k_dim] % inner_sizes[k_dim])
+                k = sum(c * s for c, s in zip(interleaved, id_strides))
+                if len(interleaved) > len(id_strides):
+                    k += interleaved[-1]
+                phys = int(fwd[k])
+                mapping.append(list(coords) + [phys])
+
+        return {"mapping": mapping, "shape": [int(s) for s in shape], "total": total}
+
+    # Non-tiled (GroupBy): identity matches shape dims, fwd[i*N+j] is correct
+    mapping = []
     if len(shape) == 2:
         M, N = int(shape[0]), int(shape[1])
         for i in range(M):
@@ -251,7 +307,6 @@ def compile_mapping_json(layout, shape):
                 flat = int(fwd[i * N + j])
                 mapping.append([i, j, flat])
     else:
-        # General N-D case
         import itertools
         dims = [int(s) for s in shape]
         for coords in itertools.product(*[range(d) for d in dims]):
