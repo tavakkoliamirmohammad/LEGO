@@ -52,12 +52,12 @@ export function render(data, opts = {}) {
   const maxCellSize = 50;
   const minCellSize = 20;
   const cellSize = Math.max(minCellSize, Math.min(maxCellSize, Math.floor(500 / Math.max(M, N))));
-  const pad = 4; // padding around the grid
+  const pad = 4;
   const gridW = N * cellSize + pad * 2;
   const gridH = M * cellSize + pad * 2;
-  const stripCellH = Math.max(15, Math.min(30, Math.floor(600 / total)));
-  const stripW = 50 + pad * 2;
-  const stripH = total * stripCellH + pad * 2;
+  // Physical memory as 2D grid (same cell size, N columns)
+  const physGridW = N * cellSize + pad * 2;
+  const physGridH = M * cellSize + pad * 2;
   const connW = 120;
 
   // Container
@@ -112,7 +112,7 @@ export function render(data, opts = {}) {
   connSection.className = 'viz-section';
   connSection.innerHTML = '<h4>&nbsp;</h4>';
 
-  const vizH = Math.max(gridH, stripH);
+  const vizH = Math.max(gridH, physGridH);
   const connSvg = svgEl('svg', {
     width: connW, height: vizH,
     viewBox: `0 0 ${connW} ${vizH}`,
@@ -126,8 +126,11 @@ export function render(data, opts = {}) {
     const logCell = logicalCells[`${i},${j}`];
     const logX = 0;
     const logY = logCell.y;
+    // Physical grid position
+    const pr = Math.floor(flat / N);
+    const pc = flat % N;
     const phyX = connW;
-    const phyY = pad + flat * stripCellH + stripCellH / 2;
+    const phyY = pad + pr * cellSize + cellSize / 2;
 
     const midX1 = connW * 0.35;
     const midX2 = connW * 0.65;
@@ -147,14 +150,14 @@ export function render(data, opts = {}) {
   connSection.appendChild(connSvg);
   container.appendChild(connSection);
 
-  // --- Physical Strip ---
+  // --- Physical Memory (2D grid, wrapped by N columns) ---
   const physSection = document.createElement('div');
   physSection.className = 'viz-section';
   physSection.innerHTML = '<h4>Physical Memory</h4>';
 
   const physSvg = svgEl('svg', {
-    width: stripW, height: stripH,
-    viewBox: `0 0 ${stripW} ${stripH}`,
+    width: physGridW, height: physGridH,
+    viewBox: `0 0 ${physGridW} ${physGridH}`,
   });
 
   const physCells = {};
@@ -162,25 +165,29 @@ export function render(data, opts = {}) {
     const src = invMap[f];
     if (!src) continue;
     const color = getCellColor(src.i, src.j, f, shape, tileDims, palette);
-    const y = pad + f * stripCellH;
+    // Wrap flat address into 2D: row = f // N, col = f % N
+    const pr = Math.floor(f / N);
+    const pc = f % N;
+    const x = pad + pc * cellSize;
+    const y = pad + pr * cellSize;
 
     const g = svgEl('g', { class: 'cell', 'data-flat': f, 'data-i': src.i, 'data-j': src.j });
 
     g.appendChild(svgEl('rect', {
-      x: pad, y, width: stripW - pad * 2, height: stripCellH,
+      x, y, width: cellSize, height: cellSize,
       fill: color, rx: 2,
     }));
 
-    const fontSize = stripCellH < 20 ? 8 : 10;
+    const fontSize = cellSize < 30 ? 9 : 11;
     const text = svgEl('text', {
-      x: stripW / 2, y: y + stripCellH / 2,
+      x: x + cellSize / 2, y: y + cellSize / 2,
       'font-size': fontSize,
     });
     text.textContent = f;
     g.appendChild(text);
 
     physSvg.appendChild(g);
-    physCells[f] = { el: g, i: src.i, j: src.j };
+    physCells[f] = { el: g, i: src.i, j: src.j, cx: x + cellSize / 2, cy: y + cellSize / 2 };
   }
 
   physSection.appendChild(physSvg);
