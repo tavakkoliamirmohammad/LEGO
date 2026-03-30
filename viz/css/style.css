@@ -122,25 +122,11 @@ header h1 span { color: var(--accent); }
 }
 #theme-btn:hover { opacity: 0.8; }
 
-/* Main layout — editor left, viz+compiler right */
+/* Main 3-column layout — all side by side */
 #app {
   display: grid;
-  grid-template-columns: clamp(200px, 22vw, 300px) 1fr;
-  grid-template-rows: 1fr;
+  grid-template-columns: clamp(200px, 20vw, 300px) 1fr clamp(200px, 25vw, 380px);
   height: calc(100vh - 41px);
-}
-
-/* Right side: viz on top, compiler below */
-#right-area {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-#viz-compiler-row {
-  display: flex;
-  flex: 1;
-  min-height: 0;
   overflow: hidden;
 }
 
@@ -231,9 +217,8 @@ header h1 span { color: var(--accent); }
   min-height: 22px;
 }
 
-/* Visualization panel */
+/* Visualization panel (center) */
 #viz-panel {
-  flex: 1;
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -312,7 +297,6 @@ svg.has-hover .connection.highlighted { opacity: 1; stroke-width: 2.5; }
 
 /* Compiler panel (right) */
 #compiler-panel {
-  flex: 0 0 clamp(200px, 30%, 400px);
   border-left: 1px solid var(--border);
   background: var(--surface);
   display: flex;
@@ -411,20 +395,12 @@ svg.has-hover .connection.highlighted { opacity: 1; stroke-width: 2.5; }
 
 /* Responsive */
 
-@media (max-width: 800px) {
+@media (max-width: 900px) {
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: 180px 1fr;
+    grid-template-rows: 180px 1fr 200px;
   }
 
-  #viz-compiler-row {
-    flex-direction: column;
-  }
-
-  #compiler-panel {
-    flex: 0 0 auto;
-    max-height: 250px;
-    border-left: none;
-    border-top: 1px solid var(--border);
-  }
+  #editor-panel { border-right: none; border-bottom: 1px solid var(--border); }
+  #compiler-panel { border-left: none; border-top: 1px solid var(--border); }
 }

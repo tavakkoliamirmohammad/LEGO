@@ -34,18 +34,18 @@ L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
       <div id="formula-output"></div>
     </div>
 
-    <!-- Right: Viz + Compiler side by side -->
-    <div id="viz-compiler-row">
-      <div id="viz-panel">
-        <div id="viz-container">
-          <div class="empty-state">
-            <div class="icon">&#x25A6;</div>
-            <p>Click <strong>Visualize</strong> or press <strong>Ctrl+Enter</strong></p>
-          </div>
+    <!-- Center: Visualization -->
+    <div id="viz-panel">
+      <div id="viz-container">
+        <div class="empty-state">
+          <div class="icon">&#x25A6;</div>
+          <p>Click <strong>Visualize</strong> or press <strong>Ctrl+Enter</strong></p>
         </div>
       </div>
+    </div>
 
-      <div id="compiler-panel">
+    <!-- Right: Compiler Output -->
+    <div id="compiler-panel">
       <div class="compiler-section">
         <h3>Symbolic</h3>
         <pre id="symbolic-output"></pre>
@@ -62,8 +62,7 @@ L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
         <h3>After lego-to-llvm</h3>
         <pre id="mlir-llvm"></pre>
       </div>
-    </div><!-- /compiler-panel -->
-    </div><!-- /viz-compiler-row -->
+    </div>
   </main>
 
   <script type="module" src="js/main.js"></script>
