@@ -15,22 +15,18 @@ const PRESETS = {
   'row-major': {
     label: 'Row-Major',
     code: 'L = OrderBy(Row(M, N)).GroupBy([(M, N)])',
-    needsTile: false,
   },
   'col-major': {
     label: 'Col-Major',
     code: 'L = OrderBy(Col(M, N)).GroupBy([(M, N)])',
-    needsTile: false,
   },
   'tiled': {
     label: 'Tiled',
-    code: 'L = OrderBy(Row(M, N)).TileBy([M//BM, N//BN], [BM, BN])',
-    needsTile: true,
+    code: 'BM, BN = 4, 4\nL = OrderBy(Row(M, N)).TileBy([M//BM, N//BN], [BM, BN])',
   },
   'transposed': {
     label: 'Transposed',
     code: 'L = OrderBy(RegP((M, N), (1, 0))).GroupBy([(M, N)])',
-    needsTile: false,
   },
 };
 
@@ -57,10 +53,7 @@ const runBtn = document.getElementById('run-btn');
 const errorOutput = document.getElementById('error-output');
 const dimM = document.getElementById('dim-M');
 const dimN = document.getElementById('dim-N');
-const dimBM = document.getElementById('dim-BM');
-const dimBN = document.getElementById('dim-BN');
 const presetBtns = document.querySelectorAll('.preset-btn');
-const tileFields = document.getElementById('tile-fields');
 const formulaOutput = document.getElementById('formula-output');
 
 // ============================================================================
@@ -265,11 +258,6 @@ function selectPreset(name) {
   presetBtns.forEach(btn => {
     btn.classList.toggle('active', btn.dataset.preset === name);
   });
-
-  // Show/hide tile dimension fields
-  if (tileFields) {
-    tileFields.style.display = preset.needsTile ? 'grid' : 'none';
-  }
 }
 
 presetBtns.forEach(btn => {
@@ -289,8 +277,6 @@ async function runVisualization() {
 
   const M = parseInt(dimM.value) || 8;
   const N = parseInt(dimN.value) || 8;
-  const BM = parseInt(dimBM.value) || 4;
-  const BN = parseInt(dimBN.value) || 4;
 
   runBtn.disabled = true;
   runBtn.textContent = 'Compiling...';
@@ -304,7 +290,6 @@ async function runVisualization() {
       body: JSON.stringify({
         code,
         shape: [M, N],
-        extra_dims: { BM, BN },
       }),
     });
 
