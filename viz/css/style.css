@@ -125,7 +125,7 @@ header h1 span { color: var(--accent); }
 /* Main 3-column layout — all side by side */
 #app {
   display: grid;
-  grid-template-columns: clamp(200px, 20vw, 300px) 1fr clamp(200px, 25vw, 380px);
+  grid-template-columns: 25% 1fr clamp(200px, 25vw, 380px);
   height: calc(100vh - 41px);
   overflow: hidden;
 }
