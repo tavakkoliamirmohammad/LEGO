@@ -8,6 +8,33 @@
 import { render } from './renderer.js';
 
 // ============================================================================
+// MLIR syntax highlighting
+// ============================================================================
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function highlightMLIR(text) {
+  if (!text) return '';
+  return esc(text)
+    // Comments
+    .replace(/(\/\/.*)/g, '<span class="hl-comment">$1</span>')
+    // String attributes
+    .replace(/("(?:[^"\\]|\\.)*")/g, '<span class="hl-string">$1</span>')
+    // Dialect ops: lego.xyz, arith.xyz, scf.xyz, llvm.xyz, memref.xyz, func.xyz
+    .replace(/\b(lego|arith|scf|llvm|memref|func|builtin|cf|gpu)\.\w+/g, '<span class="hl-op">$&</span>')
+    // Types: !lego.layout, index, i32, i64, f32, memref<...>
+    .replace(/(!lego\.\w+|(?<![%@])(?:\b(?:index|i1|i8|i16|i32|i64|f16|f32|f64)\b))/g, '<span class="hl-type">$1</span>')
+    // SSA values: %arg0, %0, %c4
+    .replace(/(%[\w]+)/g, '<span class="hl-ssa">$1</span>')
+    // Constants (numbers)
+    .replace(/\b(\d+)\b/g, '<span class="hl-num">$1</span>')
+    // Keywords
+    .replace(/\b(func\.func|return|module|scf\.for|scf\.yield|step|to|public|attributes)\b/g, '<span class="hl-kw">$&</span>');
+}
+
+// ============================================================================
 // Presets
 // ============================================================================
 
@@ -320,15 +347,17 @@ async function runVisualization() {
       formulaOutput.textContent = info;
     }
 
-    // Show compiler outputs
+    // Show compiler outputs with syntax highlighting
+    const symEl = document.getElementById('symbolic-output');
+    if (symEl) symEl.textContent = data.symbolic || '';
+
     for (const [id, key] of [
-      ['symbolic-output', 'symbolic'],
       ['mlir-lego', 'mlir_lego'],
       ['mlir-arith', 'mlir_arith'],
       ['mlir-llvm', 'mlir_llvm'],
     ]) {
       const el = document.getElementById(id);
-      if (el) el.textContent = data[key] || '';
+      if (el) el.innerHTML = highlightMLIR(data[key] || '');
     }
 
   } catch (e) {

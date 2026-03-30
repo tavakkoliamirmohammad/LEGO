@@ -403,16 +403,35 @@ def compile_mapping_json(layout, shape):
             flat = int(output[k])
             mapping.append(list(coords) + [flat])
 
-    # Compute symbolic expression: L[i, j] via SymPy
+    # Compute symbolic expression via SymPy + Python printer
     symbolic = ""
     try:
         from lego.core import GroupBy, TileByLayout
-        if isinstance(layout, GroupBy) and not isinstance(layout, TileByLayout):
-            i_sym, j_sym = sp.symbols('i j', integer=True)
-            expr = layout.apply(i_sym, j_sym)
-            symbolic = f"L[i, j] = {expr}"
-    except Exception:
-        pass
+        from lego.python_printer import LEGOPythonCodePrinter
+        printer = LEGOPythonCodePrinter()
+
+        if isinstance(layout, TileByLayout):
+            rank = len(layout_dims)
+            names = []
+            for k in range(nd):
+                names.append(f"ti{k}")
+                names.append(f"ii{k}")
+            sym_indices = sp.symbols(' '.join(names[:rank]), integer=True)
+            if rank == 1:
+                sym_indices = (sym_indices,)
+            expr = layout.apply(*sym_indices)
+            idx_str = ', '.join(str(s) for s in sym_indices)
+            symbolic = f"L[{idx_str}] = {printer.doprint(expr)}"
+        elif isinstance(layout, GroupBy):
+            sym_names = ['i', 'j', 'k', 'l', 'm', 'n'][:nd]
+            sym_indices = sp.symbols(' '.join(sym_names), integer=True)
+            if nd == 1:
+                sym_indices = (sym_indices,)
+            expr = layout.apply(*sym_indices)
+            idx_str = ', '.join(str(s) for s in sym_indices)
+            symbolic = f"L[{idx_str}] = {printer.doprint(expr)}"
+    except Exception as e:
+        symbolic = f"(symbolic eval failed: {e})"
 
     return {
         "mapping": mapping,

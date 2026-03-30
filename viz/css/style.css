@@ -270,6 +270,15 @@ svg.has-hover .connection.highlighted { opacity: 1; stroke-width: 2.5; }
   border-radius: 4px;
 }
 
+/* MLIR syntax highlighting */
+.hl-op { color: #7ec8e3; }
+.hl-type { color: #c792ea; }
+.hl-ssa { color: #f78c6c; }
+.hl-num { color: #f78c6c; }
+.hl-kw { color: #c3e88d; font-weight: 600; }
+.hl-string { color: #c3e88d; }
+.hl-comment { color: #546e7a; font-style: italic; }
+
 /* Autocomplete dropdown */
 #autocomplete-dropdown {
   display: none;
