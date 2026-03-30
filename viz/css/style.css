@@ -1,6 +1,7 @@
 /* LEGO Layout Visualizer — Styles */
 
-:root {
+/* Dark theme (default) */
+:root, [data-theme="dark"] {
   --bg: #1a1a2e;
   --surface: #16213e;
   --surface2: #0f3460;
@@ -10,8 +11,32 @@
   --border: #2a2a4a;
   --editor-bg: #1e1e3f;
   --cell-border: #3a3a5a;
+  --line-num: #555;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
 }
+
+/* Light theme */
+[data-theme="light"] {
+  --bg: #f5f5f5;
+  --surface: #ffffff;
+  --surface2: #e8edf2;
+  --accent: #d63384;
+  --text: #1a1a2e;
+  --text-dim: #666;
+  --border: #d0d0d0;
+  --editor-bg: #fafafa;
+  --cell-border: #bbb;
+  --line-num: #aaa;
+}
+
+[data-theme="light"] .cell text { fill: #333; }
+[data-theme="light"] .hl-op { color: #0550ae; }
+[data-theme="light"] .hl-type { color: #8250df; }
+[data-theme="light"] .hl-ssa { color: #cf222e; }
+[data-theme="light"] .hl-num { color: #cf222e; }
+[data-theme="light"] .hl-kw { color: #116329; }
+[data-theme="light"] .hl-string { color: #116329; }
+[data-theme="light"] .hl-comment { color: #8b949e; }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -85,10 +110,22 @@ header h1 span { color: var(--accent); }
 #run-btn:hover { opacity: 0.9; }
 #run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* Main 3-column layout — each panel fills its column */
+#theme-btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 16px;
+  cursor: pointer;
+  line-height: 1;
+}
+#theme-btn:hover { opacity: 0.8; }
+
+/* Main 3-column layout — editor and compiler fit content, viz takes the rest */
 #app {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: minmax(250px, 1fr) minmax(300px, 2fr) minmax(280px, 1fr);
   height: calc(100vh - 41px);
 }
 
@@ -115,10 +152,29 @@ header h1 span { color: var(--accent); }
 #code-editor-wrapper {
   flex: 1;
   min-height: 0;
+  display: flex;
+  background: var(--editor-bg);
+  overflow: hidden;
+}
+
+#line-numbers {
+  padding: 10px 0;
+  padding-right: 8px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--line-num);
+  user-select: none;
+  min-width: 32px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
 }
 
 #code-editor {
-  width: 100%;
+  flex: 1;
+  width: 0;
   height: 100%;
   background: var(--editor-bg);
   color: var(--text);
@@ -130,6 +186,7 @@ header h1 span { color: var(--accent); }
   line-height: 1.5;
   outline: none;
   tab-size: 4;
+  overflow: auto;
 }
 
 /* Error output */

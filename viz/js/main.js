@@ -173,9 +173,7 @@ function acceptCompletion(index) {
   hideAutocomplete();
 }
 
-editor.addEventListener('input', () => {
-  showAutocomplete();
-});
+// input listener is in the line numbers section above
 
 editor.addEventListener('keydown', (e) => {
   if (acVisible) {
@@ -269,6 +267,42 @@ editor.addEventListener('blur', () => {
 });
 
 // ============================================================================
+// Theme toggle
+// ============================================================================
+
+const themeBtn = document.getElementById('theme-btn');
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  themeBtn.textContent = theme === 'dark' ? '\u263E' : '\u2600';
+  localStorage.setItem('lego-theme', theme);
+}
+
+themeBtn.addEventListener('click', () => {
+  const current = document.documentElement.getAttribute('data-theme') || 'dark';
+  setTheme(current === 'dark' ? 'light' : 'dark');
+});
+
+// Restore saved theme
+setTheme(localStorage.getItem('lego-theme') || 'dark');
+
+// ============================================================================
+// Line numbers
+// ============================================================================
+
+const lineNumbers = document.getElementById('line-numbers');
+
+function updateLineNumbers() {
+  const lines = editor.value.split('\n').length;
+  lineNumbers.innerHTML = Array.from({ length: lines }, (_, i) =>
+    `<div style="padding:0 4px">${i + 1}</div>`
+  ).join('');
+}
+
+editor.addEventListener('input', () => { updateLineNumbers(); showAutocomplete(); });
+editor.addEventListener('scroll', () => { lineNumbers.scrollTop = editor.scrollTop; });
+updateLineNumbers();
+
+// ============================================================================
 // Preset handling
 // ============================================================================
 
@@ -278,6 +312,7 @@ function selectPreset(name) {
 
   currentPreset = name;
   editor.value = preset.code;
+  updateLineNumbers();
 
   // Update active button
   presetBtns.forEach(btn => {
