@@ -356,23 +356,16 @@ def compile_mapping_json(layout, shape):
 
             func_dialect.ReturnOp([])
 
-    # 1. LEGO MLIR after canonicalize + CSE
-    with ctx:
-        pm_clean = PassManager.parse("builtin.module(canonicalize,cse)")
-        pm_clean.run(module.operation)
-    mlir_lego = str(module)
+    # Generate clean @apply IR for display (no memref/loops)
+    display_ir = compile_ir_only(layout)
+    mlir_lego = display_ir["mlir_lego"]
+    mlir_arith = display_ir["mlir_arith"]
+    mlir_llvm = display_ir["mlir_llvm"]
 
-    # 2. After lego-lower (LEGO → Arith)
-    with ctx:
-        pm_lower = PassManager.parse("builtin.module(lego-lower)")
-        pm_lower.run(module.operation)
-    mlir_arith = str(module)
-
-    # 3. After lego-to-llvm (Arith → LLVM)
+    # Lower the viz_mapping module for JIT execution
     with ctx:
         pm_llvm = PassManager.parse("builtin.module(lego-to-llvm)")
         pm_llvm.run(module.operation)
-    mlir_llvm = str(module)
 
     from mlir.execution_engine import ExecutionEngine
     from mlir.runtime import get_ranked_memref_descriptor
