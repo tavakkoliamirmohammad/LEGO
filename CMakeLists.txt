@@ -426,6 +426,38 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       string(REPLACE ".py" "" _name ${_example})
       add_dependencies(check-transpose-examples check-transpose-${_name})
     endforeach()
+
+    # --- LEGO GPU kernel benchmarks (vecadd, matmul, reduce) ---
+    # Each takes a single size argument; matmul uses square M=N=K.
+    set(_gpu_benchmarks
+      "vecadd.py;1024"
+      "matmul_naive.py;64"
+      "matmul_smem.py;64"
+      "reduce_sum.py;1024"
+    )
+    foreach(_entry ${_gpu_benchmarks})
+      list(GET _entry 0 _example)
+      list(GET _entry 1 _size)
+      string(REPLACE ".py" "" _name ${_example})
+      add_custom_target(check-gpu-${_name}
+        COMMAND ${CMAKE_COMMAND} -E env
+          "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+          "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
+          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_example}" "${_size}"
+        DEPENDS LegoPythonModules
+        COMMENT "Running GPU benchmark: ${_example} ${_size}"
+        USES_TERMINAL
+      )
+    endforeach()
+
+    add_custom_target(check-gpu-examples
+      COMMENT "Running all LEGO GPU kernel benchmarks (@gpu_kernel DSL)"
+    )
+    foreach(_entry ${_gpu_benchmarks})
+      list(GET _entry 0 _example)
+      string(REPLACE ".py" "" _name ${_example})
+      add_dependencies(check-gpu-examples check-gpu-${_name})
+    endforeach()
   endif()
 
   # --- Wheel build + verification target ---
@@ -462,5 +494,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   if(TARGET check-transpose-examples)
     add_dependencies(check-lego-all check-transpose-examples)
+  endif()
+  if(TARGET check-gpu-examples)
+    add_dependencies(check-lego-all check-gpu-examples)
   endif()
 endif()
