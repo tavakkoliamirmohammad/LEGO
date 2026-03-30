@@ -13,12 +13,13 @@ option(LEGO_BUILD_TESTS "Build LEGO tests" ON)
 set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV;WebAssembly" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;SPIRV;WebAssembly;AArch64)")
 
 # --- Python & Venv Support ---
-# Prioritize the local virtual environment
-set(LEGO_VENV_PATH "${CMAKE_SOURCE_DIR}/venv")
-if(EXISTS "${LEGO_VENV_PATH}/bin/python3")
-  set(Python3_EXECUTABLE "${LEGO_VENV_PATH}/bin/python3")
-  set(Python3_ROOT_DIR "${LEGO_VENV_PATH}")
-  message(STATUS "Prioritizing Python from venv: ${Python3_EXECUTABLE}")
+if(NOT EMSCRIPTEN)
+  set(LEGO_VENV_PATH "${CMAKE_SOURCE_DIR}/venv")
+  if(EXISTS "${LEGO_VENV_PATH}/bin/python3")
+    set(Python3_EXECUTABLE "${LEGO_VENV_PATH}/bin/python3")
+    set(Python3_ROOT_DIR "${LEGO_VENV_PATH}")
+    message(STATUS "Prioritizing Python from venv: ${Python3_EXECUTABLE}")
+  endif()
 endif()
 
 # --- Fast Linker Support ---
@@ -58,7 +59,7 @@ endif()
 
 # --- MLIR Configuration ---
 if(LEGO_MONOLITHIC_LLVM)
-  set(LLVM_SUBMODULE_DIR "${CMAKE_SOURCE_DIR}/third_party/llvm-project")
+  set(LLVM_SUBMODULE_DIR "${PROJECT_SOURCE_DIR}/third_party/llvm-project")
   if(NOT EXISTS "${LLVM_SUBMODULE_DIR}")
     message(FATAL_ERROR "llvm-project submodule not found at ${LLVM_SUBMODULE_DIR}")
   endif()
@@ -76,7 +77,11 @@ if(LEGO_MONOLITHIC_LLVM)
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_BINDINGS OFF CACHE BOOL "" FORCE)
-  set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "" FORCE)
+  if(NOT EMSCRIPTEN)
+    set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "" FORCE)
+  else()
+    set(MLIR_ENABLE_BINDINGS_PYTHON OFF CACHE BOOL "" FORCE)
+  endif()
   set(LLVM_ENABLE_Z3_SOLVER OFF CACHE BOOL "" FORCE)
   if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
@@ -216,6 +221,34 @@ include_directories(${CMAKE_BINARY_DIR}/include)
 
 add_subdirectory(include/Lego)
 add_subdirectory(lib/Lego)
+
+if(EMSCRIPTEN)
+  # WASM build: only build the driver, skip lego-opt/Python/tests
+  add_executable(lego_driver viz/wasm/lego_driver.cpp)
+  target_link_libraries(lego_driver PRIVATE MLIRLego)
+  set_target_properties(lego_driver PROPERTIES SUFFIX ".js")
+  target_link_options(lego_driver PRIVATE
+    "SHELL:-s EXPORTED_FUNCTIONS=['_lego_compile','_lego_free','_malloc','_free']"
+    "SHELL:-s EXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','stringToUTF8','lengthBytesUTF8']"
+    "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+    "SHELL:-s INITIAL_MEMORY=67108864"
+    "SHELL:-s MODULARIZE=1"
+    "SHELL:-s EXPORT_NAME='LEGOCompiler'"
+    "SHELL:-s ENVIRONMENT='web'"
+    -O2
+  )
+  add_custom_command(TARGET lego_driver POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+      $<TARGET_FILE:lego_driver>
+      ${CMAKE_SOURCE_DIR}/viz/wasm/lego_driver.js
+    COMMAND ${CMAKE_COMMAND} -E copy
+      $<TARGET_FILE_DIR:lego_driver>/lego_driver.wasm
+      ${CMAKE_SOURCE_DIR}/viz/wasm/lego_driver.wasm
+    COMMENT "Copying WASM driver to viz/wasm/"
+  )
+  return()
+endif()
+
 add_subdirectory(tools/lego-opt)
 
 # --- Python Bindings for LEGO Dialect ---
@@ -542,4 +575,56 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   if(TARGET check-gpu-examples)
     add_dependencies(check-lego-all check-gpu-examples)
   endif()
+endif()
+
+# --- WASM Viz Driver (Emscripten) ---
+# Builds the full LEGO/MLIR compiler as a WebAssembly module for
+# browser-based layout visualization with IR output.
+#
+# To build: cmake --build . --target lego-viz-wasm
+# Requires Emscripten (emcc) in PATH.
+find_program(EMCC_BIN emcc)
+if(EMCC_BIN)
+  set(WASM_DRIVER_SRC "${CMAKE_SOURCE_DIR}/viz/wasm/lego_driver.cpp")
+  set(WASM_OUT_DIR "${CMAKE_SOURCE_DIR}/viz/wasm")
+  set(WASM_OUT_JS "${WASM_OUT_DIR}/lego_driver.js")
+
+  # Collect include paths and library paths from the current build
+  set(WASM_INCLUDES
+    "-I${CMAKE_SOURCE_DIR}/include"
+    "-I${CMAKE_BINARY_DIR}/include"
+    "-I${LLVM_INCLUDE_DIRS}"
+    "-I${MLIR_INCLUDE_DIRS}"
+  )
+
+  add_custom_command(
+    OUTPUT ${WASM_OUT_JS}
+    COMMAND ${EMCC_BIN}
+      ${WASM_DRIVER_SRC}
+      ${WASM_INCLUDES}
+      -L${CMAKE_BINARY_DIR}/lib
+      -lMLIRLego
+      -lMLIRParser -lMLIRPass -lMLIRTransforms
+      -lMLIRArithDialect -lMLIRFuncDialect -lMLIRSCFDialect
+      -lMLIRMemRefDialect -lMLIRIndexDialect
+      -lMLIRControlFlowDialect -lMLIRLLVMDialect
+      -lMLIRIR -lMLIRSupport -lLLVMSupport
+      -s EXPORTED_FUNCTIONS="['_lego_compile','_lego_free','_malloc','_free']"
+      -s EXPORTED_RUNTIME_METHODS="['ccall','cwrap','UTF8ToString','stringToUTF8','lengthBytesUTF8']"
+      -s ALLOW_MEMORY_GROWTH=1
+      -s INITIAL_MEMORY=67108864
+      -s MODULARIZE=1
+      -s EXPORT_NAME='LEGOCompiler'
+      -s ENVIRONMENT='web'
+      -O2
+      -o ${WASM_OUT_JS}
+    DEPENDS ${WASM_DRIVER_SRC} MLIRLego
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Building LEGO WASM driver (Emscripten)"
+  )
+
+  add_custom_target(lego-viz-wasm DEPENDS ${WASM_OUT_JS})
+  message(STATUS "Emscripten found — 'lego-viz-wasm' target available")
+else()
+  message(STATUS "Emscripten not found — 'lego-viz-wasm' target not available")
 endif()

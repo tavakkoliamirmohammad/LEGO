@@ -3,27 +3,29 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include_directories(${CMAKE_BINARY_DIR}/include)
 
-# --- Z3 solver (needed by SMT verification passes) ---
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-get_filename_component(PYTHON_BIN_DIR "${Python3_EXECUTABLE}" DIRECTORY)
+# --- Z3 solver (needed by SMT verification passes, skip for Emscripten) ---
+if(NOT EMSCRIPTEN)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  get_filename_component(PYTHON_BIN_DIR "${Python3_EXECUTABLE}" DIRECTORY)
 
-execute_process(
-  COMMAND "${Python3_EXECUTABLE}" -c "import z3"
-  RESULT_VARIABLE Z3_IMPORT_RESULT OUTPUT_QUIET ERROR_QUIET)
-
-if(NOT Z3_IMPORT_RESULT EQUAL 0)
-  message(STATUS "z3-solver not found, installing...")
   execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -m pip install z3-solver
-    RESULT_VARIABLE PIP_RESULT)
-  if(NOT PIP_RESULT EQUAL 0)
-    message(FATAL_ERROR "Failed to install z3-solver")
-  endif()
-endif()
+    COMMAND "${Python3_EXECUTABLE}" -c "import z3"
+    RESULT_VARIABLE Z3_IMPORT_RESULT OUTPUT_QUIET ERROR_QUIET)
 
-find_program(Z3_BIN_PATH NAMES z3 HINTS "${PYTHON_BIN_DIR}" REQUIRED)
-message(STATUS "Using Z3: ${Z3_BIN_PATH}")
-add_definitions(-DLEGO_Z3_EXECUTABLE="${Z3_BIN_PATH}")
+  if(NOT Z3_IMPORT_RESULT EQUAL 0)
+    message(STATUS "z3-solver not found, installing...")
+    execute_process(
+      COMMAND "${Python3_EXECUTABLE}" -m pip install z3-solver
+      RESULT_VARIABLE PIP_RESULT)
+    if(NOT PIP_RESULT EQUAL 0)
+      message(FATAL_ERROR "Failed to install z3-solver")
+    endif()
+  endif()
+
+  find_program(Z3_BIN_PATH NAMES z3 HINTS "${PYTHON_BIN_DIR}" REQUIRED)
+  message(STATUS "Using Z3: ${Z3_BIN_PATH}")
+  add_definitions(-DLEGO_Z3_EXECUTABLE="${Z3_BIN_PATH}")
+endif()
 
 # --- GPU backend sources (conditional on LLVM targets) ---
 set(_GPU_BACKEND_SOURCES LegoSPIRVPipeline.cpp LegoLLVMSPIRVPipeline.cpp)
@@ -68,6 +70,7 @@ endif()
 
 # --- Core dialect library ---
 add_mlir_dialect_library(MLIRLego
+  PARTIAL_SOURCES_INTENDED
   # Dialect core
   LegoDialect.cpp
   LegoOps.cpp
