@@ -18,11 +18,12 @@ import sympy as sp
 
 from mlir.ir import (
     Context, Location, Module, InsertionPoint,
-    IndexType, IntegerType, FunctionType, StringAttr, UnitAttr,
+    IndexType, IntegerType, MemRefType, FunctionType, StringAttr, UnitAttr,
 )
 from mlir.dialects import func as func_dialect
 from mlir.dialects import scf as scf_dialect
 from mlir.dialects import arith as arith_dialect
+from mlir.dialects import memref as memref_dialect
 from mlir.passmanager import PassManager
 
 from lego.backend.dialects.lego_dialect import register as register_lego
@@ -228,22 +229,20 @@ def _link_wasm(obj_bytes, exports):
 def compile_mapping_json(layout, shape):
     """Compile layout and return mapping as JSON-serializable dict.
 
-    For TileBy layouts, the permutation table's identity is N-D (e.g. 4D
-    for 2D+tiling), not 2D row-major.  We invert the inv table to get
-    the correct physical address for each 2D logical coordinate:
-      physical_addr_of[rowmajor_pos] = p  where  inv[p] == rowmajor_pos
-
-    For GroupBy (non-tiled) layouts, the identity matches the shape dims,
-    so fwd[i*N+j] directly gives the physical address.
+    JIT-compiles an MLIR function that maps a 2D row-major flat index
+    to the layout's physical address.  The MLIR function:
+      1. Takes flat index k (0..M*N-1)
+      2. Unflattens k → 2D (i,j) via row(M,N).inv
+      3. Decomposes (i,j) → N-D tile coords via divmod
+      4. Applies the layout to get the physical flat address
+    MLIR handles ALL indexing — no manual sigma/4D interpretation.
 
     Returns:
         dict with keys: mapping (list of [i, j, flat]), shape, total
     """
-    from lego.backend.compiler import LayoutCompiler
+    import ctypes
+    import numpy as np
     from lego.core import TileByLayout
-
-    compiler = LayoutCompiler(layout, shape, "i64")
-    fwd, inv = compiler.get_permutation_table()
 
     total = 1
     for s in shape:
@@ -251,67 +250,141 @@ def compile_mapping_json(layout, shape):
 
     layout_dims = [int(d) for d in (layout._dims if hasattr(layout, '_dims') else layout.dims())]
     layout_rank = len(layout_dims)
+    nd = len(shape)
 
-    if isinstance(layout, TileByLayout) and layout_rank > len(shape):
-        # TileBy normalization applies a sigma permutation that interleaves
-        # tile dimensions: the 4D identity coords are
-        #   (tile_M, inner_M, tile_N, inner_N)
-        # NOT (tile_M, tile_N, inner_M, inner_N).
-        #
-        # So the 2D→4D mapping is:
-        #   (i, j) → (i//BM, i%BM, j//BN, j%BN)
-        #
-        # Then fwd[4D_identity_pos] gives the physical address.
-        tile_groups = layout._tile_groups
-        nd = len(shape)
-        inner_sizes = [int(d) for d in tile_groups[-1]]
-        id_strides = _compute_strides(layout_dims)
+    # Build an MLIR module with @viz_mapping(%output: memref<?xi64>, %n: index)
+    # that fills output[k] = layout.apply(unflatten(k)) for k in 0..n-1.
+    ctx = Context()
+    register_lego(ctx)
 
-        mapping = []
-        if nd == 2:
-            M, N = int(shape[0]), int(shape[1])
-            BM, BN = inner_sizes[0], inner_sizes[1]
-            for i in range(M):
-                for j in range(N):
-                    # Sigma-interleaved 4D: (tile_M, inner_M, tile_N, inner_N)
-                    d0 = i // BM   # tile_M
-                    d1 = i % BM    # inner_M
-                    d2 = j // BN   # tile_N
-                    d3 = j % BN    # inner_N
-                    k = d0 * id_strides[0] + d1 * id_strides[1] + d2 * id_strides[2] + d3
-                    phys = int(fwd[k])
-                    mapping.append([i, j, phys])
-        else:
-            # General N-D tiling: interleave (outer_k, inner_k) per dim
-            import itertools
-            dims = [int(s) for s in shape]
-            for coords in itertools.product(*[range(d) for d in dims]):
-                interleaved = []
-                for k_dim in range(nd):
-                    interleaved.append(coords[k_dim] // inner_sizes[k_dim])
-                    interleaved.append(coords[k_dim] % inner_sizes[k_dim])
-                k = sum(c * s for c, s in zip(interleaved, id_strides))
-                if len(interleaved) > len(id_strides):
-                    k += interleaved[-1]
-                phys = int(fwd[k])
-                mapping.append(list(coords) + [phys])
+    with ctx, Location.unknown():
+        module = Module.create()
+        idx_ty = IndexType.get()
+        i64_ty = IntegerType.get_signless(64)
+        memref_ty = MemRefType.get([total], i64_ty)
 
-        return {"mapping": mapping, "shape": [int(s) for s in shape], "total": total}
+        param_types = [memref_ty, idx_ty]
+        func_ty = FunctionType.get(param_types, [])
 
-    # Non-tiled (GroupBy): identity matches shape dims, fwd[i*N+j] is correct
+        with InsertionPoint(module.body):
+            f = func_dialect.FuncOp("viz_mapping", func_ty)
+            f.sym_visibility = StringAttr.get("public")
+            f.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+        entry = f.add_entry_block()
+        out_buf, n_val = entry.arguments[0], entry.arguments[1]
+
+        with InsertionPoint(entry):
+            from lego.backend.symbolic import emit_layout_from_python, _resolve_dim
+
+            # Build sym_to_val with concrete shape values
+            sym_to_val = {}
+            actual_dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
+            all_syms = set()
+            for d in actual_dims:
+                if isinstance(d, sp.Expr):
+                    all_syms |= d.free_symbols
+
+            # Collect symbols from all sub-layouts
+            for attr in ('objects', '_input_chain', '_tile_groups'):
+                container = getattr(layout, attr, None)
+                if container is None:
+                    continue
+                for item in container:
+                    if hasattr(item, 'dims'):
+                        for d in item.dims():
+                            if isinstance(d, sp.Expr):
+                                all_syms |= d.free_symbols
+                    elif hasattr(item, 'perms'):
+                        for p in item.perms:
+                            for d in p.dims():
+                                if isinstance(d, sp.Expr):
+                                    all_syms |= d.free_symbols
+                    elif isinstance(item, (list, tuple)):
+                        for d in item:
+                            if isinstance(d, sp.Expr):
+                                all_syms |= d.free_symbols
+
+            # Auto-resolve symbols from positional shape matching
+            positional = list(actual_dims)
+            for i_d, d in enumerate(positional):
+                if isinstance(d, sp.Symbol) and i_d < nd:
+                    sym_to_val[d] = _index_const(int(shape[i_d]))
+            for sym in all_syms:
+                if sym not in sym_to_val:
+                    sym_to_val[sym] = _index_const(1)
+
+            # Emit the layout
+            layout_val = emit_layout_from_python(layout, sym_to_val)
+
+            # Emit a 2D row-major identity: row(M, N)
+            shape_vals = [_index_const(int(s)) for s in shape]
+            identity_2d = _emit_group_by(shape_vals,
+                                         [_emit_order_by([_emit_row(shape_vals)])])
+
+            # Loop over all positions
+            loop = scf_dialect.ForOp(_index_const(0), n_val, _index_const(1))
+            with InsertionPoint(loop.body):
+                iv = loop.induction_variable
+
+                # Unflatten: k → 2D (i, j) via identity_2d.inv
+                coords_2d = _emit_apply_inverse(identity_2d, iv, nd)
+
+                # Decompose 2D → N-D using divmod for TileBy
+                if isinstance(layout, TileByLayout) and layout_rank > nd:
+                    tile_groups = layout._tile_groups
+                    inner_sizes = [int(d) for d in tile_groups[-1]]
+                    # Sigma-interleaved: (outer_k, inner_k) per original dim
+                    nd_coords = []
+                    for k_dim in range(nd):
+                        coord = coords_2d[k_dim]
+                        bsize = _index_const(inner_sizes[k_dim])
+                        nd_coords.append(arith_dialect.divui(coord, bsize))
+                        nd_coords.append(arith_dialect.remui(coord, bsize))
+                    flat_phys = _emit_apply(layout_val, nd_coords)
+                else:
+                    # Non-tiled: 2D coords go directly to layout
+                    flat_phys = _emit_apply(layout_val, coords_2d)
+
+                # Cast to i64 and store
+                flat_i64 = arith_dialect.index_cast(i64_ty, flat_phys)
+                memref_dialect.StoreOp(flat_i64, out_buf, [iv])
+                scf_dialect.YieldOp([])
+
+            func_dialect.ReturnOp([])
+
+    # JIT compile
+    with ctx:
+        pm = PassManager.parse("builtin.module(lego-to-llvm)")
+        pm.run(module.operation)
+
+    from mlir.execution_engine import ExecutionEngine
+    from mlir.runtime import get_ranked_memref_descriptor
+    engine = ExecutionEngine(module, opt_level=2)
+
+    # Allocate output and invoke
+    output = np.zeros(total, dtype=np.int64)
+    out_desc = get_ranked_memref_descriptor(output)
+    n_arr = ctypes.c_longlong(total)
+    engine.invoke("viz_mapping",
+                  ctypes.pointer(ctypes.pointer(out_desc)),
+                  ctypes.pointer(n_arr))
+
+    # Build mapping from output
     mapping = []
-    if len(shape) == 2:
+    if nd == 2:
         M, N = int(shape[0]), int(shape[1])
         for i in range(M):
             for j in range(N):
-                flat = int(fwd[i * N + j])
+                flat = int(output[i * N + j])
                 mapping.append([i, j, flat])
     else:
         import itertools
         dims = [int(s) for s in shape]
+        strides = _compute_strides(dims)
         for coords in itertools.product(*[range(d) for d in dims]):
-            linear = sum(c * stride for c, stride in zip(coords, _compute_strides(dims)))
-            flat = int(fwd[linear])
+            k = sum(c * s for c, s in zip(coords, strides))
+            flat = int(output[k])
             mapping.append(list(coords) + [flat])
 
     return {"mapping": mapping, "shape": [int(s) for s in shape], "total": total}
