@@ -37,7 +37,17 @@ from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer, _index_const
 # ============================================================================
 
 class Buffer:
-    """Global GPU buffer.  ``Buffer[N]`` or ``Buffer[M, K]``."""
+    """Global GPU buffer.
+
+    Two forms::
+
+        Buffer[N]          # Row(N) layout (default)
+        Buffer[M, K]       # Row(M, K) layout (default)
+        Buffer(layout, M, K)  # custom LEGO layout
+    """
+    def __new__(cls, layout, *dims, dtype=DType.f32):
+        return _BufferType(dims=tuple(dims), shared=False, dtype=dtype, layout=layout)
+
     def __class_getitem__(cls, dims):
         if not isinstance(dims, tuple):
             dims = (dims,)
@@ -45,7 +55,16 @@ class Buffer:
 
 
 class Shared:
-    """Shared (workgroup) memory buffer.  ``Shared[TILE]`` or ``Shared[T, T]``."""
+    """Shared (workgroup) memory buffer.
+
+    Two forms::
+
+        Shared[TILE]              # Row(TILE) layout
+        Shared(layout, TILE, TILE)  # custom layout
+    """
+    def __new__(cls, layout, *dims, dtype=DType.f32):
+        return _BufferType(dims=tuple(dims), shared=True, dtype=dtype, layout=layout)
+
     def __class_getitem__(cls, dims):
         if not isinstance(dims, tuple):
             dims = (dims,)
@@ -57,6 +76,7 @@ class _BufferType:
     dims: tuple
     shared: bool = False
     dtype: DType = DType.f32
+    layout: object = None       # None → default Row(*dims)
 
 
 # ============================================================================
@@ -122,10 +142,11 @@ def _build(fn, grid, block):
         assert isinstance(ann, _BufferType), (
             f"Expected Buffer[…] or Shared[…] for '{arg.arg}'")
         dims = tuple(int(d) for d in ann.dims)
-        buf_params.append((arg.arg, _BufferType(dims, ann.shared, ann.dtype)))
+        buf_params.append((arg.arg, _BufferType(dims, ann.shared, ann.dtype, ann.layout)))
 
     buffers = [
-        LayoutBuffer(Row(*bt.dims), shape=bt.dims, dtype=bt.dtype, shared=bt.shared)
+        LayoutBuffer(bt.layout or Row(*bt.dims), shape=bt.dims, dtype=bt.dtype,
+                     shared=bt.shared)
         for _, bt in buf_params
     ]
 
