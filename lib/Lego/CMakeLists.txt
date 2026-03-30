@@ -26,8 +26,14 @@ message(STATUS "Using Z3: ${Z3_BIN_PATH}")
 add_definitions(-DLEGO_Z3_EXECUTABLE="${Z3_BIN_PATH}")
 
 # --- GPU backend sources (conditional on LLVM targets) ---
-set(_GPU_BACKEND_SOURCES LegoSPIRVPipeline.cpp)
+set(_GPU_BACKEND_SOURCES LegoSPIRVPipeline.cpp LegoLLVMSPIRVPipeline.cpp)
 set(_GPU_BACKEND_LIBS)
+
+if(LEGO_HAS_SPIRV)
+  list(APPEND _GPU_BACKEND_LIBS
+    MLIRGPUToLLVMSPV
+  )
+endif()
 
 if(LEGO_HAS_NVPTX)
   list(APPEND _GPU_BACKEND_SOURCES LegoNVVMPipeline.cpp)
@@ -108,6 +114,7 @@ add_mlir_dialect_library(MLIRLego
   MLIRSPIRVTransforms
   MLIRSPIRVUtils
   MLIRSPIRVSerialization
+  MLIRSPIRVTarget
   MLIRGPUToSPIRV
   MLIRArithToSPIRV
   MLIRFuncToSPIRV

@@ -91,27 +91,27 @@ lower the dialect all the way to machine code:
   | cuTile         |  | code     |    |     |     |
   +----------------+  +----------+    |     |     |
                                       |     |     |
-              +-----------------------+     |     +------------------+
-              |                             |                        |
-     +--------+--------+          +--------+--------+     +---------+--------+
-     |  lego-to-llvm   |          |  lego-to-nvvm   |     |  lego-to-spirv   |
-     +--------+--------+          +--------+--------+     +---------+--------+
-              |                            |                        |
-       +------+------+             +------+------+          +------+------+
-       |     CPU     |             |    CUDA     |          |   SPIR-V    |
-       |  X86, ARM   |             |  PTX/cubin  |          |  (Vulkan)   |
-       +-------------+             +-------------+          +------+------+
-                                                                   |
-                                                             +-----+-----+
-                                                             |           |
-                                                        +----+---+  +---+----+
-                                                        |  naga  |  |  naga  |
-                                                        +----+---+  +---+----+
-                                                             |           |
-                                                        +----+---+  +---+----+
-                                                        |  WGSL  |  |  MSL   |
-                                                        |(WebGPU)|  |(Metal) |
-                                                        +--------+  +--------+
+    +-------------+-------------+-------------+-------------+
+    |             |             |             |             |
+  +-+----------+  |  +----------+-+  +--------+--+  +------+---------+
+  | lego-to-   |  |  | lego-to-   |  | lego-to-  |  | lego-to-spirv  |
+  | llvm       |  |  | nvvm       |  | rocdl     |  +------+---------+
+  +-+----------+  |  +----------+-+  +--------+--+         |
+    |             |             |             |      +------+------+
+  +-+----------+  |  +----------+-+  +--------+--+  |   SPIR-V    |
+  |    CPU     |  |  |   CUDA     |  |    AMD     |  |  (Vulkan)   |
+  | X86, ARM   |  |  | PTX/cubin  |  |   HSACO    |  +------+------+
+  +------------+  |  +------------+  +-----------+         |
+                  |                                  +-----+-----+
+       +----------+----------+                       |           |
+       | lego-to-llvmspirv   |                  +----+---+  +---+----+
+       +----------+----------+                  |  naga  |  |  naga  |
+                  |                             +----+---+  +---+----+
+       +----------+----------+                       |           |
+       |   LLVM SPIR-V      |                  +----+---+  +---+----+
+       |   (OpenCL)         |                  |  WGSL  |  |  MSL   |
+       +--------------------+                  |(WebGPU)|  |(Metal) |
+                                               +--------+  +--------+
 ```
 
 ### Frontends
@@ -227,13 +227,20 @@ The `lego` MLIR dialect defines layout operations (`gen_p`, `reg_p`, `row`, `col
 - **Strength Reduction** -- convert power-of-2 `muli`/`divui`/`remui` to shift/mask operations
 - **Verification** -- bijectivity, GPU bank conflicts, memory coalescing
 
-Three lowering pipelines target different backends:
+Five lowering pipelines target different backends:
 
-| Pipeline | Target | Output | Configurable options |
-|----------|--------|--------|---------------------|
-| `lego-to-llvm` | CPU | LLVM IR (X86, AArch64) | -- |
-| `lego-to-nvvm` | CUDA | PTX/cubin via NVPTX | `chip` (default sm_70), `features`, `opt-level`, `format` |
-| `lego-to-spirv` | Vulkan/WebGPU/Metal | SPIR-V binary | `spirv-version` (default 1.5), `client-api` |
+| Pipeline | Target | Output | Shared memory |
+|----------|--------|--------|---------------|
+| `lego-to-llvm` | CPU | LLVM IR (X86, AArch64) | N/A |
+| `lego-to-nvvm` | CUDA | PTX/cubin via NVPTX | Yes |
+| `lego-to-rocdl` | AMD | HSACO via AMDGPU | Yes |
+| `lego-to-spirv` | Vulkan/WebGPU/Metal | SPIR-V binary (Vulkan) | No |
+| `lego-to-llvmspirv` | SPIR-V (OpenCL) | LLVM dialect with SPIR-V calling conventions | Yes |
+
+The NVVM, ROCDL, and LLVM SPIR-V backends share the same three-phase architecture:
+1. `buildLegoGPUOutlinePipeline` -- LEGO lower + GPU kernel outlining
+2. Backend-specific GPU-to-LLVM conversion (`GPUToNVVM` / `GPUToROCDL` / `GPUToLLVMSPV`)
+3. `buildGPUHostLLVMPipeline` -- host-side LLVM lowering
 
 Example: compile for sm_80 with max optimization:
 ```

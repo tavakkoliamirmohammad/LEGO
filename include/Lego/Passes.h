@@ -62,6 +62,20 @@ struct LegoToNVVMPipelineOptions
 };
 #endif
 
+/// Options for the lego-to-llvmspirv pipeline.
+/// Produces LLVM dialect with SPIR-V calling conventions.
+struct LegoToLLVMSPIRVPipelineOptions
+    : public PassPipelineOptions<LegoToLLVMSPIRVPipelineOptions> {
+  PassOptions::Option<std::string> chip{
+      *this, "chip",
+      llvm::cl::desc("Target chip (unused, for GPUTarget compatibility)"),
+      llvm::cl::init("generic")};
+  PassOptions::Option<std::string> format{
+      *this, "format",
+      llvm::cl::desc("Output format (unused, for GPUTarget compatibility)"),
+      llvm::cl::init("assembly")};
+};
+
 #ifdef LEGO_HAS_AMDGPU
 /// Options for the lego-to-rocdl pipeline.
 struct LegoToROCDLPipelineOptions
@@ -90,6 +104,10 @@ void buildLegoLowerPipeline(OpPassManager &pm);
 void buildLegoToLLVMPipeline(OpPassManager &pm);
 void buildLegoToSPIRVPipeline(OpPassManager &pm,
                                const LegoToSPIRVPipelineOptions &options);
+#ifdef LEGO_HAS_SPIRV
+void buildLegoToLLVMSPIRVPipeline(OpPassManager &pm,
+                                   const LegoToLLVMSPIRVPipelineOptions &options);
+#endif
 #ifdef LEGO_HAS_NVPTX
 void buildLegoToNVVMPipeline(OpPassManager &pm,
                               const LegoToNVVMPipelineOptions &options);
@@ -115,6 +133,9 @@ void buildLegoToROCDLPipeline(OpPassManager &pm,
 
 /// Phase 1: LEGO lower + canonicalize/CSE + GPU kernel outlining.
 void buildLegoGPUOutlinePipeline(OpPassManager &pm);
+
+/// Phase 3a: host-side LLVM lowering only (no binary compilation).
+void buildGPUHostLLVMPipeline(OpPassManager &pm);
 
 /// Phase 3: host-side LLVM lowering + gpu-module-to-binary compilation.
 void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format);

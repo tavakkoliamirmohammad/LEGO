@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(LEGO_MONOLITHIC_LLVM "Build LLVM/MLIR as part of the project" OFF)
 option(LEGO_ENABLE_CCACHE "Enable ccache for faster recompilation" ON)
 option(LEGO_BUILD_TESTS "Build LEGO tests" ON)
-set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;AArch64)")
+set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;SPIRV;AArch64)")
 
 # --- Python & Venv Support ---
 # Prioritize the local virtual environment
@@ -180,6 +180,14 @@ if(NOT DEFINED LEGO_ENABLE_RUNNERS)
   else()
     set(LEGO_ENABLE_RUNNERS OFF)
   endif()
+endif()
+
+# --- SPIRV detection ---
+set(LEGO_HAS_SPIRV OFF)
+if("${LLVM_TARGETS_TO_BUILD}" MATCHES "SPIRV")
+  set(LEGO_HAS_SPIRV ON)
+  add_definitions(-DLEGO_HAS_SPIRV)
+  message(STATUS "SPIRV backend enabled — LLVM SPIR-V compilation support available")
 endif()
 
 # --- AMDGPU detection ---
