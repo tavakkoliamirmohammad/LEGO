@@ -1,16 +1,16 @@
 """Dynamic setup config for wheel builds.
 
 pyproject.toml handles metadata. This file only provides:
-- package_data discovery (shared libs under mlir/ and lego/)
+- package_data discovery (shared libs under lego/ including lego/mlir/)
 - has_ext_modules (forces platform-tagged wheel)
 """
 import os
 from setuptools import setup, find_namespace_packages
 
-packages = find_namespace_packages(include=["mlir", "mlir.*", "lego", "lego.*"])
+packages = find_namespace_packages(include=["lego", "lego.*"])
 
 package_data = {}
-for top in ("mlir", "lego"):
+for top in ("lego",):
     for root, dirs, files in os.walk(top):
         pkg = root.replace(os.sep, ".")
         # Include shared libs, binaries (naga), and other non-Python files

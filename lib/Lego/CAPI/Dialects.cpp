@@ -18,6 +18,7 @@
 #include "Lego/Passes.h"
 #include "mlir/CAPI/Registration.h"
 #include "mlir/CAPI/IR.h"
+#include "mlir/CAPI/Support.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Transforms/Passes.h"
@@ -34,6 +35,38 @@
 
 // LEGO dialect
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Lego, lego, mlir::lego::LegoDialect)
+
+// --- LEGO type accessors ---
+
+bool mlirLegoTypeIsALayout(MlirType type) {
+  return mlir::isa<mlir::lego::LayoutType>(unwrap(type));
+}
+
+bool mlirLegoTypeIsAView(MlirType type) {
+  return mlir::isa<mlir::lego::ViewType>(unwrap(type));
+}
+
+MlirTypeID mlirLegoLayoutTypeGetTypeID() {
+  return wrap(mlir::lego::LayoutType::getTypeID());
+}
+
+MlirTypeID mlirLegoViewTypeGetTypeID() {
+  return wrap(mlir::lego::ViewType::getTypeID());
+}
+
+MlirType mlirLegoLayoutTypeGet(MlirContext context) {
+  return wrap(mlir::lego::LayoutType::get(unwrap(context)));
+}
+
+MlirType mlirLegoViewTypeGet(MlirContext context, MlirType elementType) {
+  return wrap(
+      mlir::lego::ViewType::get(unwrap(context), unwrap(elementType)));
+}
+
+MlirType mlirLegoViewTypeGetElementType(MlirType type) {
+  return wrap(
+      mlir::cast<mlir::lego::ViewType>(unwrap(type)).getElementType());
+}
 
 // Standard dialects used by the LEGO compiler
 #include "mlir-c/Dialect/Arith.h"

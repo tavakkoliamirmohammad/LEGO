@@ -190,7 +190,7 @@ jobs:
       - name: Verify wheel installs
         run: |
           pip install --find-links build/python_packages/lego/dist lego-layout
-          python python/check_imports.py
+          python -P python/check_imports.py
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4

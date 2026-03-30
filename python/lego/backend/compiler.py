@@ -16,17 +16,17 @@ import threading
 import numpy as np
 import sympy as sp
 
-from mlir.ir import (
+from lego.mlir.ir import (
     Context, Location, Module, InsertionPoint,
     IndexType, MemRefType, FunctionType, IntegerAttr, StringAttr,
     IntegerType, F32Type, F64Type, F16Type, BF16Type, UnitAttr,
 )
-from mlir.dialects import func as func_dialect
-from mlir.dialects import scf as scf_dialect
-from mlir.dialects import memref as memref_dialect
-from mlir.passmanager import PassManager
-from mlir.execution_engine import ExecutionEngine
-from mlir.runtime import get_ranked_memref_descriptor
+from lego.mlir.dialects import func as func_dialect
+from lego.mlir.dialects import scf as scf_dialect
+from lego.mlir.dialects import memref as memref_dialect
+from lego.mlir.passmanager import PassManager
+from lego.mlir.execution_engine import ExecutionEngine
+from lego.mlir.runtime import get_ranked_memref_descriptor
 from lego.backend.dialects.lego_dialect import register as register_lego
 from lego.backend._ops import (
     _LEGO_DEBUG,

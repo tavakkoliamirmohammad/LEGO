@@ -220,8 +220,8 @@ def run_cuda_verify(builder, expected, label=None, atol=0, rtol=0, init_mod=1000
         print("  CUDA execution: SKIP (mlir-runner not found)", file=sys.stderr)
         return None
 
-    from mlir.ir import Context, Location, Module
-    from mlir.passmanager import PassManager
+    from lego.mlir.ir import Context, Location, Module
+    from lego.mlir.passmanager import PassManager
     from lego.backend.dialects.lego_dialect import register as register_lego
 
     # Build the kernel module and get MLIR text

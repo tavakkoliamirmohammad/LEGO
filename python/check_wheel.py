@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory() as tmp:
     env = os.environ.copy()
     env["PYTHONPATH"] = tmp
     subprocess.check_call(
-        [sys.executable, os.path.join(os.path.dirname(__file__), "check_imports.py")],
+        [sys.executable, "-P", os.path.join(os.path.dirname(__file__), "check_imports.py")],
         env=env,
     )
     print("[check-lego-wheel] Wheel verification OK")

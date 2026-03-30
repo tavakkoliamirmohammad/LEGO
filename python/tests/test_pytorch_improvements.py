@@ -250,7 +250,7 @@ class TestDtypeExpansion:
         assert _dtype_to_mlir(torch.bfloat16) == "bf16"
 
     def test_mlir_element_type_f16(self):
-        from mlir.ir import Context, F16Type
+        from lego.mlir.ir import Context, F16Type
         from lego.backend.dialects.lego_dialect import register
         ctx = Context()
         register(ctx)
@@ -259,7 +259,7 @@ class TestDtypeExpansion:
             assert isinstance(t, F16Type)
 
     def test_mlir_element_type_bf16(self):
-        from mlir.ir import Context, BF16Type
+        from lego.mlir.ir import Context, BF16Type
         from lego.backend.dialects.lego_dialect import register
         ctx = Context()
         register(ctx)

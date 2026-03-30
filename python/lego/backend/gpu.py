@@ -12,15 +12,15 @@ import functools
 import sys
 from enum import Enum
 
-from mlir.ir import (
+from lego.mlir.ir import (
     Context, Location, Module, InsertionPoint,
     IntegerAttr, Type,
 )
-from mlir import ir
-from mlir.dialects import func as func_dialect
-from mlir.dialects import arith as arith_dialect
-from mlir.dialects import scf as scf_dialect
-from mlir.dialects import memref as memref_dialect
+from lego.mlir import ir
+from lego.mlir.dialects import func as func_dialect
+from lego.mlir.dialects import arith as arith_dialect
+from lego.mlir.dialects import scf as scf_dialect
+from lego.mlir.dialects import memref as memref_dialect
 from lego.core import product
 from lego.backend._ops import (
     _LEGO_DEBUG,
@@ -30,11 +30,11 @@ from lego.backend._ops import (
 )
 
 try:
-    from mlir.dialects import gpu
+    from lego.mlir.dialects import gpu
 except ImportError:
     gpu = None
 try:
-    import mlir.extras.types as T
+    import lego.mlir.extras.types as T
 except ImportError:
     T = None
 
