@@ -38,6 +38,22 @@ def _has_lego_to_spirv_pipeline():
         return False
 
 
+def _has_lego_to_llvmspirv_pipeline():
+    """Check if the lego-to-llvmspirv pipeline is available."""
+    try:
+        from mlir.ir import Context, Location, Module
+        from mlir.passmanager import PassManager
+        from lego.backend.dialects.lego_dialect import register
+        ctx = Context()
+        register(ctx)
+        ctx.load_all_available_dialects()
+        with ctx, Location.unknown():
+            pm = PassManager.parse("builtin.module(lego-to-llvmspirv{chip=generic format=assembly})")
+        return True
+    except Exception:
+        return False
+
+
 def _has_naga():
     """Check if the naga binary is available."""
     try:
@@ -51,6 +67,11 @@ def _has_naga():
 requires_spirv = pytest.mark.skipif(
     not _has_lego_to_spirv_pipeline(),
     reason="lego-to-spirv pipeline not available (SPIR-V libs not built)",
+)
+
+requires_llvmspirv = pytest.mark.skipif(
+    not _has_lego_to_llvmspirv_pipeline(),
+    reason="lego-to-llvmspirv pipeline not available",
 )
 
 requires_naga = pytest.mark.skipif(
@@ -498,3 +519,64 @@ class TestUnifiedCompile:
         import lego
         with pytest.raises(ValueError, match="Unknown target"):
             lego.compile(Row(64), shape=(64,), target="opencl")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Tier 7: LLVM+SPIR-V pipeline — lego-to-llvmspirv
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestLLVMSPIRVPipeline:
+    """Test the lego-to-llvmspirv pipeline (GPU→LLVM with SPIR-V calling conventions)."""
+
+    @requires_llvmspirv
+    def test_row_layout_compiles(self):
+        """Simple Row layout compiles through lego-to-llvmspirv."""
+        from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer, make_permutation_kernel
+        builder = make_permutation_kernel(Row(64), (64,), "f32", 64)
+        result = builder.compile(target="llvmspirv")
+        assert result.target == "llvmspirv"
+        assert "spir_funccc" in result.kernel_source or "llvm." in result.kernel_source
+
+    @requires_llvmspirv
+    def test_col_layout_compiles(self):
+        """Col layout compiles through lego-to-llvmspirv."""
+        from lego.backend.gpu_builder import make_permutation_kernel
+        builder = make_permutation_kernel(Col(8, 8), (8, 8), "f32", 64)
+        result = builder.compile(target="llvmspirv")
+        assert result.target == "llvmspirv"
+
+    @requires_llvmspirv
+    def test_tileby_layout_compiles(self):
+        """TileBy layout compiles through lego-to-llvmspirv."""
+        from lego.backend.gpu_builder import make_permutation_kernel
+        layout = OrderBy(Row(8, 8)).TileBy([4, 4], [2, 2])
+        builder = make_permutation_kernel(layout, (8, 8), "f32", 64)
+        result = builder.compile(target="llvmspirv")
+        assert result.target == "llvmspirv"
+
+    @requires_llvmspirv
+    def test_transpose_naive_compiles(self):
+        """Transpose-naive-style kernel compiles through lego-to-llvmspirv."""
+        N, TD = 64, 16
+        A_layout = OrderBy(Row(N, N)).TileBy([N // TD, N // TD], [TD, TD])
+        B_layout = OrderBy(Row(N, N)).TileBy([N // TD, N // TD], [TD, TD])
+        A = LayoutBuffer(A_layout, shape=(N, N))
+        B = LayoutBuffer(B_layout, shape=(N, N))
+
+        def body(ctx):
+            gid = KernelBuilder.global_id_1d(ctx)
+            val = ctx.load_flat(0, gid)
+            ctx.store_flat(val, 1, gid)
+
+        builder = KernelBuilder(buffers=[A, B], kernel_body=body,
+                                name="transpose_test", grid=(N*N//256, 1, 1), block=(256, 1, 1))
+        result = builder.compile(target="llvmspirv")
+        assert result.target == "llvmspirv"
+
+    @requires_llvmspirv
+    def test_unified_compile_llvmspirv(self):
+        """lego.compile(target='llvmspirv') works via GPUTarget registry."""
+        import lego
+        result = lego.compile(Row(64), shape=(64,), target="llvmspirv")
+        assert isinstance(result, lego.CompileResult)
+        assert result.target == "llvmspirv"

@@ -5,7 +5,7 @@
 //
 // Pass registration strategy:
 //   - Individual LEGO passes: registered (users run them standalone)
-//   - Named pipelines: registered (lego-lower, lego-to-llvm, lego-to-spirv, lego-to-nvvm, lego-to-rocdl)
+//   - Named pipelines: registered (lego-lower, lego-to-llvm, lego-to-spirv, lego-to-llvmspirv, lego-to-nvvm, lego-to-rocdl)
 //   - Utility passes (canonicalize, cse): registered (used standalone)
 //   - Arith int-range passes: registered (used in lego-lower fixed-point loop)
 //   - LLVM/SPIR-V/GPU conversion passes: NOT registered — only used internally
@@ -77,7 +77,7 @@ void legoRegisterPasses() {
   mlir::lego::registerLegoVerifyBankConflictsPass();
   mlir::lego::registerLegoStrengthReductionPass();
 
-  // Named pipelines: "lego-lower", "lego-to-llvm", "lego-to-spirv"
+  // Named pipelines: "lego-lower", "lego-to-llvm", "lego-to-spirv", "lego-to-llvmspirv"
   // Internally these create LLVM/SPIR-V/GPU conversion passes via
   // createXxxPass() — no registration needed for those.
   mlir::lego::registerLegoPipelines();

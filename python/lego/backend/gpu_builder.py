@@ -180,6 +180,14 @@ GPUTarget(
     tmp_prefix="lego_rocm_",
 ).register()
 
+GPUTarget(
+    name="llvmspirv",
+    pipeline="lego-to-llvmspirv",
+    default_chip="generic",
+    default_format="assembly",
+    tmp_prefix="lego_llvmspirv_",
+).register()
+
 
 # ============================================================================
 # Layout-aware buffer descriptor

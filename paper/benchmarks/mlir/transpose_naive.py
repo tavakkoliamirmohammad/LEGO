@@ -80,5 +80,5 @@ from bench_utils import run_transpose_benchmark
 if __name__ == "__main__":
     run_transpose_benchmark(
         builder, {"A": A_layout, "B": B_layout}, N,
-        targets=["cuda", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
     )

@@ -104,9 +104,9 @@ from bench_utils import run_transpose_benchmark
 
 
 if __name__ == "__main__":
-    # SPIR-V targets don't yet support workgroup (shared) memory,
-    # so only CUDA is available for the smem transpose.
+    # lego-to-spirv (dialect-only) doesn't support shared memory.
+    # lego-to-llvmspirv handles it via LLVM lowering (same as NVVM).
     run_transpose_benchmark(
         builder, {"A": A_layout, "B": B_layout}, N,
-        targets=["cuda"],
+        targets=["cuda", "llvmspirv"],
     )

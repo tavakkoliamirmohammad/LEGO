@@ -106,7 +106,7 @@ void buildLegoGPUOutlinePipeline(OpPassManager &pm) {
   pm.addPass(createGpuKernelOutliningPass());
 }
 
-void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format) {
+void buildGPUHostLLVMPipeline(OpPassManager &pm) {
   // Lower arith/scf/cf/index/func everywhere (host + kernel).
   pm.addPass(createSCFToControlFlowPass());
   pm.addPass(createConvertIndexToLLVMPass());
@@ -121,6 +121,10 @@ void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format) {
   // Finalize memref (converts remaining memref ops to LLVM).
   pm.addPass(createFinalizeMemRefToLLVMConversionPass());
   pm.addPass(createReconcileUnrealizedCastsPass());
+}
+
+void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format) {
+  buildGPUHostLLVMPipeline(pm);
 
   // Compile gpu.module → binary (kernel is fully LLVM now).
   GpuModuleToBinaryPassOptions binOpts;
@@ -144,6 +148,13 @@ void registerLegoPipelines() {
     "Lower LEGO dialect through GPU to SPIR-V "
     "(LEGO -> Arith -> GPU outlined -> SPIR-V)",
     buildLegoToSPIRVPipeline);
+
+#ifdef LEGO_HAS_SPIRV
+  PassPipelineRegistration<LegoToLLVMSPIRVPipelineOptions>("lego-to-llvmspirv",
+    "Lower LEGO dialect through GPU to LLVM SPIR-V "
+    "(LEGO -> Arith -> GPU outlined -> LLVM SPIR-V -> binary)",
+    buildLegoToLLVMSPIRVPipeline);
+#endif
 
 #ifdef LEGO_HAS_NVPTX
   PassPipelineRegistration<LegoToNVVMPipelineOptions>("lego-to-nvvm",
