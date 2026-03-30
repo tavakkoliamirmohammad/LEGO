@@ -85,10 +85,10 @@ header h1 span { color: var(--accent); }
 #run-btn:hover { opacity: 0.9; }
 #run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* Main 3-column layout */
+/* Main 3-column layout — each panel fills its column */
 #app {
   display: grid;
-  grid-template-columns: 300px 1fr 340px;
+  grid-template-columns: 1fr 1fr 1fr;
   height: calc(100vh - 41px);
 }
 
@@ -235,16 +235,26 @@ svg.has-hover .connection.highlighted { opacity: 1; stroke-width: 2.5; }
   opacity: 0.3;
 }
 
-/* Compiler panel (right) */
+/* Compiler panel (right) — fill full height, sections share space */
 #compiler-panel {
   border-left: 1px solid var(--border);
   background: var(--surface);
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .compiler-section {
   border-bottom: 1px solid var(--border);
   padding: 8px 12px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.compiler-section:first-child {
+  flex: 0 0 auto;
 }
 
 .compiler-section h3 {
@@ -253,6 +263,7 @@ svg.has-hover .connection.highlighted { opacity: 1; stroke-width: 2.5; }
   letter-spacing: 1px;
   color: var(--text-dim);
   margin-bottom: 6px;
+  flex: none;
 }
 
 .compiler-section pre {
@@ -262,9 +273,9 @@ svg.has-hover .connection.highlighted { opacity: 1; stroke-width: 2.5; }
   color: var(--text-dim);
   white-space: pre;
   margin: 0;
-  overflow-x: auto;
-  max-height: 180px;
-  overflow-y: auto;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
   background: var(--editor-bg);
   padding: 6px;
   border-radius: 4px;
@@ -321,11 +332,6 @@ svg.has-hover .connection.highlighted { opacity: 1; stroke-width: 2.5; }
 }
 
 /* Responsive */
-@media (max-width: 1100px) {
-  #app {
-    grid-template-columns: 250px 1fr 280px;
-  }
-}
 
 @media (max-width: 800px) {
   #app {
