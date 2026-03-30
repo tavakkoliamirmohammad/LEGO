@@ -336,6 +336,18 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
         _mlir_libs/_legoDialects/__init__.pyi
         _mlir_libs/_legoDialects/lego.pyi)
     add_dependencies(LegoPythonModules "${NB_STUBGEN_CUSTOM_TARGET}")
+
+    # Copy generated stubs into the assembled package so they ship with
+    # the wheel and are visible to IDEs via PYTHONPATH.
+    set(_stub_src "${CMAKE_CURRENT_BINARY_DIR}/type_stubs/_mlir_libs/_legoDialects")
+    set(_stub_dst "${CMAKE_BINARY_DIR}/python_packages/lego/lego/mlir/_mlir_libs/_legoDialects")
+    add_custom_command(TARGET LegoPythonModules POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_stub_dst}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_stub_src}/__init__.pyi" "${_stub_dst}/__init__.pyi"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_stub_src}/lego.pyi" "${_stub_dst}/lego.pyi"
+      COMMENT "Copying LEGO type stubs into assembled package")
   endif()
 
   # Copy generated _lego_ops_gen.py into source tree for dev imports.
