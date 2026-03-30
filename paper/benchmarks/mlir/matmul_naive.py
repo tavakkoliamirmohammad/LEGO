@@ -1,11 +1,17 @@
 """Naive matrix multiply C = A @ B — @gpu_kernel DSL.
 
-Each thread computes one element of C by iterating over the K dimension.
-The `for k in range(K)` loop lowers to `scf.for` with an automatically
-detected f32 iter_arg for the accumulator.  No shared memory required.
+Layouts:
+  A: Row(M, K)  — standard row-major, indexed as A[row, k]
+  B: Row(K, N)  — standard row-major, indexed as B[k, col]
+  C: OrderBy(Row(M, N)).TileBy([M//T, N//T], [T, T])
+     — tiled by block grid, indexed as C[by, bx, ty, tx]
+     — lego.apply computes: (by*T + ty) * N + (bx*T + tx)
+
+Each thread computes one element of C by iterating over K.
 """
 import sys
 import numpy as np
+from lego.core import OrderBy, Row
 from lego.backend.gpu_dsl import gpu_kernel, Buffer
 
 if len(sys.argv) == 2:
@@ -16,17 +22,23 @@ else:
     print("Usage: python matmul_naive.py N  or  python matmul_naive.py M N K")
     sys.exit(1)
 
-TILE = 16  # block dimension: TILE x TILE threads
+TILE = 16
+
+# --- Layouts ---
+A_layout = Row(M, K)
+B_layout = Row(K, N)
+C_layout = OrderBy(Row(M, N)).TileBy([M // TILE, N // TILE], [TILE, TILE])
 
 
 @gpu_kernel(grid=(N // TILE, M // TILE), block=(TILE, TILE))
-def matmul_naive(A: Buffer[M, K], B: Buffer[K, N], C: Buffer[M, N]):
+def matmul_naive(A: Buffer(A_layout, M, K), B: Buffer(B_layout, K, N),
+                 C: Buffer(C_layout, M, N)):
     row = block_id.y * TILE + thread_id.y
     col = block_id.x * TILE + thread_id.x
     acc = 0.0
     for k in range(K):
         acc += A[row, k] * B[k, col]
-    C[row, col] = acc
+    C[block_id.y, block_id.x, thread_id.y, thread_id.x] = acc
 
 
 from bench_utils import run_benchmark
@@ -39,7 +51,6 @@ if __name__ == "__main__":
         b = inputs[1].reshape(K, N)
         return (a @ b).ravel()
 
-    # init_mod=10 keeps values 0-9 so f32 accumulation is exact
     run_benchmark(
         matmul_naive, compute_expected,
         targets=["cuda", "llvmspirv"],

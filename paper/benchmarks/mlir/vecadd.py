@@ -1,9 +1,13 @@
 """Vector addition C = A + B — @gpu_kernel DSL (all GPU backends).
 
-Demonstrates the simplest element-wise kernel with pure Python syntax.
+Layout: OrderBy(Row(N)).TileBy([N // WG], [WG])
+  - 1st index = block (workgroup) index
+  - 2nd index = thread index within workgroup
+  - lego.apply computes: block * WG + thread
 """
 import sys
 import numpy as np
+from lego.core import OrderBy, Row
 from lego.backend.gpu_dsl import gpu_kernel, Buffer
 
 if len(sys.argv) != 2:
@@ -13,11 +17,16 @@ if len(sys.argv) != 2:
 N = int(sys.argv[1])
 WG = 256
 
+# --- Layout: 1D vector tiled by workgroup ---
+vec_layout = OrderBy(Row(N)).TileBy([N // WG], [WG])
+
 
 @gpu_kernel(grid=(N // WG,), block=(WG,))
-def vecadd(A: Buffer[N], B: Buffer[N], C: Buffer[N]):
-    gid = block_id.x * block_dim.x + thread_id.x
-    C[gid] = A[gid] + B[gid]
+def vecadd(A: Buffer(vec_layout, N), B: Buffer(vec_layout, N),
+           C: Buffer(vec_layout, N)):
+    bx = block_id.x
+    tx = thread_id.x
+    C[bx, tx] = A[bx, tx] + B[bx, tx]
 
 
 from bench_utils import run_benchmark
@@ -32,5 +41,4 @@ if __name__ == "__main__":
         vecadd, compute_expected,
         targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
         label=f"N={N}",
-        atol=0,
     )

@@ -208,6 +208,11 @@ class _Compiler:
         val, tag = self._expr(node.value)
         if isinstance(tgt, ast.Name):
             self.env[tgt.id] = (val, tag)
+        elif isinstance(tgt, ast.Tuple):
+            # Tuple unpacking: a, b = apply_inverse(…)
+            assert isinstance(val, (list, tuple)), "Tuple unpack requires tuple-valued RHS"
+            for i, elt in enumerate(tgt.elts):
+                self.env[elt.id] = (val[i], INDEX)
         elif isinstance(tgt, ast.Subscript):
             self._store(tgt, val, tag)
         else:
@@ -244,7 +249,10 @@ class _Compiler:
             lb, ub, step = (self._idx(args[0]), self._idx(args[1]), self._idx(args[2]))
 
         # Detect iter-args: outer vars modified in the body
-        modified = self._modified_names(node.body) & set(self.env)
+        # Only variables that already exist become iter_args; new vars
+        # defined inside the body are loop-local and removed afterwards.
+        env_before = set(self.env)
+        modified = self._modified_names(node.body) & env_before
         modified.discard(var)
         ia_names = sorted(modified)
 
@@ -268,7 +276,10 @@ class _Compiler:
 
         for i, n in enumerate(ia_names):
             self.env[n] = (loop.results[i], ia_tags[i])
-        self.env.pop(var, None)
+        # Remove loop variable and any vars defined only inside the body
+        # (their MLIR Values don't dominate outside the loop region)
+        for n in set(self.env) - env_before:
+            del self.env[n]
 
     # -- if ------------------------------------------------------------
 
@@ -446,10 +457,38 @@ class _Compiler:
     # -- function calls ------------------------------------------------
 
     def _call(self, node):
-        if isinstance(node.func, ast.Name) and node.func.id == "barrier":
+        if not isinstance(node.func, ast.Name):
+            raise NotImplementedError(f"Call {ast.dump(node.func)}")
+        name = node.func.id
+        if name == "barrier":
             self.ctx.barrier()
             return (None, CT_INT)
-        raise NotImplementedError(f"Call {ast.dump(node.func)}")
+        if name == "apply_inverse":
+            layout = self._eval_ct(node.args[0])
+            idx_val = self._idx(self._expr(node.args[1]))
+            from lego.backend.compiler import _get_layout_dims
+            rank = len(_get_layout_dims(layout))
+            result = self.ctx.apply_inverse(layout, idx_val)
+            return (list(result), "tuple")
+        if name == "apply":
+            layout = self._eval_ct(node.args[0])
+            indices = [self._idx(self._expr(a)) for a in node.args[1:]]
+            return (self.ctx.apply(layout, *indices), INDEX)
+        if name == "set_layout":
+            buf_name = node.args[0].id
+            buf_idx = self.buf_map[buf_name]
+            layout = self._eval_ct(node.args[1])
+            self.ctx.set_layout(buf_idx, layout)
+            return (None, CT_INT)
+        raise NotImplementedError(f"Unknown function: {name}")
+
+    def _eval_ct(self, node):
+        """Evaluate an AST node as a compile-time Python expression."""
+        ns = dict(self.outer)
+        for name, (val, tag) in self.env.items():
+            if _is_ct(tag):
+                ns[name] = val
+        return eval(compile(ast.Expression(node), "<ct>", "eval"), ns)  # noqa: S307
 
     # ---------------------------------------------------------------- util
 

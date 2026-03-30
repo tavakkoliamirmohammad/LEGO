@@ -1,16 +1,17 @@
 """Parallel sum reduction with shared memory — @gpu_kernel DSL.
 
-Classic GPU tree reduction: each block loads a chunk into shared memory,
-then reduces via a binary tree.  The `while stride > 0` loop is
-compile-time unrolled (stride is a Python int), while `if tx < stride`
-lowers to `scf.if` at each unrolled step.  Thread 0 of each block
-writes the partial sum to the output buffer.
+Layouts:
+  A:    OrderBy(Row(N)).TileBy([N // BLOCK], [BLOCK])
+        — 2-level: [block_idx, thread_idx]
+  Out:  Row(num_blocks) — one partial sum per block
+  smem: Row(BLOCK)      — shared memory for tree reduction
 
-Demonstrates: native if/while, shared memory, barrier(), Python-level
-unrolling, all via the @gpu_kernel AST transformer.
+The while loop is compile-time unrolled (stride is a Python int).
+Each unrolled step emits a runtime `scf.if` for `tx < stride`.
 """
 import sys
 import numpy as np
+from lego.core import OrderBy, Row
 from lego.backend.gpu_dsl import gpu_kernel, Buffer, Shared
 
 if len(sys.argv) != 2:
@@ -18,20 +19,24 @@ if len(sys.argv) != 2:
     sys.exit(1)
 
 N = int(sys.argv[1])
-BLOCK = 256  # threads per block
+BLOCK = 256
 
 assert N % BLOCK == 0, f"N ({N}) must be a multiple of BLOCK ({BLOCK})"
-
 num_blocks = N // BLOCK
+
+# --- Layouts ---
+A_layout = OrderBy(Row(N)).TileBy([num_blocks], [BLOCK])
+out_layout = Row(num_blocks)
+smem_layout = Row(BLOCK)
 
 
 @gpu_kernel(grid=(num_blocks,), block=(BLOCK,))
-def reduce_sum(A: Buffer[N], Out: Buffer[num_blocks], smem: Shared[BLOCK]):
+def reduce_sum(A: Buffer(A_layout, N), Out: Buffer(out_layout, num_blocks),
+               smem: Shared(smem_layout, BLOCK)):
     tx = thread_id.x
     bx = block_id.x
-    gid = bx * BLOCK + tx
 
-    smem[tx] = A[gid]
+    smem[tx] = A[bx, tx]
     barrier()
 
     stride = BLOCK // 2
@@ -51,10 +56,8 @@ from bench_utils import run_benchmark
 if __name__ == "__main__":
 
     def compute_expected(inputs):
-        # Each block sums BLOCK elements → one partial sum per block
         return inputs[0].reshape(-1, BLOCK).sum(axis=1).astype(np.float32)
 
-    # init_mod=10 keeps values 0-9 so f32 accumulation is exact
     run_benchmark(
         reduce_sum, compute_expected,
         targets=["cuda", "llvmspirv"],
