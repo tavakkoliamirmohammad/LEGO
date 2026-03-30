@@ -26,20 +26,6 @@
         </div>
       </div>
 
-      <!-- Dimensions -->
-      <div class="panel-section">
-        <h3>Dimensions</h3>
-        <div class="dim-grid">
-          <div class="dim-field">
-            <label>M (rows)</label>
-            <input type="number" id="dim-M" value="8" min="1" max="64">
-          </div>
-          <div class="dim-field">
-            <label>N (cols)</label>
-            <input type="number" id="dim-N" value="8" min="1" max="64">
-          </div>
-        </div>
-      </div>
 
       <!-- Code Editor -->
       <div class="panel-section" style="flex:1; display:flex; flex-direction:column;">
@@ -56,10 +42,16 @@
         <div id="error-output"></div>
       </div>
 
-      <!-- MLIR Output -->
+      <!-- Compiler Output -->
       <div class="panel-section" id="mlir-section">
-        <h3>LEGO MLIR</h3>
-        <pre id="mlir-output"></pre>
+        <h3>Symbolic</h3>
+        <pre id="symbolic-output"></pre>
+        <h3>LEGO Dialect</h3>
+        <pre id="mlir-lego"></pre>
+        <h3>After lego-lower</h3>
+        <pre id="mlir-arith"></pre>
+        <h3>After lego-to-llvm</h3>
+        <pre id="mlir-llvm"></pre>
       </div>
     </div>
 

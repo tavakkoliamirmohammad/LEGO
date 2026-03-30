@@ -62,15 +62,18 @@ def _extract_tile_info(layout, shape):
         return None
 
 
-def _compile_layout(code, shape, extra_dims=None):
+def _compile_layout(code):
     """Execute user layout code and compile to mapping JSON.
+
+    The user code must define M, N (grid dimensions) and L (layout).
+    All variables are user-defined in the editor.
 
     Returns a dict with {mapping, shape, total} ready for JSON serialization.
     """
     import sympy as sp
     from lego.core import OrderBy, Row, Col, RegP, GenP, GroupBy, TileByLayout
 
-    # Build namespace with LEGO primitives and dimension values
+    # Build namespace with LEGO primitives only
     namespace = {
         "OrderBy": OrderBy,
         "Row": Row,
@@ -81,25 +84,24 @@ def _compile_layout(code, shape, extra_dims=None):
         "sp": sp,
     }
 
-    # Inject dimension values as plain integers
-    dim_names = ["M", "N", "K", "P", "Q"]
-    for i, s in enumerate(shape):
-        if i < len(dim_names):
-            namespace[dim_names[i]] = int(s)
-
-    # Inject extra dims (BM, BN, etc.)
-    if extra_dims:
-        namespace.update({k: int(v) for k, v in extra_dims.items()})
-
-    # Execute user code
+    # Execute user code — user defines M, N, L, and any other variables
     exec(code, namespace)
 
     layout = namespace.get("L")
     if layout is None:
         raise ValueError(
             "Layout not found. Your code must assign to a variable named 'L'.\n"
-            "Example: L = OrderBy(Row(M, N)).GroupBy([(M, N)])"
+            "Example:\n  M, N = 8, 8\n  L = OrderBy(Row(M, N)).GroupBy([(M, N)])"
         )
+
+    M = namespace.get("M")
+    N = namespace.get("N")
+    if M is None or N is None:
+        raise ValueError(
+            "M and N not defined. Your code must define grid dimensions.\n"
+            "Example:\n  M, N = 8, 8"
+        )
+    shape = (int(M), int(N))
 
     # Extract tile info from the layout object
     tile_info = _extract_tile_info(layout, shape)
@@ -178,10 +180,8 @@ class VizHandler(SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
 
             code = body["code"]
-            shape = tuple(body["shape"])
-            extra_dims = body.get("extra_dims", {})
 
-            result = _compile_layout(code, shape, extra_dims)
+            result = _compile_layout(code)
 
             if result["type"] == "wasm":
                 self.send_response(200)

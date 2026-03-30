@@ -14,19 +14,19 @@ import { render } from './renderer.js';
 const PRESETS = {
   'row-major': {
     label: 'Row-Major',
-    code: 'L = OrderBy(Row(M, N)).GroupBy([(M, N)])',
+    code: 'M, N = 8, 8\nL = OrderBy(Row(M, N)).GroupBy([(M, N)])',
   },
   'col-major': {
     label: 'Col-Major',
-    code: 'L = OrderBy(Col(M, N)).GroupBy([(M, N)])',
+    code: 'M, N = 8, 8\nL = OrderBy(Col(M, N)).GroupBy([(M, N)])',
   },
   'tiled': {
     label: 'Tiled',
-    code: 'BM, BN = 4, 4\nL = OrderBy(Row(M, N)).TileBy([M//BM, N//BN], [BM, BN])',
+    code: 'M, N = 8, 8\nBM, BN = 4, 4\nL = OrderBy(Row(M, N)).TileBy([M//BM, N//BN], [BM, BN])',
   },
   'transposed': {
     label: 'Transposed',
-    code: 'L = OrderBy(RegP((M, N), (1, 0))).GroupBy([(M, N)])',
+    code: 'M, N = 8, 8\nL = OrderBy(RegP((M, N), (1, 0))).GroupBy([(M, N)])',
   },
 };
 
@@ -51,8 +51,6 @@ const COMPLETIONS = [
 const editor = document.getElementById('code-editor');
 const runBtn = document.getElementById('run-btn');
 const errorOutput = document.getElementById('error-output');
-const dimM = document.getElementById('dim-M');
-const dimN = document.getElementById('dim-N');
 const presetBtns = document.querySelectorAll('.preset-btn');
 const formulaOutput = document.getElementById('formula-output');
 
@@ -275,9 +273,6 @@ async function runVisualization() {
   const code = editor.value.trim();
   if (!code) return;
 
-  const M = parseInt(dimM.value) || 8;
-  const N = parseInt(dimN.value) || 8;
-
   runBtn.disabled = true;
   runBtn.textContent = 'Compiling...';
   errorOutput.classList.remove('visible');
@@ -287,10 +282,7 @@ async function runVisualization() {
     const response = await fetch('/compile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        code,
-        shape: [M, N],
-      }),
+      body: JSON.stringify({ code }),
     });
 
     const contentType = response.headers.get('Content-Type') || '';
@@ -305,7 +297,7 @@ async function runVisualization() {
     if (contentType.includes('application/wasm')) {
       // WASM response: instantiate and compute mapping
       const wasmBytes = await response.arrayBuffer();
-      data = await computeMappingFromWasm(wasmBytes, [M, N]);
+      data = await computeMappingFromWasm(wasmBytes, data.shape);
     } else {
       // JSON response: mapping data directly
       data = await response.json();
@@ -320,6 +312,7 @@ async function runVisualization() {
 
     // Update formula display
     if (formulaOutput) {
+      const [M, N] = data.shape;
       let info = `${M}\u00d7${N} grid \u00b7 ${data.total} elements`;
       if (tileDims) {
         info += ` \u00b7 ${tileDims[0]}\u00d7${tileDims[1]} tiles`;
@@ -327,12 +320,15 @@ async function runVisualization() {
       formulaOutput.textContent = info;
     }
 
-    // Show MLIR output
-    const mlirOutput = document.getElementById('mlir-output');
-    if (mlirOutput && data.mlir) {
-      mlirOutput.textContent = data.mlir;
-    } else if (mlirOutput) {
-      mlirOutput.textContent = '';
+    // Show compiler outputs
+    for (const [id, key] of [
+      ['symbolic-output', 'symbolic'],
+      ['mlir-lego', 'mlir_lego'],
+      ['mlir-arith', 'mlir_arith'],
+      ['mlir-llvm', 'mlir_llvm'],
+    ]) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = data[key] || '';
     }
 
   } catch (e) {

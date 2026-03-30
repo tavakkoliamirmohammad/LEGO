@@ -247,14 +247,19 @@ header .subtitle {
   overflow-y: auto;
 }
 
-#mlir-output {
+#mlir-section pre {
   font-family: var(--font-mono);
   font-size: 10px;
   line-height: 1.4;
   color: var(--text-dim);
   white-space: pre;
-  margin: 0;
+  margin: 0 0 8px 0;
   overflow-x: auto;
+  max-height: 150px;
+  overflow-y: auto;
+  background: var(--editor-bg);
+  padding: 6px;
+  border-radius: 4px;
 }
 
 /* Formula display */

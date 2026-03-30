@@ -356,16 +356,23 @@ def compile_mapping_json(layout, shape):
 
             func_dialect.ReturnOp([])
 
-    # Capture LEGO MLIR after canonicalize + CSE (before any lowering)
+    # 1. LEGO MLIR after canonicalize + CSE
     with ctx:
         pm_clean = PassManager.parse("builtin.module(canonicalize,cse)")
         pm_clean.run(module.operation)
     mlir_lego = str(module)
 
-    # Lower to LLVM for JIT execution
+    # 2. After lego-lower (LEGO → Arith)
+    with ctx:
+        pm_lower = PassManager.parse("builtin.module(lego-lower)")
+        pm_lower.run(module.operation)
+    mlir_arith = str(module)
+
+    # 3. After lego-to-llvm (Arith → LLVM)
     with ctx:
         pm_llvm = PassManager.parse("builtin.module(lego-to-llvm)")
         pm_llvm.run(module.operation)
+    mlir_llvm = str(module)
 
     from mlir.execution_engine import ExecutionEngine
     from mlir.runtime import get_ranked_memref_descriptor
@@ -396,11 +403,25 @@ def compile_mapping_json(layout, shape):
             flat = int(output[k])
             mapping.append(list(coords) + [flat])
 
+    # Compute symbolic expression: L[i, j] via SymPy
+    symbolic = ""
+    try:
+        from lego.core import GroupBy, TileByLayout
+        if isinstance(layout, GroupBy) and not isinstance(layout, TileByLayout):
+            i_sym, j_sym = sp.symbols('i j', integer=True)
+            expr = layout.apply(i_sym, j_sym)
+            symbolic = f"L[i, j] = {expr}"
+    except Exception:
+        pass
+
     return {
         "mapping": mapping,
         "shape": [int(s) for s in shape],
         "total": total,
-        "mlir": mlir_lego,
+        "mlir_lego": mlir_lego,
+        "mlir_arith": mlir_arith,
+        "mlir_llvm": mlir_llvm,
+        "symbolic": symbolic,
     }
 
 
