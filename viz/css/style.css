@@ -240,6 +240,23 @@ header .subtitle {
 
 #error-output.visible { display: block; }
 
+/* MLIR output */
+#mlir-section {
+  flex: none;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+#mlir-output {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  white-space: pre;
+  margin: 0;
+  overflow-x: auto;
+}
+
 /* Formula display */
 #formula-output {
   font-family: var(--font-mono);

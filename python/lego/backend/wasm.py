@@ -314,25 +314,9 @@ def compile_mapping_json(layout, shape):
                 if sym not in sym_to_val:
                     sym_to_val[sym] = _index_const(1)
 
-            # For TileBy: emit the BASE ordering (from _input_chain),
-            # not the full TileBy. TileBy decomposes iteration but does
-            # not reorder data within tiles — physical layout follows
-            # the base ordering applied to the original 2D coords.
-            if isinstance(layout, TileByLayout) and layout_rank > nd:
-                # Build a GroupBy over (M,N) using the base ordering chain
-                base_objs = []
-                for ob in layout._input_chain:
-                    for p in ob.perms:
-                        base_objs.append(emit_layout_from_python(p, sym_to_val))
-                base_order = _emit_order_by(base_objs)
-                layout_val = _emit_group_by(
-                    [_index_const(int(s)) for s in shape],
-                    [base_order])
-            else:
-                layout_val = emit_layout_from_python(layout, sym_to_val)
+            # Emit the layout (tile_by for TileBy, group_by for GroupBy)
+            layout_val = emit_layout_from_python(layout, sym_to_val)
 
-            # Nested loop: for i in 0..M-1, for j in 0..N-1
-            # Use (i, j) directly — no flat→2D unflattening.
             M_val = _index_const(int(shape[0]))
             N_val = _index_const(int(shape[1])) if nd > 1 else _index_const(1)
             zero = _index_const(0)
@@ -345,9 +329,22 @@ def compile_mapping_json(layout, shape):
                 with InsertionPoint(inner.body):
                     j_val = inner.induction_variable
 
-                    # Apply layout to (i, j) directly — 2D coords
-                    coords_2d = [i_val, j_val] if nd > 1 else [i_val]
-                    flat_phys = _emit_apply(layout_val, coords_2d)
+                    if isinstance(layout, TileByLayout) and layout_rank > nd:
+                        # TileBy dims: (outer_0, outer_1, ..., inner_0, inner_1, ...)
+                        # Decompose (i,j) → outers first, then inners
+                        tile_groups = layout._tile_groups
+                        inner_sizes = [int(d) for d in tile_groups[-1]]
+                        coords_2d = [i_val, j_val] if nd > 1 else [i_val]
+                        outers = []
+                        inners = []
+                        for k_dim in range(nd):
+                            bsize = _index_const(inner_sizes[k_dim])
+                            outers.append(arith_dialect.divui(coords_2d[k_dim], bsize))
+                            inners.append(arith_dialect.remui(coords_2d[k_dim], bsize))
+                        flat_phys = _emit_apply(layout_val, outers + inners)
+                    else:
+                        coords_2d = [i_val, j_val] if nd > 1 else [i_val]
+                        flat_phys = _emit_apply(layout_val, coords_2d)
 
                     # Store at output[i * N + j]
                     out_idx = arith_dialect.addi(
@@ -359,10 +356,16 @@ def compile_mapping_json(layout, shape):
 
             func_dialect.ReturnOp([])
 
-    # JIT compile
+    # Capture LEGO MLIR after canonicalize + CSE (before any lowering)
     with ctx:
-        pm = PassManager.parse("builtin.module(lego-to-llvm)")
-        pm.run(module.operation)
+        pm_clean = PassManager.parse("builtin.module(canonicalize,cse)")
+        pm_clean.run(module.operation)
+    mlir_lego = str(module)
+
+    # Lower to LLVM for JIT execution
+    with ctx:
+        pm_llvm = PassManager.parse("builtin.module(lego-to-llvm)")
+        pm_llvm.run(module.operation)
 
     from mlir.execution_engine import ExecutionEngine
     from mlir.runtime import get_ranked_memref_descriptor
@@ -393,7 +396,12 @@ def compile_mapping_json(layout, shape):
             flat = int(output[k])
             mapping.append(list(coords) + [flat])
 
-    return {"mapping": mapping, "shape": [int(s) for s in shape], "total": total}
+    return {
+        "mapping": mapping,
+        "shape": [int(s) for s in shape],
+        "total": total,
+        "mlir": mlir_lego,
+    }
 
 
 def _compute_strides(dims):

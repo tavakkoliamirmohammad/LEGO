@@ -342,6 +342,14 @@ async function runVisualization() {
       formulaOutput.textContent = info;
     }
 
+    // Show MLIR output
+    const mlirOutput = document.getElementById('mlir-output');
+    if (mlirOutput && data.mlir) {
+      mlirOutput.textContent = data.mlir;
+    } else if (mlirOutput) {
+      mlirOutput.textContent = '';
+    }
+
   } catch (e) {
     errorOutput.textContent = e.message;
     errorOutput.classList.add('visible');
