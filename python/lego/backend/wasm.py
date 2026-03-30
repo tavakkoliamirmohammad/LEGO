@@ -314,8 +314,22 @@ def compile_mapping_json(layout, shape):
                 if sym not in sym_to_val:
                     sym_to_val[sym] = _index_const(1)
 
-            # Emit the layout
-            layout_val = emit_layout_from_python(layout, sym_to_val)
+            # For TileBy: emit the BASE ordering (from _input_chain),
+            # not the full TileBy. TileBy decomposes iteration but does
+            # not reorder data within tiles — physical layout follows
+            # the base ordering applied to the original 2D coords.
+            if isinstance(layout, TileByLayout) and layout_rank > nd:
+                # Build a GroupBy over (M,N) using the base ordering chain
+                base_objs = []
+                for ob in layout._input_chain:
+                    for p in ob.perms:
+                        base_objs.append(emit_layout_from_python(p, sym_to_val))
+                base_order = _emit_order_by(base_objs)
+                layout_val = _emit_group_by(
+                    [_index_const(int(s)) for s in shape],
+                    [base_order])
+            else:
+                layout_val = emit_layout_from_python(layout, sym_to_val)
 
             # Nested loop: for i in 0..M-1, for j in 0..N-1
             # Use (i, j) directly — no flat→2D unflattening.
@@ -331,21 +345,9 @@ def compile_mapping_json(layout, shape):
                 with InsertionPoint(inner.body):
                     j_val = inner.induction_variable
 
-                    # Build N-D coords from (i, j)
-                    if isinstance(layout, TileByLayout) and layout_rank > nd:
-                        tile_groups = layout._tile_groups
-                        inner_sizes = [int(d) for d in tile_groups[-1]]
-                        coords_2d = [i_val, j_val] if nd > 1 else [i_val]
-                        nd_coords = []
-                        for k_dim in range(nd):
-                            coord = coords_2d[k_dim]
-                            bsize = _index_const(inner_sizes[k_dim])
-                            nd_coords.append(arith_dialect.divui(coord, bsize))
-                            nd_coords.append(arith_dialect.remui(coord, bsize))
-                        flat_phys = _emit_apply(layout_val, nd_coords)
-                    else:
-                        coords_2d = [i_val, j_val] if nd > 1 else [i_val]
-                        flat_phys = _emit_apply(layout_val, coords_2d)
+                    # Apply layout to (i, j) directly — 2D coords
+                    coords_2d = [i_val, j_val] if nd > 1 else [i_val]
+                    flat_phys = _emit_apply(layout_val, coords_2d)
 
                     # Store at output[i * N + j]
                     out_idx = arith_dialect.addi(
