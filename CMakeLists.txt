@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(LEGO_MONOLITHIC_LLVM "Build LLVM/MLIR as part of the project" OFF)
 option(LEGO_ENABLE_CCACHE "Enable ccache for faster recompilation" ON)
 option(LEGO_BUILD_TESTS "Build LEGO tests" ON)
-set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;SPIRV;AArch64)")
+set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV;WebAssembly" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;SPIRV;WebAssembly;AArch64)")
 
 # --- Python & Venv Support ---
 # Prioritize the local virtual environment
@@ -200,6 +200,13 @@ if("${LLVM_TARGETS_TO_BUILD}" MATCHES "AMDGPU")
   else()
     message(STATUS "AMDGPU backend enabled — ROCDL cross-compilation only (no AMD GPU detected)")
   endif()
+endif()
+
+set(LEGO_HAS_WASM OFF)
+if("${LLVM_TARGETS_TO_BUILD}" MATCHES "WebAssembly")
+  set(LEGO_HAS_WASM ON)
+  add_definitions(-DLEGO_HAS_WASM)
+  message(STATUS "WebAssembly backend enabled — WASM cross-compilation available")
 endif()
 
 set(MLIR_TABLEGEN_EXE mlir-tblgen)

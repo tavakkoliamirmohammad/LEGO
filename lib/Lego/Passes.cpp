@@ -169,6 +169,13 @@ void registerLegoPipelines() {
     "(LEGO -> Arith -> GPU outlined -> ROCDL -> HSACO)",
     buildLegoToROCDLPipeline);
 #endif
+
+#ifdef LEGO_HAS_WASM
+  PassPipelineRegistration<LegoToWasmPipelineOptions>("lego-to-wasm",
+    "Lower LEGO dialect to WebAssembly binary "
+    "(LEGO -> Arith -> LLVM -> WASM)",
+    buildLegoToWasmPipeline);
+#endif
 }
 
 } // namespace lego

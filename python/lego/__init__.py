@@ -34,7 +34,7 @@ _SPIRV_TARGETS = {"vulkan", "webgpu", "metal", "webgl"}
 
 
 def _all_targets():
-    return {"cpu"} | set(_GPU_TARGETS) | _SPIRV_TARGETS
+    return {"cpu", "wasm"} | set(_GPU_TARGETS) | _SPIRV_TARGETS
 
 
 def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
@@ -54,6 +54,9 @@ def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
     """
     if target == "cpu":
         return _get_cpu_compiler(layout_or_builder, shape, dtype)
+    if target == "wasm":
+        from lego.backend.wasm import compile_to_wasm
+        return compile_to_wasm(layout_or_builder, shape)
     if target in _GPU_TARGETS:
         if isinstance(layout_or_builder, KernelBuilder):
             return layout_or_builder.compile(target=target, **kwargs)

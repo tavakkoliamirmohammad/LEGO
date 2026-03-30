@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LEGO Layout Visualizer</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header>
+    <h1><span>LEGO</span> Layout Visualizer</h1>
+    <span class="subtitle">Algebraic memory layout visualization</span>
+  </header>
+
+  <main id="app">
+    <!-- Editor Panel (left) -->
+    <div id="editor-panel">
+      <!-- Presets -->
+      <div class="panel-section">
+        <h3>Layout Presets</h3>
+        <div class="presets">
+          <button class="preset-btn active" data-preset="row-major">Row-Major</button>
+          <button class="preset-btn" data-preset="col-major">Col-Major</button>
+          <button class="preset-btn" data-preset="tiled">Tiled</button>
+          <button class="preset-btn" data-preset="transposed">Transposed</button>
+        </div>
+      </div>
+
+      <!-- Dimensions -->
+      <div class="panel-section">
+        <h3>Dimensions</h3>
+        <div class="dim-grid">
+          <div class="dim-field">
+            <label>M (rows)</label>
+            <input type="number" id="dim-M" value="8" min="1" max="64">
+          </div>
+          <div class="dim-field">
+            <label>N (cols)</label>
+            <input type="number" id="dim-N" value="8" min="1" max="64">
+          </div>
+          <div id="tile-fields" class="dim-grid" style="display:none; grid-column: 1/-1;">
+            <div class="dim-field">
+              <label>BM (tile rows)</label>
+              <input type="number" id="dim-BM" value="4" min="1" max="64">
+            </div>
+            <div class="dim-field">
+              <label>BN (tile cols)</label>
+              <input type="number" id="dim-BN" value="4" min="1" max="64">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Code Editor -->
+      <div class="panel-section" style="flex:1; display:flex; flex-direction:column;">
+        <h3>Layout Code</h3>
+        <div id="code-editor-wrapper">
+          <textarea id="code-editor" spellcheck="false">L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
+        </div>
+        <div id="formula-output"></div>
+      </div>
+
+      <!-- Run -->
+      <div class="panel-section">
+        <button id="run-btn">Visualize</button>
+        <div id="error-output"></div>
+      </div>
+    </div>
+
+    <!-- Visualization Panel (right) -->
+    <div id="viz-panel">
+      <div id="viz-container">
+        <div class="empty-state">
+          <div class="icon">&#x25A6;</div>
+          <p>Click <strong>Visualize</strong> or press <strong>Ctrl+Enter</strong></p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -57,6 +57,15 @@ if(LEGO_HAS_AMDGPU)
   )
 endif()
 
+if(LEGO_HAS_WASM)
+  list(APPEND _GPU_BACKEND_SOURCES LegoWasmPipeline.cpp)
+  list(APPEND _GPU_BACKEND_LIBS
+    MLIRTargetLLVMIRExport
+    MLIRLLVMToLLVMIRTranslation
+    MLIRBuiltinToLLVMIRTranslation
+  )
+endif()
+
 # --- Core dialect library ---
 add_mlir_dialect_library(MLIRLego
   # Dialect core
