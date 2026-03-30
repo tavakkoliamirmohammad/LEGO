@@ -27,6 +27,6 @@ filterwarnings = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["mlir", "mlir.*", "lego", "lego.*"]
+include = ["lego", "lego.*"]
 
 # package_data is handled dynamically by setup_wheel.py (discovers .so files)

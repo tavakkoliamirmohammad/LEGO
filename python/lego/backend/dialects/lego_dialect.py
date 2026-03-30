@@ -4,7 +4,7 @@ LEGO MLIR dialect Python overlay.
 Provides dialect registration and re-exports auto-generated op classes.
 
 Usage:
-    from mlir.ir import Context
+    from lego.mlir.ir import Context
     from lego.backend.dialects import lego_dialect
 
     ctx = Context()
@@ -17,12 +17,18 @@ except ImportError:
     pass  # Generated bindings not yet built
 
 try:
-    from mlir._mlir_libs._legoDialects import register_lego_dialect as _register
+    from lego.mlir._mlir_libs._legoDialects import register_lego_dialect as _register
 except ImportError:
     try:
-        from _mlir_libs._legoDialects import register_lego_dialect as _register
+        from lego.mlir._mlir_libs._legoDialects import register_lego_dialect as _register
     except ImportError:
         _register = None
+
+# Re-export PyConcreteType bindings for LEGO types
+try:
+    from lego.mlir._mlir_libs._legoDialects.lego import LayoutType, ViewType  # noqa: F401
+except ImportError:
+    pass
 
 
 def register(ctx):

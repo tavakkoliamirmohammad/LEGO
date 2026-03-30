@@ -24,6 +24,19 @@ MLIR_CAPI_EXPORTED void legoRegisterPasses(void);
 /// Required before using mlir::ExecutionEngine for JIT compilation.
 MLIR_CAPI_EXPORTED void legoRegisterLLVMTranslations(MlirContext context);
 
+// --- Type accessors for Python bindings ---
+
+MLIR_CAPI_EXPORTED bool mlirLegoTypeIsALayout(MlirType type);
+MLIR_CAPI_EXPORTED bool mlirLegoTypeIsAView(MlirType type);
+
+MLIR_CAPI_EXPORTED MlirTypeID mlirLegoLayoutTypeGetTypeID(void);
+MLIR_CAPI_EXPORTED MlirTypeID mlirLegoViewTypeGetTypeID(void);
+
+MLIR_CAPI_EXPORTED MlirType mlirLegoLayoutTypeGet(MlirContext context);
+MLIR_CAPI_EXPORTED MlirType mlirLegoViewTypeGet(MlirContext context,
+                                                 MlirType elementType);
+MLIR_CAPI_EXPORTED MlirType mlirLegoViewTypeGetElementType(MlirType type);
+
 #ifdef __cplusplus
 }
 #endif

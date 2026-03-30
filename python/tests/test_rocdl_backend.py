@@ -19,8 +19,8 @@ from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer
 def _has_lego_to_rocdl_pipeline():
     """Check if the lego-to-rocdl pipeline is available."""
     try:
-        from mlir.ir import Context, Location
-        from mlir.passmanager import PassManager
+        from lego.mlir.ir import Context, Location
+        from lego.mlir.passmanager import PassManager
         from lego.backend.dialects.lego_dialect import register
         ctx = Context()
         register(ctx)

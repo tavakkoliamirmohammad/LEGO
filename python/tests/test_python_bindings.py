@@ -17,15 +17,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 def _index_const(val):
     """Emit an arith.constant with an index value."""
-    from mlir.ir import IndexType, IntegerAttr
-    from mlir.dialects import arith
+    from lego.mlir.ir import IndexType, IntegerAttr
+    from lego.mlir.dialects import arith
     idx_ty = IndexType.get()
     return arith.ConstantOp(idx_ty, IntegerAttr.get(idx_ty, int(val))).result
 
 
 def _layout_ty():
     """Get the !lego.layout type."""
-    from mlir.ir import Type
+    from lego.mlir.ir import Type
     return Type.parse("!lego.layout")
 
 
@@ -36,7 +36,7 @@ class TestDialectRegistration:
     def mlir_ctx(self):
         """Create an MLIR context with the LEGO dialect registered."""
         try:
-            from mlir.ir import Context
+            from lego.mlir.ir import Context
             from lego.backend.dialects.lego_dialect import register
         except ImportError:
             pytest.skip("MLIR Python bindings not available")
@@ -57,7 +57,7 @@ class TestDialectRegistration:
 
     def test_parse_lego_view_type(self, mlir_ctx):
         """Test parsing !lego.view<f32> type."""
-        from mlir.ir import Type
+        from lego.mlir.ir import Type
         with mlir_ctx:
             ty = Type.parse("!lego.view<f32>")
             assert "lego.view" in str(ty)
@@ -69,7 +69,7 @@ class TestOpConstruction:
     @pytest.fixture
     def setup(self):
         try:
-            from mlir.ir import Context
+            from lego.mlir.ir import Context
             from lego.backend.dialects.lego_dialect import register
         except ImportError:
             pytest.skip("MLIR Python bindings not available")
@@ -80,8 +80,8 @@ class TestOpConstruction:
 
     def test_build_row_op(self, setup):
         """Test building a lego.row op."""
-        from mlir.ir import Location, Module, InsertionPoint, FunctionType
-        from mlir.dialects import func
+        from lego.mlir.ir import Location, Module, InsertionPoint, FunctionType
+        from lego.mlir.dialects import func
         from lego.backend.dialects.lego_dialect import RowOp
 
         ctx = setup
@@ -105,11 +105,11 @@ class TestOpConstruction:
 
     def test_build_reg_p_op(self, setup):
         """Test building a lego.reg_p op."""
-        from mlir.ir import (
+        from lego.mlir.ir import (
             Location, Module, InsertionPoint,
             IntegerType, IntegerAttr, ArrayAttr, FunctionType,
         )
-        from mlir.dialects import func
+        from lego.mlir.dialects import func
         from lego.backend.dialects.lego_dialect import RegPOp
 
         ctx = setup
@@ -139,10 +139,10 @@ class TestOpConstruction:
 
     def test_build_apply_op(self, setup):
         """Test building lego.apply op."""
-        from mlir.ir import (
+        from lego.mlir.ir import (
             Location, Module, InsertionPoint, IndexType, FunctionType,
         )
-        from mlir.dialects import func
+        from lego.mlir.dialects import func
         from lego.backend.dialects.lego_dialect import RowOp, ApplyOp
 
         ctx = setup

@@ -37,16 +37,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-from mlir.ir import (
+from lego.mlir.ir import (
     Context, Location, Module, InsertionPoint,
     IndexType, MemRefType, FunctionType, StringAttr, IntegerAttr,
 )
-from mlir.dialects import func as func_dialect
-from mlir.dialects import scf as scf_dialect
-from mlir.dialects import memref as memref_dialect
-from mlir.dialects import arith as arith_dialect
-from mlir.dialects import gpu as gpu_dialect
-from mlir.passmanager import PassManager
+from lego.mlir.dialects import func as func_dialect
+from lego.mlir.dialects import scf as scf_dialect
+from lego.mlir.dialects import memref as memref_dialect
+from lego.mlir.dialects import arith as arith_dialect
+from lego.mlir.dialects import gpu as gpu_dialect
+from lego.mlir.passmanager import PassManager
 
 from lego.backend.dialects.lego_dialect import register as register_lego
 from lego.backend._ops import (
