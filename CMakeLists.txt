@@ -450,26 +450,14 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       )
     endforeach()
 
-    # --- @gpu_kernel DSL examples (AST-transformed) ---
-    add_custom_target(check-gpu-dsl
-      COMMAND ${CMAKE_COMMAND} -E env
-        "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
-        "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
-        "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/test_dsl_gpu.py"
-      DEPENDS LegoPythonModules
-      COMMENT "Running @gpu_kernel DSL GPU examples"
-      USES_TERMINAL
-    )
-
     add_custom_target(check-gpu-examples
-      COMMENT "Running all LEGO GPU kernel benchmarks and DSL examples"
+      COMMENT "Running all LEGO GPU kernel benchmarks (@gpu_kernel DSL)"
     )
     foreach(_entry ${_gpu_benchmarks})
       list(GET _entry 0 _example)
       string(REPLACE ".py" "" _name ${_example})
       add_dependencies(check-gpu-examples check-gpu-${_name})
     endforeach()
-    add_dependencies(check-gpu-examples check-gpu-dsl)
   endif()
 
   # --- Wheel build + verification target ---

@@ -1,18 +1,17 @@
-"""Parallel sum reduction with shared memory — unified KernelBuilder API.
+"""Parallel sum reduction with shared memory — @gpu_kernel DSL.
 
 Classic GPU tree reduction: each block loads a chunk into shared memory,
-then reduces via a binary tree (Python-level unrolled since BLOCK is known
-at kernel-build time).  Thread 0 of each block writes the partial sum to
-the output buffer.  The host sums the partial results for the full reduction.
+then reduces via a binary tree.  The `while stride > 0` loop is
+compile-time unrolled (stride is a Python int), while `if tx < stride`
+lowers to `scf.if` at each unrolled step.  Thread 0 of each block
+writes the partial sum to the output buffer.
 
-Demonstrates: ctx.if_(), ctx.lt(), ctx.eq(), Python-level loop unrolling,
-shared memory, barriers.
+Demonstrates: native if/while, shared memory, barrier(), Python-level
+unrolling, all via the @gpu_kernel AST transformer.
 """
 import sys
 import numpy as np
-from lego.core import Row
-from lego.backend.compiler import DType
-from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer
+from lego.backend.gpu_dsl import gpu_kernel, Buffer, Shared
 
 if len(sys.argv) != 2:
     print("Usage: python reduce_sum.py N")
@@ -25,55 +24,25 @@ assert N % BLOCK == 0, f"N ({N}) must be a multiple of BLOCK ({BLOCK})"
 
 num_blocks = N // BLOCK
 
-# --- Buffers ---
-A   = LayoutBuffer(Row(N),          shape=(N,),          dtype=DType.f32)
-Out = LayoutBuffer(Row(num_blocks), shape=(num_blocks,), dtype=DType.f32)
-Smem = LayoutBuffer(Row(BLOCK),     shape=(BLOCK,),      dtype=DType.f32, shared=True)
 
-grid = (num_blocks, 1, 1)
-block = (BLOCK, 1, 1)
+@gpu_kernel(grid=(num_blocks,), block=(BLOCK,))
+def reduce_sum(A: Buffer[N], Out: Buffer[num_blocks], smem: Shared[BLOCK]):
+    tx = thread_id.x
+    bx = block_id.x
+    gid = bx * BLOCK + tx
 
+    smem[tx] = A[gid]
+    barrier()
 
-def reduce_sum_kernel(ctx):
-    tx = ctx.thread_id.x
-    bx = ctx.block_id.x
-    gid = ctx.addi(ctx.muli(bx, ctx.const_index(BLOCK)), tx)
-
-    # Load global → shared memory
-    val = ctx.load_flat(0, gid)
-    ctx.store_flat(val, 2, tx)  # smem (buf index 2)
-    ctx.barrier()
-
-    # Tree reduction (Python-level unroll — BLOCK is a compile-time constant)
     stride = BLOCK // 2
     while stride > 0:
-        s = stride  # capture for lambda
+        if tx < stride:
+            smem[tx] = smem[tx] + smem[tx + stride]
+        barrier()
+        stride = stride // 2
 
-        def reduce_step(s=s):
-            neighbor = ctx.addi(tx, ctx.const_index(s))
-            mine   = ctx.load_flat(2, tx)
-            theirs = ctx.load_flat(2, neighbor)
-            ctx.store_flat(ctx.addf(mine, theirs), 2, tx)
-
-        ctx.if_(ctx.lt(tx, ctx.const_index(stride)), reduce_step)
-        ctx.barrier()
-        stride //= 2
-
-    # Thread 0 writes block result to output
-    def write_result():
-        result = ctx.load_flat(2, ctx.const_index(0))
-        ctx.store_flat(result, 1, bx)  # Out[bx]
-
-    ctx.if_(ctx.eq(tx, ctx.const_index(0)), write_result)
-
-
-builder = KernelBuilder(
-    buffers=[A, Out, Smem],
-    kernel_body=reduce_sum_kernel,
-    name="reduce_sum",
-    grid=grid,
-    block=block,
-)
+    if tx == 0:
+        Out[bx] = smem[0]
 
 
 from bench_utils import run_benchmark
@@ -87,7 +56,7 @@ if __name__ == "__main__":
 
     # init_mod=10 keeps values 0-9 so f32 accumulation is exact
     run_benchmark(
-        builder, compute_expected,
+        reduce_sum, compute_expected,
         targets=["cuda", "llvmspirv"],
         label=f"N={N}",
         init_mod=10,
