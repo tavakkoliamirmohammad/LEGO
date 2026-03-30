@@ -37,16 +37,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-from mlir.ir import (
+from lego.mlir.ir import (
     Context, Location, Module, InsertionPoint,
     IndexType, MemRefType, FunctionType, StringAttr, IntegerAttr,
+    F32Type,
 )
-from mlir.dialects import func as func_dialect
-from mlir.dialects import scf as scf_dialect
-from mlir.dialects import memref as memref_dialect
-from mlir.dialects import arith as arith_dialect
-from mlir.dialects import gpu as gpu_dialect
-from mlir.passmanager import PassManager
+from lego.mlir.dialects import func as func_dialect
+from lego.mlir.dialects import scf as scf_dialect
+from lego.mlir.dialects import memref as memref_dialect
+from lego.mlir.dialects import arith as arith_dialect
+from lego.mlir.dialects import gpu as gpu_dialect
+from lego.mlir.passmanager import PassManager
 
 from lego.backend.dialects.lego_dialect import register as register_lego
 from lego.backend._ops import (
@@ -374,6 +375,74 @@ class KernelContext:
 
     def mul(self, a, b):
         return self.mulf(a, b)
+
+    # --- Constants ---
+
+    def const_f32(self, value):
+        """Create a constant f32 MLIR Value."""
+        return arith_dialect.ConstantOp(F32Type.get(), float(value)).result
+
+    def const_index(self, value):
+        """Create a constant index MLIR Value."""
+        return _index_const(int(value))
+
+    # --- For-range loop with accumulator ---
+
+    def for_range(self, n, body_fn, init_vals=None):
+        """SCF for loop 0..n with optional carried accumulator values.
+
+        Args:
+            n: Python int or MLIR index Value — loop bound.
+            body_fn: If init_vals is None: body_fn(loop_idx) -> None.
+                     If init_vals provided: body_fn(loop_idx, *carry) -> [updated_carry].
+            init_vals: List of initial MLIR Values for iter_args (loop-carried
+                       accumulators).
+
+        Returns:
+            List of final carry values (MLIR Values), or None if no init_vals.
+        """
+        if isinstance(n, int):
+            n = _index_const(n)
+
+        if init_vals is None:
+            loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1))
+            with InsertionPoint(loop.body):
+                body_fn(loop.induction_variable)
+                scf_dialect.YieldOp([])
+            return None
+
+        loop = scf_dialect.ForOp(
+            _index_const(0), n, _index_const(1), init_vals
+        )
+        with InsertionPoint(loop.body):
+            iv = loop.induction_variable
+            carry_args = list(loop.inner_iter_args)
+            updated = body_fn(iv, *carry_args)
+            scf_dialect.YieldOp(updated)
+        return list(loop.results)
+
+    # --- Conditionals ---
+
+    def if_(self, cond, then_fn):
+        """Execute then_fn only if cond is true (no results, no else)."""
+        if_op = scf_dialect.IfOp(cond, has_else=False)
+        with InsertionPoint(if_op.then_block):
+            then_fn()
+            scf_dialect.YieldOp([])
+
+    # --- Comparisons ---
+
+    def lt(self, a, b):
+        """Unsigned integer less-than comparison (for index values)."""
+        return arith_dialect.CmpIOp(
+            arith_dialect.CmpIPredicate.ult, a, b
+        ).result
+
+    def eq(self, a, b):
+        """Integer equality comparison."""
+        return arith_dialect.CmpIOp(
+            arith_dialect.CmpIPredicate.eq, a, b
+        ).result
 
     # Legacy flat-index API (for simple element-wise kernels)
     def load_raw(self, buf_index, gid=None):

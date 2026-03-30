@@ -233,6 +233,12 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
 
   include(AddMLIRPython)
 
+  # Relocate MLIR Python bindings under the lego.mlir namespace so that
+  # imports become "from lego.mlir.ir import ..." instead of "from mlir.ir ...".
+  # This prevents conflicts when other MLIR-based packages are installed.
+  set(MLIR_PYTHON_PACKAGE_PREFIX "lego.mlir" CACHE STRING "" FORCE)
+  add_compile_definitions("MLIR_PYTHON_PACKAGE_PREFIX=${MLIR_PYTHON_PACKAGE_PREFIX}.")
+
   # Declare top-level Python source group
   declare_mlir_python_sources(LegoPythonSources)
   declare_mlir_python_sources(LegoPythonSources.Dialects
@@ -247,7 +253,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/python"
     TD_FILE lego/backend/dialects/LegoOps.td
     SOURCES lego/backend/dialects/lego_dialect.py
-    DIALECT_NAME lego)
+    DIALECT_NAME lego
+    GEN_ENUM_BINDINGS)
 
   # Build the nanobind extension for dialect registration
   set(_lego_extension_capi_libs MLIRLegoCAPI MLIRCAPIGPU MLIRCAPISPIRV)
@@ -264,7 +271,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
 
   # Sources shared between the CAPI library and the module assembly step.
   set(_lego_python_sources
-    # Core MLIR Python package (mlir.ir, mlir._mlir_libs, etc.)
+    # Core MLIR Python package (lego.mlir.ir, lego.mlir._mlir_libs, etc.)
     MLIRPythonSources.Core
     # Standard dialects used by the LEGO compiler
     MLIRPythonSources.Dialects.builtin
@@ -289,9 +296,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   # needed for dialect registration via load_all_available_dialects().
   add_mlir_python_common_capi_library(LegoPythonCAPI
     INSTALL_COMPONENT LegoPythonModules
-    INSTALL_DESTINATION "python_packages/lego/mlir/_mlir_libs"
-    OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python_packages/lego/mlir/_mlir_libs"
-    RELATIVE_INSTALL_ROOT "../../../.."
+    INSTALL_DESTINATION "python_packages/lego/lego/mlir/_mlir_libs"
+    OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python_packages/lego/lego/mlir/_mlir_libs"
+    RELATIVE_INSTALL_ROOT "../../../../.."
     DECLARED_SOURCES
       ${_lego_python_sources}
     EMBED_LIBS
@@ -300,13 +307,37 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
 
   # Assemble final Python package.
   add_mlir_python_modules(LegoPythonModules
-    ROOT_PREFIX "${CMAKE_BINARY_DIR}/python_packages/lego/mlir"
-    INSTALL_PREFIX "python_packages/lego/mlir"
+    ROOT_PREFIX "${CMAKE_BINARY_DIR}/python_packages/lego/lego/mlir"
+    INSTALL_PREFIX "python_packages/lego/lego/mlir"
     DECLARED_SOURCES
       ${_lego_python_sources}
     COMMON_CAPI_LINK_LIBS
       LegoPythonCAPI
     MLIR_BINDINGS_PYTHON_NB_DOMAIN lego)
+
+  # --- Type stub generation (requires nanobind stubgen) ---
+  option(LEGO_PYTHON_STUBGEN "Generate .pyi type stubs for LEGO extensions" ON)
+  if(LEGO_PYTHON_STUBGEN)
+    get_target_property(_lego_extension_srcs
+      LegoPythonSources.Extension INTERFACE_SOURCES)
+    mlir_generate_type_stubs(
+      MODULE_NAME lego.mlir._mlir_libs._legoDialects
+      DEPENDS_TARGETS
+        LegoPythonModules.extension._mlir.dso
+        LegoPythonModules.extension._legoDialects.dso
+      OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/type_stubs/_mlir_libs"
+      OUTPUTS
+        _legoDialects/__init__.pyi
+      DEPENDS_TARGET_SRC_DEPS "${_lego_extension_srcs}"
+      IMPORT_PATHS
+        "${CMAKE_BINARY_DIR}/python_packages/lego"
+    )
+    declare_mlir_python_sources(LegoPythonSources.type_stub_gen
+      ROOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/type_stubs"
+      ADD_TO_PARENT LegoPythonSources
+      SOURCES _mlir_libs/_legoDialects/__init__.pyi)
+    add_dependencies(LegoPythonModules "${NB_STUBGEN_CUSTOM_TARGET}")
+  endif()
 
   # Copy generated _lego_ops_gen.py into source tree for dev imports.
   # This file is .gitignored and not tracked in version control.
@@ -360,11 +391,17 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
 
   # --- Import verification target ---
+  # After lego-prepare-wheel the assembled package at python_packages/lego/
+  # contains both lego/* (source) and lego/mlir/* (MLIR bindings), so a
+  # single PYTHONPATH entry is sufficient.  The -P flag prevents Python from
+  # adding the script's directory (python/) to sys.path, which would shadow
+  # the assembled lego/ package with the source-tree version.
+  set(LEGO_PYTHONPATH "${CMAKE_BINARY_DIR}/python_packages/lego")
   add_custom_target(check-lego-imports
     COMMAND ${CMAKE_COMMAND} -E env
-      "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
-      "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/python/check_imports.py"
-    DEPENDS LegoPythonModules
+      "PYTHONPATH=${LEGO_PYTHONPATH}"
+      "${Python_EXECUTABLE}" -P "${CMAKE_SOURCE_DIR}/python/check_imports.py"
+    DEPENDS lego-prepare-wheel
     COMMENT "Verifying LEGO Python imports"
     USES_TERMINAL
   )
@@ -382,9 +419,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       string(REPLACE ".py" "" _name ${_example})
       add_custom_target(check-triton-${_name}
         COMMAND ${CMAKE_COMMAND} -E env
-          "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+          "PYTHONPATH=${LEGO_PYTHONPATH}"
           "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/python/examples/triton/${_example}"
-        DEPENDS LegoPythonModules
+        DEPENDS lego-prepare-wheel
         COMMENT "Running Triton example: ${_example}"
         USES_TERMINAL
       )
@@ -417,10 +454,10 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       string(REPLACE ".py" "" _name ${_example})
       add_custom_target(check-transpose-${_name}
         COMMAND ${CMAKE_COMMAND} -E env
-          "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+          "PYTHONPATH=${LEGO_PYTHONPATH}"
           "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
           "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_example}" "1024" "1024"
-        DEPENDS LegoPythonModules
+        DEPENDS lego-prepare-wheel
         COMMENT "Running transpose example: ${_example} 1024 1024"
         USES_TERMINAL
       )
@@ -433,12 +470,44 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       string(REPLACE ".py" "" _name ${_example})
       add_dependencies(check-transpose-examples check-transpose-${_name})
     endforeach()
+
+    # --- LEGO GPU kernel benchmarks (vecadd, matmul, reduce) ---
+    # Each takes a single size argument; matmul uses square M=N=K.
+    set(_gpu_benchmarks
+      "vecadd.py;1024"
+      "matmul_naive.py;64"
+      "matmul_smem.py;64"
+      "reduce_sum.py;1024"
+    )
+    foreach(_entry ${_gpu_benchmarks})
+      list(GET _entry 0 _example)
+      list(GET _entry 1 _size)
+      string(REPLACE ".py" "" _name ${_example})
+      add_custom_target(check-gpu-${_name}
+        COMMAND ${CMAKE_COMMAND} -E env
+          "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+          "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
+          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_example}" "${_size}"
+        DEPENDS LegoPythonModules
+        COMMENT "Running GPU benchmark: ${_example} ${_size}"
+        USES_TERMINAL
+      )
+    endforeach()
+
+    add_custom_target(check-gpu-examples
+      COMMENT "Running all LEGO GPU kernel benchmarks (@gpu_kernel DSL)"
+    )
+    foreach(_entry ${_gpu_benchmarks})
+      list(GET _entry 0 _example)
+      string(REPLACE ".py" "" _name ${_example})
+      add_dependencies(check-gpu-examples check-gpu-${_name})
+    endforeach()
   endif()
 
   # --- Wheel build + verification target ---
   add_custom_target(check-lego-wheel
     COMMAND ${CMAKE_COMMAND} -E env
-      "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
+      "PYTHONPATH=${LEGO_PYTHONPATH}"
       "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/python/check_wheel.py"
     DEPENDS lego-prepare-wheel
     COMMENT "Building and verifying LEGO wheel"
@@ -469,5 +538,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   if(TARGET check-transpose-examples)
     add_dependencies(check-lego-all check-transpose-examples)
+  endif()
+  if(TARGET check-gpu-examples)
+    add_dependencies(check-lego-all check-gpu-examples)
   endif()
 endif()

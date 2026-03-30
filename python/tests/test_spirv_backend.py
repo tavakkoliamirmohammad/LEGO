@@ -26,8 +26,8 @@ from lego.backend.spirv import KernelBuilder, LayoutBuffer
 def _has_lego_to_spirv_pipeline():
     """Check if the lego-to-spirv pipeline is available (requires SPIR-V libs)."""
     try:
-        from mlir.ir import Context, Location, Module
-        from mlir.passmanager import PassManager
+        from lego.mlir.ir import Context, Location, Module
+        from lego.mlir.passmanager import PassManager
         from lego.backend.dialects.lego_dialect import register
         ctx = Context()
         register(ctx)
@@ -41,8 +41,8 @@ def _has_lego_to_spirv_pipeline():
 def _has_lego_to_llvmspirv_pipeline():
     """Check if the lego-to-llvmspirv pipeline is available."""
     try:
-        from mlir.ir import Context, Location, Module
-        from mlir.passmanager import PassManager
+        from lego.mlir.ir import Context, Location, Module
+        from lego.mlir.passmanager import PassManager
         from lego.backend.dialects.lego_dialect import register
         ctx = Context()
         register(ctx)

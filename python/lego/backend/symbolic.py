@@ -6,11 +6,11 @@ import sys
 import threading
 import sympy as sp
 
-from mlir.dialects import arith, scf
-from mlir import ir
-from mlir.ir import Context, Location, Module, InsertionPoint
-from mlir.passmanager import PassManager as _PassManager
-from mlir.dialects import func as _func_dialect
+from lego.mlir.dialects import arith, scf
+from lego.mlir import ir
+from lego.mlir.ir import Context, Location, Module, InsertionPoint
+from lego.mlir.passmanager import PassManager as _PassManager
+from lego.mlir.dialects import func as _func_dialect
 from lego.backend.dialects.lego_dialect import (
     register as _register_lego,
     ApplyOp, ApplyInverseOp, GenPOp, YieldOp,
@@ -181,7 +181,7 @@ def _lower_sympy_to_index(expr, sym_to_val):
         return _lower_sympy_cond_to_i1(expr, sym_to_val)
 
     if isinstance(expr, sp.Piecewise):
-        from mlir.dialects import scf as _scf
+        from lego.mlir.dialects import scf as _scf
         idx_ty = ir.IndexType.get()
 
         def _recurse(i):
@@ -204,7 +204,7 @@ def _lower_sympy_to_index(expr, sym_to_val):
 
 def emit_layout_from_python(layout, sym_to_val):
     """Convert a Python layout object to MLIR LEGO dialect ops."""
-    from mlir.ir import IndexType
+    from lego.mlir.ir import IndexType
 
     if isinstance(layout, Row):
         return _emit_row([_resolve_dim(d, sym_to_val) for d in layout._dims])
@@ -426,7 +426,7 @@ def _collect_free_symbols(layout):
 
 def simplify_via_mlir(layout, mode, args, constraints=None):
     """Compute layout.apply or layout.inv via MLIR roundtrip."""
-    from mlir.ir import IndexType, FunctionType, StringAttr
+    from lego.mlir.ir import IndexType, FunctionType, StringAttr
 
     if constraints is None:
         constraints = {}
@@ -469,7 +469,7 @@ def simplify_via_mlir(layout, mode, args, constraints=None):
 
 def _simplify_via_mlir_impl(ctx, layout, mode, args, constraints, sym_list):
     """Inner implementation of simplify_via_mlir (separated for error handling)."""
-    from mlir.ir import IndexType, FunctionType, StringAttr
+    from lego.mlir.ir import IndexType, FunctionType, StringAttr
 
     with ctx, Location.unknown():
         module = Module.create()

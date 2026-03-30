@@ -4,9 +4,9 @@ Used by both compiler.py and symbolic.py — kept separate to avoid circular imp
 """
 import os
 
-from mlir.ir import IndexType, IntegerAttr, Type, InsertionPoint
-from mlir import ir
-from mlir.dialects import arith as arith_dialect
+from lego.mlir.ir import IndexType, IntegerAttr, Type, InsertionPoint
+from lego.mlir import ir
+from lego.mlir.dialects import arith as arith_dialect
 
 _LEGO_DEBUG = os.environ.get("LEGO_DEBUG", "")
 

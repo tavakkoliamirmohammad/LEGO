@@ -80,9 +80,17 @@ def find_mlir_runner():
     return mlir_runner, libs_dir
 
 
-def _make_main_wrapper(builder):
+def _make_main_wrapper(builder, init_mod=10000):
     """Generate a @main function that allocates, initializes, calls the kernel,
-    and prints the last (output) buffer in flat order."""
+    and prints the last (output) buffer in flat order.
+
+    Args:
+        init_mod: Modulus for input buffer initialization.
+            val[i] = (i * 37 + 17) % init_mod.
+            Default 10000 for transpose/permutation tests.
+            Use smaller values (e.g. 10) for accumulation kernels (matmul,
+            reduce) so that results stay within f32 exact integer range.
+    """
     global_bufs = builder._global_bufs
     name = builder._name
 
@@ -105,16 +113,16 @@ def _make_main_wrapper(builder):
 
         if i < len(global_bufs) - 1:
             # Input buffers: pseudo-random integers as f32.
-            # val = (i * 37 + 17) % 10000 — deterministic, non-sequential,
+            # val = (i * 37 + 17) % init_mod — deterministic, non-sequential,
             # exact in f32, makes permutation bugs obvious.
             lines.append(f"    %c37_{i} = arith.constant 37 : i32")
             lines.append(f"    %c17_{i} = arith.constant 17 : i32")
-            lines.append(f"    %c10000_{i} = arith.constant 10000 : i32")
+            lines.append(f"    %c{init_mod}_{i} = arith.constant {init_mod} : i32")
             lines.append(f"    scf.for %i{i} = %c0 to %n{i} step %c1 {{")
             lines.append(f"      %vi{i} = arith.index_cast %i{i} : index to i32")
             lines.append(f"      %t{i} = arith.muli %vi{i}, %c37_{i} : i32")
             lines.append(f"      %t2_{i} = arith.addi %t{i}, %c17_{i} : i32")
-            lines.append(f"      %ri{i} = arith.remui %t2_{i}, %c10000_{i} : i32")
+            lines.append(f"      %ri{i} = arith.remui %t2_{i}, %c{init_mod}_{i} : i32")
             lines.append(f"      %vf{i} = arith.sitofp %ri{i} : i32 to f32")
             lines.append(f"      memref.store %vf{i}, {bname}[%i{i}] : {ty}")
             lines.append(f"    }}")
@@ -192,12 +200,18 @@ def run_transpose_benchmark(builder, layouts, N, targets, extra_verify=None):
         run_webgpu_verify(builder, expected, label=f"{N}x{N}")
 
 
-def run_cuda_verify(builder, expected, label=None):
+def run_cuda_verify(builder, expected, label=None, atol=0, rtol=0, init_mod=10000):
     """Run the builder's generated kernel on GPU and verify against expected output.
 
     Builds the actual LEGO kernel, injects a @main wrapper, lowers through
     lego-to-nvvm via the Python PassManager API (no lego-opt binary needed),
     and executes via mlir-runner.
+
+    Args:
+        atol: Absolute tolerance. 0 = exact integer comparison,
+              >0 = np.allclose on float values.
+        rtol: Relative tolerance (used with atol when atol>0).
+        init_mod: Modulus for input init (must match _init_data).
 
     Returns True/False/None (None = skipped).
     """
@@ -206,8 +220,8 @@ def run_cuda_verify(builder, expected, label=None):
         print("  CUDA execution: SKIP (mlir-runner not found)", file=sys.stderr)
         return None
 
-    from mlir.ir import Context, Location, Module
-    from mlir.passmanager import PassManager
+    from lego.mlir.ir import Context, Location, Module
+    from lego.mlir.passmanager import PassManager
     from lego.backend.dialects.lego_dialect import register as register_lego
 
     # Build the kernel module and get MLIR text
@@ -216,7 +230,7 @@ def run_cuda_verify(builder, expected, label=None):
         mlir_str = str(build_mod)
 
     # Inject @main wrapper before the closing }
-    main_code = _make_main_wrapper(builder)
+    main_code = _make_main_wrapper(builder, init_mod=init_mod)
     idx = mlir_str.rstrip().rfind("}")
     mlir_src = mlir_str[:idx] + main_code + "\n}\n"
 
@@ -255,9 +269,16 @@ def run_cuda_verify(builder, expected, label=None):
 
         match = re.search(r'data\s*=\s*\n\[([^\]]+)\]', r.stdout)
         if match:
-            gpu_values = np.array([int(float(v.strip())) for v in match.group(1).split(",")])
-            ok = np.array_equal(gpu_values, expected)
-            max_err = np.max(np.abs(gpu_values - expected))
+            raw = [float(v.strip()) for v in match.group(1).split(",")]
+            if atol > 0 or rtol > 0:
+                gpu_values = np.array(raw, dtype=np.float32)
+                expected_f = expected.astype(np.float32) if hasattr(expected, 'astype') else np.array(expected, dtype=np.float32)
+                ok = np.allclose(gpu_values, expected_f, atol=atol, rtol=rtol)
+                max_err = float(np.max(np.abs(gpu_values - expected_f)))
+            else:
+                gpu_values = np.array([int(v) for v in raw])
+                ok = np.array_equal(gpu_values, expected)
+                max_err = int(np.max(np.abs(gpu_values - expected)))
             tag = f" ({label})" if label else ""
             print(f"  CUDA execution{tag}: {'PASS' if ok else 'FAIL'} "
                   f"— {len(expected)} elements, max error={max_err}",
@@ -274,9 +295,9 @@ def run_cuda_verify(builder, expected, label=None):
         os.unlink(lowered_path)
 
 
-def _init_data(n):
-    """Deterministic pseudo-random integers as f32: (i * 37 + 17) % 10000."""
-    return ((np.arange(n, dtype=np.int32) * 37 + 17) % 10000).astype(np.float32)
+def _init_data(n, init_mod=10000):
+    """Deterministic pseudo-random integers as f32: (i * 37 + 17) % init_mod."""
+    return ((np.arange(n, dtype=np.int32) * 37 + 17) % init_mod).astype(np.float32)
 
 
 def _parse_spirv_launch(mlir):
@@ -310,7 +331,7 @@ def _parse_spirv_launch(mlir):
 
 
 def _run_wgpu_dispatch(builder, expected, label, target_name,
-                       shader_code, entry_point, bindings, grid):
+                       shader_code, entry_point, bindings, grid, atol=0, rtol=0):
     """Shared wgpu dispatch: create buffers, run kernel, verify output."""
     import wgpu
 
@@ -368,9 +389,15 @@ def _run_wgpu_dispatch(builder, expected, label, target_name,
         out_data = np.frombuffer(
             device.queue.read_buffer(data_bufs[last_data]).cast("f"),
             dtype=np.float32)
-        gpu_values = out_data.astype(np.int32)
-        ok = np.array_equal(gpu_values, expected)
-        max_err = int(np.max(np.abs(gpu_values - expected)))
+        if atol > 0 or rtol > 0:
+            gpu_values = out_data
+            expected_f = expected.astype(np.float32) if hasattr(expected, 'astype') else np.array(expected, dtype=np.float32)
+            ok = np.allclose(gpu_values, expected_f, atol=atol, rtol=rtol)
+            max_err = float(np.max(np.abs(gpu_values - expected_f)))
+        else:
+            gpu_values = out_data.astype(np.int32)
+            ok = np.array_equal(gpu_values, expected)
+            max_err = int(np.max(np.abs(gpu_values - expected)))
         tag = f" ({label})" if label else ""
         gpu_info = f"{adapter.info['device']}, {adapter.info['backend_type']}"
         print(f"  {target_name} execution{tag}: {'PASS' if ok else 'FAIL'} "
@@ -382,7 +409,7 @@ def _run_wgpu_dispatch(builder, expected, label, target_name,
         return False
 
 
-def run_webgpu_verify(builder, expected, label=None):
+def run_webgpu_verify(builder, expected, label=None, atol=0, rtol=0):
     """Run via SPIR-V → naga → WGSL → wgpu. Returns True/False/None."""
     try:
         import wgpu  # noqa: F401
@@ -408,10 +435,10 @@ def run_webgpu_verify(builder, expected, label=None):
 
     return _run_wgpu_dispatch(
         builder, expected, label, "WebGPU",
-        result.kernel_source, ep_match.group(1), bindings, grid)
+        result.kernel_source, ep_match.group(1), bindings, grid, atol=atol, rtol=rtol)
 
 
-def run_vulkan_verify(builder, expected, label=None):
+def run_vulkan_verify(builder, expected, label=None, atol=0, rtol=0):
     """Run via raw SPIR-V binary → wgpu (Vulkan). Returns True/False/None."""
     try:
         import wgpu  # noqa: F401
@@ -438,4 +465,53 @@ def run_vulkan_verify(builder, expected, label=None):
 
     return _run_wgpu_dispatch(
         builder, expected, label, "Vulkan",
-        spv_bytes, ep_match.group(1), bindings, grid)
+        spv_bytes, ep_match.group(1), bindings, grid, atol=atol, rtol=rtol)
+
+
+def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rtol=0,
+                   init_mod=10000):
+    """Generic benchmark runner: compile to targets and verify correctness.
+
+    Args:
+        builder: KernelBuilder instance.
+        compute_expected_fn: callable (inputs: list[np.ndarray]) -> np.ndarray.
+            Given the list of input arrays (deterministic init pattern), returns
+            the expected flat output array.
+        targets: list of compilation target strings.
+        label: optional label for verification output.
+        atol: absolute tolerance (0 = exact integer match, >0 = float tolerance).
+    """
+    from lego.backend.gpu_builder import _ensure_stack_size
+    _ensure_stack_size()
+
+    # Generate MLIR
+    mlir_ctx, module = builder.build_module()
+    print(module)
+
+    # Compile to GPU backends
+    chip, features = detect_nvvm_target()
+    for target in targets:
+        try:
+            kwargs = {"name": f"{builder._name}_{target}"}
+            if target == "cuda":
+                kwargs["chip"] = chip
+                kwargs["features"] = features
+            result = builder.compile(target=target, **kwargs)
+            print(f"\n--- {target}: {result.kernel_path} ---", file=sys.stderr)
+        except Exception as e:
+            print(f"\n--- {target}: FAILED ({e}) ---", file=sys.stderr)
+
+    # Compute expected output from deterministic input data
+    global_bufs = builder._global_bufs
+    inputs = []
+    for buf in global_bufs[:-1]:
+        inputs.append(_init_data(buf.numel, init_mod=init_mod))
+    expected = compute_expected_fn(inputs)
+
+    # Host-side verification
+    print("\nVerification:", file=sys.stderr)
+    run_cuda_verify(builder, expected, label=label, atol=atol, rtol=rtol, init_mod=init_mod)
+    if "vulkan" in targets:
+        run_vulkan_verify(builder, expected, label=label, atol=atol, rtol=rtol)
+    if "webgpu" in targets:
+        run_webgpu_verify(builder, expected, label=label, atol=atol, rtol=rtol)

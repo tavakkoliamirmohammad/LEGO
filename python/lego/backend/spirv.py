@@ -12,8 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from mlir.ir import Context, Location, Module
-from mlir.passmanager import PassManager
+from lego.mlir.ir import Context, Location, Module
+from lego.mlir.passmanager import PassManager
 
 from lego.backend.dialects.lego_dialect import register as register_lego
 

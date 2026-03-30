@@ -1,12 +1,16 @@
-"""Shared-memory matrix transpose — unified KernelBuilder API (all GPU backends).
+"""Shared-memory matrix transpose — @gpu_kernel DSL.
 
-Includes host-side GPU execution verification via CUDA (mlir-runner).
-WebGPU not available for this kernel due to shared memory limitation.
+Same tiled layouts as transpose_naive, plus a shared memory buffer
+whose layout is changed mid-kernel via set_layout() between the
+read and write phases.
+
+Phase 1: global A → shared memory (Row-tiled write layout)
+Phase 2: shared memory → global B (Row-tiled read layout, indices swapped)
 """
 import sys
+import numpy as np
 from lego.core import OrderBy, Row, Col
-from lego.backend.compiler import DType
-from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer
+from lego.backend.gpu_dsl import gpu_kernel, Buffer, Shared
 
 if len(sys.argv) != 3:
     print("Usage: python transpose_smem.py NX NY")
@@ -17,13 +21,10 @@ NY = int(sys.argv[2])
 N = NX
 
 TILE_DIM = 32
-BRX = 8   # BLOCK_ROWS_X
-BRY = 32  # BLOCK_ROWS_Y
+BRX = 8
+BRY = 32
 
-dimGrid = (NX // TILE_DIM * NY // TILE_DIM, 1, 1)
-dimBlock = (BRY * BRX, 1, 1)
-
-# --- Global buffer layouts ---
+# --- Global layouts ---
 A_layout = OrderBy(Row(N, N)).TileBy(
     [N // TILE_DIM, N // TILE_DIM],
     [TILE_DIM // BRX, TILE_DIM // BRY],
@@ -33,80 +34,59 @@ B_layout = OrderBy(Row(N, N)).TileBy(
     [TILE_DIM // BRX, TILE_DIM // BRY],
     [BRX, BRY])
 
-# --- Shared memory layout (initial — will be swapped between phases) ---
+# --- Shared memory layout (initial) ---
 smem_layout = OrderBy(Row(TILE_DIM, TILE_DIM)).TileBy([TILE_DIM, TILE_DIM])
 
-A = LayoutBuffer(A_layout, shape=(N, N), dtype=DType.f32)
-B = LayoutBuffer(B_layout, shape=(N, N), dtype=DType.f32)
-Smem = LayoutBuffer(smem_layout, shape=(TILE_DIM, TILE_DIM), dtype=DType.f32, shared=True)
+# --- Phase layouts for shared memory ---
+smem_write_layout = OrderBy(Row(TILE_DIM, TILE_DIM)).TileBy(
+    [TILE_DIM // BRX, TILE_DIM // BRY], [BRX, BRY])
+smem_read_layout = OrderBy(Row(TILE_DIM, TILE_DIM)).TileBy(
+    [TILE_DIM // BRY, TILE_DIM // BRX], [BRY, BRX])
 
 
-def transpose_smem_kernel(ctx):
-    bX = ctx.block_id.x
-    tX = ctx.thread_id.x
+@gpu_kernel(
+    grid=(NX // TILE_DIM * NY // TILE_DIM, 1),
+    block=(BRY * BRX, 1),
+)
+def transpose_smem(A: Buffer(A_layout, N, N), B: Buffer(B_layout, N, N),
+                   Smem: Shared(smem_layout, TILE_DIM, TILE_DIM)):
+    bX = block_id.x
+    tX = thread_id.x
 
-    rby, rbx = ctx.apply_inverse(
+    rby, rbx = apply_inverse(
         OrderBy(Row(N // TILE_DIM, N // TILE_DIM))
         .TileBy([N // TILE_DIM, N // TILE_DIM]), bX)
-    wby, wbx = ctx.apply_inverse(
+    wby, wbx = apply_inverse(
         OrderBy(Col(N // TILE_DIM, N // TILE_DIM))
         .TileBy([N // TILE_DIM, N // TILE_DIM]), bX)
 
-    rty, rtx = ctx.apply_inverse(
+    rty, rtx = apply_inverse(
         OrderBy(Row(BRX, BRY)).TileBy([BRX, BRY]), tX)
-    wty, wtx = ctx.apply_inverse(
+    wty, wtx = apply_inverse(
         OrderBy(Col(BRY, BRX)).TileBy([BRY, BRX]), tX)
 
-    # --- Phase 1: Read from global A → write to shared memory ---
-    ctx.set_layout(2, OrderBy(Row(TILE_DIM, TILE_DIM)).TileBy(
-        [TILE_DIM // BRX, TILE_DIM // BRY], [BRX, BRY]))
+    # --- Phase 1: global A → shared memory ---
+    set_layout(Smem, smem_write_layout)
+    for j in range(TILE_DIM // BRX):
+        for i in range(TILE_DIM // BRY):
+            val = A[rby, rbx, j, i, rty, rtx]
+            Smem[j, i, rty, rtx] = val
 
-    read_tile = OrderBy(
-        Row(TILE_DIM // BRX, TILE_DIM // BRY)
-    ).TileBy([TILE_DIM // BRX, TILE_DIM // BRY])
+    barrier()
 
-    def read_body(indices, _):
-        j, i = indices
-        val = ctx.load(0, [rby, rbx, j, i, rty, rtx])
-        ctx.store(val, 2, [j, i, rty, rtx])
-
-    ctx.tile_loop(read_tile, read_body)
-
-    # --- Barrier ---
-    ctx.barrier()
-
-    # --- Phase 2: Read from shared memory → write to global B ---
-    ctx.set_layout(2, OrderBy(Row(TILE_DIM, TILE_DIM)).TileBy(
-        [TILE_DIM // BRY, TILE_DIM // BRX], [BRY, BRX]))
-
-    write_tile = OrderBy(
-        Row(TILE_DIM // BRY, TILE_DIM // BRX)
-    ).TileBy([TILE_DIM // BRY, TILE_DIM // BRX])
-
-    def write_body(indices, _):
-        j, i = indices
-        val = ctx.load(2, [j, i, wty, wtx])
-        ctx.store(val, 1, [wby, wbx, i, j, rty, rtx])
-
-    ctx.tile_loop(write_tile, write_body)
-
-
-builder = KernelBuilder(
-    buffers=[A, B, Smem],
-    kernel_body=transpose_smem_kernel,
-    name="transpose_smem",
-    grid=dimGrid,
-    block=dimBlock,
-)
+    # --- Phase 2: shared memory → global B ---
+    set_layout(Smem, smem_read_layout)
+    for j in range(TILE_DIM // BRY):
+        for i in range(TILE_DIM // BRX):
+            val = Smem[j, i, wty, wtx]
+            B[wby, wbx, i, j, rty, rtx] = val
 
 
 from bench_utils import run_transpose_benchmark
 
 
 if __name__ == "__main__":
-    # lego-to-spirv (dialect-only) doesn't support shared memory.
-    # lego-to-llvmspirv handles it via LLVM lowering (same as NVVM).
     run_transpose_benchmark(
-        builder, {"A": A_layout, "B": B_layout}, N,
+        transpose_smem, {"A": A_layout, "B": B_layout}, N,
         targets=["cuda", "llvmspirv"],
     )

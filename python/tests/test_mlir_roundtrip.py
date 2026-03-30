@@ -263,9 +263,9 @@ class TestEmitLayout:
 
     def test_emit_regp(self):
         from lego.backend.symbolic import emit_layout_from_python
-        from mlir.ir import Context, Location, InsertionPoint, Module, IndexType
+        from lego.mlir.ir import Context, Location, InsertionPoint, Module, IndexType
         from lego.backend.dialects.lego_dialect import register as register_lego
-        import mlir.ir as ir
+        import lego.mlir.ir as ir
 
         ctx = Context()
         register_lego(ctx)
@@ -278,7 +278,7 @@ class TestEmitLayout:
 
     def test_emit_orderby(self):
         from lego.backend.symbolic import emit_layout_from_python
-        from mlir.ir import Context, Location, InsertionPoint, Module
+        from lego.mlir.ir import Context, Location, InsertionPoint, Module
         from lego.backend.dialects.lego_dialect import register as register_lego
 
         ctx = Context()
@@ -292,7 +292,7 @@ class TestEmitLayout:
 
     def test_emit_groupby(self):
         from lego.backend.symbolic import emit_layout_from_python
-        from mlir.ir import Context, Location, InsertionPoint, Module
+        from lego.mlir.ir import Context, Location, InsertionPoint, Module
         from lego.backend.dialects.lego_dialect import register as register_lego
 
         ctx = Context()
@@ -314,9 +314,9 @@ class TestArithToSympy:
 
     def test_constant(self):
         from lego.backend.symbolic import arith_to_sympy
-        from mlir.ir import Context, Location, Module
+        from lego.mlir.ir import Context, Location, Module
         from lego.backend.dialects.lego_dialect import register as register_lego
-        import mlir.ir as ir
+        import lego.mlir.ir as ir
 
         ctx = Context()
         register_lego(ctx)
@@ -333,7 +333,7 @@ class TestArithToSympy:
 
     def test_addi(self):
         from lego.backend.symbolic import arith_to_sympy
-        from mlir.ir import Context, Location, Module
+        from lego.mlir.ir import Context, Location, Module
         from lego.backend.dialects.lego_dialect import register as register_lego
 
         a_sym, b_sym = syms("a b")
