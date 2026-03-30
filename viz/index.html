@@ -9,59 +9,56 @@
 <body>
   <header>
     <h1><span>LEGO</span> Layout Visualizer</h1>
-    <span class="subtitle">Algebraic memory layout visualization</span>
+    <div class="header-actions">
+      <div class="presets">
+        <button class="preset-btn active" data-preset="row-major">Row-Major</button>
+        <button class="preset-btn" data-preset="col-major">Col-Major</button>
+        <button class="preset-btn" data-preset="tiled">Tiled</button>
+        <button class="preset-btn" data-preset="transposed">Transposed</button>
+      </div>
+      <button id="run-btn">Visualize</button>
+    </div>
   </header>
 
   <main id="app">
-    <!-- Editor Panel (left) -->
+    <!-- Left: Code Editor -->
     <div id="editor-panel">
-      <!-- Presets -->
-      <div class="panel-section">
-        <h3>Layout Presets</h3>
-        <div class="presets">
-          <button class="preset-btn active" data-preset="row-major">Row-Major</button>
-          <button class="preset-btn" data-preset="col-major">Col-Major</button>
-          <button class="preset-btn" data-preset="tiled">Tiled</button>
-          <button class="preset-btn" data-preset="transposed">Transposed</button>
-        </div>
+      <div class="panel-header"><h3>Layout Code</h3></div>
+      <div id="code-editor-wrapper">
+        <textarea id="code-editor" spellcheck="false">M, N = 8, 8
+L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
       </div>
-
-
-      <!-- Code Editor -->
-      <div class="panel-section" style="flex:1; display:flex; flex-direction:column;">
-        <h3>Layout Code</h3>
-        <div id="code-editor-wrapper">
-          <textarea id="code-editor" spellcheck="false">L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
-        </div>
-        <div id="formula-output"></div>
-      </div>
-
-      <!-- Run -->
-      <div class="panel-section">
-        <button id="run-btn">Visualize</button>
-        <div id="error-output"></div>
-      </div>
-
-      <!-- Compiler Output -->
-      <div class="panel-section" id="mlir-section">
-        <h3>Symbolic</h3>
-        <pre id="symbolic-output"></pre>
-        <h3>LEGO Dialect</h3>
-        <pre id="mlir-lego"></pre>
-        <h3>After lego-lower</h3>
-        <pre id="mlir-arith"></pre>
-        <h3>After lego-to-llvm</h3>
-        <pre id="mlir-llvm"></pre>
-      </div>
+      <div id="error-output"></div>
+      <div id="formula-output"></div>
     </div>
 
-    <!-- Visualization Panel (right) -->
+    <!-- Center: Visualization -->
     <div id="viz-panel">
       <div id="viz-container">
         <div class="empty-state">
           <div class="icon">&#x25A6;</div>
           <p>Click <strong>Visualize</strong> or press <strong>Ctrl+Enter</strong></p>
         </div>
+      </div>
+    </div>
+
+    <!-- Right: Compiler Output -->
+    <div id="compiler-panel">
+      <div class="compiler-section">
+        <h3>Symbolic</h3>
+        <pre id="symbolic-output"></pre>
+      </div>
+      <div class="compiler-section">
+        <h3>LEGO Dialect</h3>
+        <pre id="mlir-lego"></pre>
+      </div>
+      <div class="compiler-section">
+        <h3>After lego-lower</h3>
+        <pre id="mlir-arith"></pre>
+      </div>
+      <div class="compiler-section">
+        <h3>After lego-to-llvm</h3>
+        <pre id="mlir-llvm"></pre>
       </div>
     </div>
   </main>
