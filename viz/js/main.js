@@ -1,7 +1,8 @@
 /**
  * LEGO Layout Visualizer — Main application logic.
  *
- * Handles editor, dimension controls, presets, and server communication.
+ * Handles editor, autocomplete, dimension controls, presets,
+ * and server communication.
  */
 
 import { render } from './renderer.js';
@@ -34,6 +35,20 @@ const PRESETS = {
 };
 
 // ============================================================================
+// Autocomplete dictionary
+// ============================================================================
+
+const COMPLETIONS = [
+  { text: 'OrderBy',  hint: 'OrderBy(perm1, perm2, ...)' },
+  { text: 'Row',      hint: 'Row(dim1, dim2, ...)' },
+  { text: 'Col',      hint: 'Col(dim1, dim2, ...)' },
+  { text: 'RegP',     hint: 'RegP((dims), (perm))' },
+  { text: 'GenP',     hint: 'GenP((dims), f_apply, f_inv)' },
+  { text: 'GroupBy',  hint: 'GroupBy([(dim1, dim2)])' },
+  { text: 'TileBy',   hint: 'TileBy([outer_dims], [tile_sizes])' },
+];
+
+// ============================================================================
 // DOM references
 // ============================================================================
 
@@ -54,6 +69,144 @@ const formulaOutput = document.getElementById('formula-output');
 
 let currentPreset = 'row-major';
 let lastMapping = null;
+
+// ============================================================================
+// Autocomplete
+// ============================================================================
+
+// Create autocomplete dropdown
+const acDropdown = document.createElement('div');
+acDropdown.id = 'autocomplete-dropdown';
+document.body.appendChild(acDropdown);
+
+let acVisible = false;
+let acIndex = 0;
+let acFiltered = [];
+let acWordStart = 0;
+
+function getWordAtCursor() {
+  const pos = editor.selectionStart;
+  const text = editor.value;
+  let start = pos;
+  while (start > 0 && /[a-zA-Z_]/.test(text[start - 1])) start--;
+  return { word: text.substring(start, pos), start };
+}
+
+function showAutocomplete() {
+  const { word, start } = getWordAtCursor();
+  if (word.length < 1) { hideAutocomplete(); return; }
+
+  acFiltered = COMPLETIONS.filter(c =>
+    c.text.toLowerCase().startsWith(word.toLowerCase()) && c.text !== word
+  );
+  if (acFiltered.length === 0) { hideAutocomplete(); return; }
+
+  acWordStart = start;
+  acIndex = 0;
+  acVisible = true;
+
+  // Position dropdown near cursor
+  const rect = editor.getBoundingClientRect();
+  // Estimate cursor position (rough but works for monospace)
+  const linesBefore = editor.value.substring(0, editor.selectionStart).split('\n');
+  const lineNum = linesBefore.length - 1;
+  const colNum = linesBefore[linesBefore.length - 1].length;
+  const charW = 7.8; // approximate char width at 13px monospace
+  const lineH = 19.5; // approximate line height
+
+  acDropdown.style.left = `${rect.left + colNum * charW + 10}px`;
+  acDropdown.style.top = `${rect.top + (lineNum + 1) * lineH + 10}px`;
+
+  renderDropdown();
+}
+
+function renderDropdown() {
+  acDropdown.innerHTML = '';
+  acDropdown.style.display = 'block';
+
+  acFiltered.forEach((item, i) => {
+    const row = document.createElement('div');
+    row.className = 'ac-item' + (i === acIndex ? ' ac-active' : '');
+    row.innerHTML = `<span class="ac-text">${item.text}</span><span class="ac-hint">${item.hint}</span>`;
+    row.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      acceptCompletion(i);
+    });
+    acDropdown.appendChild(row);
+  });
+}
+
+function hideAutocomplete() {
+  acVisible = false;
+  acDropdown.style.display = 'none';
+  acDropdown.innerHTML = '';
+}
+
+function acceptCompletion(index) {
+  const item = acFiltered[index];
+  if (!item) return;
+
+  const pos = editor.selectionStart;
+  const before = editor.value.substring(0, acWordStart);
+  const after = editor.value.substring(pos);
+  editor.value = before + item.text + after;
+  editor.selectionStart = editor.selectionEnd = acWordStart + item.text.length;
+  editor.focus();
+  hideAutocomplete();
+}
+
+editor.addEventListener('input', () => {
+  showAutocomplete();
+});
+
+editor.addEventListener('keydown', (e) => {
+  if (acVisible) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      acIndex = (acIndex + 1) % acFiltered.length;
+      renderDropdown();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      acIndex = (acIndex - 1 + acFiltered.length) % acFiltered.length;
+      renderDropdown();
+      return;
+    }
+    if (e.key === 'Tab' || e.key === 'Enter') {
+      if (acFiltered.length > 0) {
+        e.preventDefault();
+        acceptCompletion(acIndex);
+        return;
+      }
+    }
+    if (e.key === 'Escape') {
+      hideAutocomplete();
+      return;
+    }
+  }
+
+  // Ctrl+Enter to run
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    hideAutocomplete();
+    runVisualization();
+    return;
+  }
+
+  // Tab inserts spaces (when autocomplete not active)
+  if (e.key === 'Tab' && !acVisible) {
+    e.preventDefault();
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    editor.value = editor.value.substring(0, start) + '    ' + editor.value.substring(end);
+    editor.selectionStart = editor.selectionEnd = start + 4;
+  }
+});
+
+editor.addEventListener('blur', () => {
+  setTimeout(hideAutocomplete, 150);
+});
 
 // ============================================================================
 // Preset handling
@@ -131,8 +284,8 @@ async function runVisualization() {
       data = await response.json();
     }
 
-    // Determine tile dims for coloring
-    const tileDims = code.includes('TileBy') ? [BM, BN] : null;
+    // Use server-inferred tile dims (from layout object), not hardcoded BM/BN
+    const tileDims = data.tile_info || null;
 
     // Render
     render(data, { tileDims });
@@ -140,10 +293,11 @@ async function runVisualization() {
 
     // Update formula display
     if (formulaOutput) {
-      formulaOutput.textContent = `${M}x${N} grid | ${data.total} elements`;
+      let info = `${M}\u00d7${N} grid \u00b7 ${data.total} elements`;
       if (tileDims) {
-        formulaOutput.textContent += ` | ${BM}x${BN} tiles`;
+        info += ` \u00b7 ${tileDims[0]}\u00d7${tileDims[1]} tiles`;
       }
+      formulaOutput.textContent = info;
     }
 
   } catch (e) {
@@ -187,22 +341,6 @@ async function computeMappingFromWasm(wasmBytes, shape) {
 // ============================================================================
 
 runBtn.addEventListener('click', runVisualization);
-
-// Ctrl+Enter to run
-editor.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-    e.preventDefault();
-    runVisualization();
-  }
-  // Tab inserts spaces
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    const start = editor.selectionStart;
-    const end = editor.selectionEnd;
-    editor.value = editor.value.substring(0, start) + '    ' + editor.value.substring(end);
-    editor.selectionStart = editor.selectionEnd = start + 4;
-  }
-});
 
 // ============================================================================
 // Initialization

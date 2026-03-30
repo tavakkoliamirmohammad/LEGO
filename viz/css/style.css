@@ -182,6 +182,47 @@ header .subtitle {
 #run-btn:hover { opacity: 0.9; }
 #run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* Autocomplete dropdown */
+#autocomplete-dropdown {
+  display: none;
+  position: fixed;
+  z-index: 1000;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  min-width: 220px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.ac-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.ac-item:hover,
+.ac-item.ac-active {
+  background: var(--surface2);
+}
+
+.ac-text {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.ac-hint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 /* Error output */
 #error-output {
   display: none;
@@ -252,7 +293,6 @@ svg.connections-svg {
 .cell rect {
   stroke: var(--cell-border);
   stroke-width: 0.5;
-  transition: opacity 0.15s;
 }
 
 .cell text {
@@ -264,36 +304,22 @@ svg.connections-svg {
   font-weight: 600;
 }
 
-.cell.highlighted rect {
-  stroke: white;
-  stroke-width: 2;
-}
+/* Hover: dim all cells via container, then un-dim the highlighted one */
+svg.has-hover .cell rect { opacity: 0.25; }
+svg.has-hover .cell text { opacity: 0.25; }
+svg.has-hover .cell.highlighted rect { opacity: 1; stroke: white; stroke-width: 2; }
+svg.has-hover .cell.highlighted text { opacity: 1; }
 
-.cell.dimmed rect {
-  opacity: 0.3;
-}
-
-.cell.dimmed text {
-  opacity: 0.3;
-}
-
-/* Connection lines */
+/* Connection lines — always visible */
 .connection {
   fill: none;
-  stroke-width: 1.5;
-  opacity: 0.25;
-  transition: opacity 0.15s, stroke-width 0.15s;
+  stroke-width: 1;
+  opacity: 0.15;
   pointer-events: none;
 }
 
-.connection.highlighted {
-  opacity: 0.9;
-  stroke-width: 3;
-}
-
-.connection.dimmed {
-  opacity: 0.05;
-}
+svg.has-hover .connection { opacity: 0.04; }
+svg.has-hover .connection.highlighted { opacity: 1; stroke-width: 2.5; }
 
 /* Empty state */
 .empty-state {

@@ -40,6 +40,28 @@ else:
     sys.path.insert(0, _src_pkg)
 
 
+def _extract_tile_info(layout, shape):
+    """Extract tile dimensions from a layout object, if it's a tiled layout."""
+    from lego.core import TileByLayout
+    if not isinstance(layout, TileByLayout):
+        return None
+
+    try:
+        tile_groups = layout._tile_groups
+        if not tile_groups or len(tile_groups) < 2:
+            return None
+
+        # tile_groups[0] = outer dims (tile counts), tile_groups[1] = inner dims (tile sizes)
+        inner = tile_groups[-1]  # last group is tile sizes
+        tile_sizes = [int(d) for d in inner]
+        # Pad to match shape rank
+        while len(tile_sizes) < len(shape):
+            tile_sizes.append(1)
+        return tile_sizes[:len(shape)]
+    except Exception:
+        return None
+
+
 def _compile_layout(code, shape, extra_dims=None):
     """Execute user layout code and compile to mapping JSON.
 
@@ -79,11 +101,14 @@ def _compile_layout(code, shape, extra_dims=None):
             "Example: L = OrderBy(Row(M, N)).GroupBy([(M, N)])"
         )
 
+    # Extract tile info from the layout object
+    tile_info = _extract_tile_info(layout, shape)
+
     # Try WASM compilation first, fall back to JIT-based JSON mapping
     try:
         from lego.backend.wasm import compile_to_wasm
         wasm_bytes = compile_to_wasm(layout, shape)
-        return {"type": "wasm", "data": wasm_bytes}
+        return {"type": "wasm", "data": wasm_bytes, "tile_info": tile_info}
     except Exception:
         pass
 
@@ -92,6 +117,7 @@ def _compile_layout(code, shape, extra_dims=None):
         from lego.backend.wasm import compile_mapping_json
         result = compile_mapping_json(layout, shape)
         result["type"] = "json"
+        result["tile_info"] = tile_info
         return result
     except Exception as e:
         # Try symbolic fallback, but preserve the real error

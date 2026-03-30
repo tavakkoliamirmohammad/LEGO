@@ -120,7 +120,6 @@ export function render(data, opts = {}) {
   });
 
   const connections = {};
-  const showAllLines = total <= 64;
 
   for (const entry of mapping) {
     const [i, j, flat] = entry;
@@ -140,10 +139,6 @@ export function render(data, opts = {}) {
       stroke: logCell.color,
       'data-i': i, 'data-j': j, 'data-flat': flat,
     });
-
-    if (!showAllLines) {
-      path.style.opacity = '0';
-    }
 
     connSvg.appendChild(path);
     connections[`${i},${j}`] = path;
@@ -191,76 +186,55 @@ export function render(data, opts = {}) {
   physSection.appendChild(physSvg);
   container.appendChild(physSection);
 
-  // --- Hover interaction ---
+  // --- Hover interaction (O(1) per event, no per-element loops) ---
+  // Use CSS classes on the SVG containers to dim all, then override the active pair.
+  let activeLogical = null;
+  let activePhysical = null;
+  let activeConn = null;
+
   function highlight(i, j) {
-    const flat = fwdMap[`${i},${j}`];
+    unhighlight();
 
-    // Highlight logical cell
-    for (const [key, cell] of Object.entries(logicalCells)) {
-      if (key === `${i},${j}`) {
-        cell.el.classList.add('highlighted');
-        cell.el.classList.remove('dimmed');
-      } else {
-        cell.el.classList.remove('highlighted');
-        cell.el.classList.add('dimmed');
-      }
-    }
+    const key = `${i},${j}`;
+    const flat = fwdMap[key];
 
-    // Highlight physical cell
-    for (const [f, cell] of Object.entries(physCells)) {
-      if (parseInt(f) === flat) {
-        cell.el.classList.add('highlighted');
-        cell.el.classList.remove('dimmed');
-      } else {
-        cell.el.classList.remove('highlighted');
-        cell.el.classList.add('dimmed');
-      }
-    }
+    // Dim all via container class
+    logicalSvg.classList.add('has-hover');
+    physSvg.classList.add('has-hover');
+    connSvg.classList.add('has-hover');
 
-    // Highlight connection
-    for (const [key, path] of Object.entries(connections)) {
-      if (key === `${i},${j}`) {
-        path.classList.add('highlighted');
-        path.classList.remove('dimmed');
-        path.style.opacity = '';
-      } else {
-        path.classList.remove('highlighted');
-        path.classList.add('dimmed');
-        if (!showAllLines) path.style.opacity = '';
-      }
-    }
+    // Highlight just the two cells + connection
+    const lc = logicalCells[key];
+    if (lc) { lc.el.classList.add('highlighted'); activeLogical = lc.el; }
+
+    const pc = physCells[flat];
+    if (pc) { pc.el.classList.add('highlighted'); activePhysical = pc.el; }
+
+    const cn = connections[key];
+    if (cn) { cn.classList.add('highlighted'); activeConn = cn; }
   }
 
   function unhighlight() {
-    for (const cell of Object.values(logicalCells)) {
-      cell.el.classList.remove('highlighted', 'dimmed');
-    }
-    for (const cell of Object.values(physCells)) {
-      cell.el.classList.remove('highlighted', 'dimmed');
-    }
-    for (const [key, path] of Object.entries(connections)) {
-      path.classList.remove('highlighted', 'dimmed');
-      if (!showAllLines) path.style.opacity = '0';
-    }
+    logicalSvg.classList.remove('has-hover');
+    physSvg.classList.remove('has-hover');
+    connSvg.classList.remove('has-hover');
+
+    if (activeLogical) { activeLogical.classList.remove('highlighted'); activeLogical = null; }
+    if (activePhysical) { activePhysical.classList.remove('highlighted'); activePhysical = null; }
+    if (activeConn) { activeConn.classList.remove('highlighted'); activeConn = null; }
   }
 
   // Attach hover events to logical grid
   logicalSvg.addEventListener('mouseover', (e) => {
     const cell = e.target.closest('.cell');
-    if (cell) {
-      highlight(parseInt(cell.dataset.i), parseInt(cell.dataset.j));
-    }
+    if (cell) highlight(parseInt(cell.dataset.i), parseInt(cell.dataset.j));
   });
-
   logicalSvg.addEventListener('mouseout', () => unhighlight());
 
   // Attach hover events to physical strip
   physSvg.addEventListener('mouseover', (e) => {
     const cell = e.target.closest('.cell');
-    if (cell) {
-      highlight(parseInt(cell.dataset.i), parseInt(cell.dataset.j));
-    }
+    if (cell) highlight(parseInt(cell.dataset.i), parseInt(cell.dataset.j));
   });
-
   physSvg.addEventListener('mouseout', () => unhighlight());
 }
