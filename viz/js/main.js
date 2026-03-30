@@ -186,6 +186,48 @@ editor.addEventListener('keydown', (e) => {
     }
   }
 
+  // Auto-close brackets
+  const PAIRS = { '(': ')', '[': ']', '{': '}' };
+  const CLOSERS = new Set([')', ']', '}']);
+  if (PAIRS[e.key]) {
+    e.preventDefault();
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    const selected = editor.value.substring(start, end);
+    const open = e.key;
+    const close = PAIRS[open];
+    editor.value = editor.value.substring(0, start) + open + selected + close + editor.value.substring(end);
+    editor.selectionStart = editor.selectionEnd = start + 1 + selected.length;
+    // If there was a selection, place cursor after it; otherwise between brackets
+    if (selected.length === 0) {
+      editor.selectionStart = editor.selectionEnd = start + 1;
+    }
+    return;
+  }
+  // Skip over closing bracket if it's already the next char
+  if (CLOSERS.has(e.key)) {
+    const pos = editor.selectionStart;
+    if (editor.value[pos] === e.key) {
+      e.preventDefault();
+      editor.selectionStart = editor.selectionEnd = pos + 1;
+      return;
+    }
+  }
+  // Backspace: delete matching bracket pair
+  if (e.key === 'Backspace') {
+    const pos = editor.selectionStart;
+    if (pos > 0 && editor.selectionStart === editor.selectionEnd) {
+      const before = editor.value[pos - 1];
+      const after = editor.value[pos];
+      if (PAIRS[before] && PAIRS[before] === after) {
+        e.preventDefault();
+        editor.value = editor.value.substring(0, pos - 1) + editor.value.substring(pos + 1);
+        editor.selectionStart = editor.selectionEnd = pos - 1;
+        return;
+      }
+    }
+  }
+
   // Ctrl+Enter to run
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     e.preventDefault();
