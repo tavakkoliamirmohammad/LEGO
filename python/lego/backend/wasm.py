@@ -317,38 +317,42 @@ def compile_mapping_json(layout, shape):
             # Emit the layout
             layout_val = emit_layout_from_python(layout, sym_to_val)
 
-            # Emit a 2D row-major identity: row(M, N)
-            shape_vals = [_index_const(int(s)) for s in shape]
-            identity_2d = _emit_group_by(shape_vals,
-                                         [_emit_order_by([_emit_row(shape_vals)])])
+            # Nested loop: for i in 0..M-1, for j in 0..N-1
+            # Use (i, j) directly — no flat→2D unflattening.
+            M_val = _index_const(int(shape[0]))
+            N_val = _index_const(int(shape[1])) if nd > 1 else _index_const(1)
+            zero = _index_const(0)
+            one = _index_const(1)
 
-            # Loop over all positions
-            loop = scf_dialect.ForOp(_index_const(0), n_val, _index_const(1))
-            with InsertionPoint(loop.body):
-                iv = loop.induction_variable
+            outer = scf_dialect.ForOp(zero, M_val, one)
+            with InsertionPoint(outer.body):
+                i_val = outer.induction_variable
+                inner = scf_dialect.ForOp(zero, N_val, one)
+                with InsertionPoint(inner.body):
+                    j_val = inner.induction_variable
 
-                # Unflatten: k → 2D (i, j) via identity_2d.inv
-                coords_2d = _emit_apply_inverse(identity_2d, iv, nd)
+                    # Build N-D coords from (i, j)
+                    if isinstance(layout, TileByLayout) and layout_rank > nd:
+                        tile_groups = layout._tile_groups
+                        inner_sizes = [int(d) for d in tile_groups[-1]]
+                        coords_2d = [i_val, j_val] if nd > 1 else [i_val]
+                        nd_coords = []
+                        for k_dim in range(nd):
+                            coord = coords_2d[k_dim]
+                            bsize = _index_const(inner_sizes[k_dim])
+                            nd_coords.append(arith_dialect.divui(coord, bsize))
+                            nd_coords.append(arith_dialect.remui(coord, bsize))
+                        flat_phys = _emit_apply(layout_val, nd_coords)
+                    else:
+                        coords_2d = [i_val, j_val] if nd > 1 else [i_val]
+                        flat_phys = _emit_apply(layout_val, coords_2d)
 
-                # Decompose 2D → N-D using divmod for TileBy
-                if isinstance(layout, TileByLayout) and layout_rank > nd:
-                    tile_groups = layout._tile_groups
-                    inner_sizes = [int(d) for d in tile_groups[-1]]
-                    # Sigma-interleaved: (outer_k, inner_k) per original dim
-                    nd_coords = []
-                    for k_dim in range(nd):
-                        coord = coords_2d[k_dim]
-                        bsize = _index_const(inner_sizes[k_dim])
-                        nd_coords.append(arith_dialect.divui(coord, bsize))
-                        nd_coords.append(arith_dialect.remui(coord, bsize))
-                    flat_phys = _emit_apply(layout_val, nd_coords)
-                else:
-                    # Non-tiled: 2D coords go directly to layout
-                    flat_phys = _emit_apply(layout_val, coords_2d)
-
-                # Cast to i64 and store
-                flat_i64 = arith_dialect.index_cast(i64_ty, flat_phys)
-                memref_dialect.StoreOp(flat_i64, out_buf, [iv])
+                    # Store at output[i * N + j]
+                    out_idx = arith_dialect.addi(
+                        arith_dialect.muli(i_val, N_val), j_val)
+                    flat_i64 = arith_dialect.index_cast(i64_ty, flat_phys)
+                    memref_dialect.StoreOp(flat_i64, out_buf, [out_idx])
+                    scf_dialect.YieldOp([])
                 scf_dialect.YieldOp([])
 
             func_dialect.ReturnOp([])
