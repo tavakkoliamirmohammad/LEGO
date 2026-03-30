@@ -309,6 +309,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     MLIR_BINDINGS_PYTHON_NB_DOMAIN lego)
 
   # --- Type stub generation (requires nanobind stubgen) ---
+  # Generates .pyi stubs for LEGO dialect extensions (LayoutType, ViewType,
+  # register_lego_dialect).  Core MLIR stubs (ir.pyi, passmanager.pyi) are
+  # not generated here due to a nanobind domain conflict in out-of-tree builds.
   option(LEGO_PYTHON_STUBGEN "Generate .pyi type stubs for LEGO extensions" ON)
   if(LEGO_PYTHON_STUBGEN)
     get_target_property(_lego_extension_srcs
@@ -321,6 +324,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/type_stubs/_mlir_libs"
       OUTPUTS
         _legoDialects/__init__.pyi
+        _legoDialects/lego.pyi
       DEPENDS_TARGET_SRC_DEPS "${_lego_extension_srcs}"
       IMPORT_PATHS
         "${CMAKE_BINARY_DIR}/python_packages/lego"
@@ -328,7 +332,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     declare_mlir_python_sources(LegoPythonSources.type_stub_gen
       ROOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/type_stubs"
       ADD_TO_PARENT LegoPythonSources
-      SOURCES _mlir_libs/_legoDialects/__init__.pyi)
+      SOURCES
+        _mlir_libs/_legoDialects/__init__.pyi
+        _mlir_libs/_legoDialects/lego.pyi)
     add_dependencies(LegoPythonModules "${NB_STUBGEN_CUSTOM_TARGET}")
   endif()
 
