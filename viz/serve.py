@@ -96,11 +96,14 @@ def _compile_layout(code):
 
     M = namespace.get("M")
     N = namespace.get("N")
+
+    # If M/N not defined, return compiler panels only (no 2D visualization)
     if M is None or N is None:
-        raise ValueError(
-            "M and N not defined. Your code must define grid dimensions.\n"
-            "Example:\n  M, N = 8, 8"
-        )
+        from lego.backend.wasm import compile_ir_only
+        result = compile_ir_only(layout)
+        result["type"] = "ir_only"
+        return result
+
     shape = (int(M), int(N))
 
     # Extract tile info from the layout object

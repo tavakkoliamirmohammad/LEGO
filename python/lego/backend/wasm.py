@@ -444,6 +444,97 @@ def compile_mapping_json(layout, shape):
     }
 
 
+def compile_ir_only(layout):
+    """Generate symbolic + MLIR pipeline outputs for any-dimensional layout.
+
+    No 2D visualization — just the compiler panels.
+    """
+    from lego.core import GroupBy, TileByLayout
+
+    layout_dims = [int(d) for d in (layout._dims if hasattr(layout, '_dims') else layout.dims())]
+    rank = len(layout_dims)
+
+    # Symbolic via SymPy + Python printer
+    symbolic = ""
+    try:
+        from lego.python_printer import LEGOPythonCodePrinter
+        printer = LEGOPythonCodePrinter()
+        sym_names = [chr(ord('i') + k) if k < 18 else f"x{k}" for k in range(rank)]
+        sym_indices = sp.symbols(' '.join(sym_names), integer=True)
+        if rank == 1:
+            sym_indices = (sym_indices,)
+        expr = layout.apply(*sym_indices)
+        idx_str = ', '.join(str(s) for s in sym_indices)
+        symbolic = f"L[{idx_str}] = {printer.doprint(expr)}"
+    except Exception as e:
+        symbolic = f"(symbolic eval failed: {e})"
+
+    # Build a minimal MLIR module with just apply for MLIR display
+    ctx = Context()
+    register_lego(ctx)
+
+    with ctx, Location.unknown():
+        module = Module.create()
+        idx_ty = IndexType.get()
+
+        param_types = [idx_ty] * rank
+        func_ty = FunctionType.get(param_types, [idx_ty])
+
+        with InsertionPoint(module.body):
+            f = func_dialect.FuncOp("apply", func_ty)
+            f.sym_visibility = StringAttr.get("public")
+            f.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+        entry = f.add_entry_block()
+        with InsertionPoint(entry):
+            sym_to_val = {}
+            actual_dims = layout._dims if hasattr(layout, '_dims') else layout.dims()
+            all_syms = set()
+            for d in actual_dims:
+                if isinstance(d, sp.Expr):
+                    all_syms |= d.free_symbols
+            if hasattr(layout, 'objects'):
+                for obj in layout.objects:
+                    for d in obj.dims():
+                        if isinstance(d, sp.Expr):
+                            all_syms |= d.free_symbols
+            for sym in all_syms:
+                sym_to_val[sym] = _index_const(1)
+
+            layout_val = emit_layout_from_python(layout, sym_to_val)
+            coords = list(entry.arguments)
+            flat = _emit_apply(layout_val, coords)
+            func_dialect.ReturnOp([flat])
+
+    # LEGO dialect after CSE + canonicalize
+    with ctx:
+        pm = PassManager.parse("builtin.module(canonicalize,cse)")
+        pm.run(module.operation)
+    mlir_lego = str(module)
+
+    # After lego-lower
+    with ctx:
+        pm = PassManager.parse("builtin.module(lego-lower)")
+        pm.run(module.operation)
+    mlir_arith = str(module)
+
+    # After lego-to-llvm
+    with ctx:
+        pm = PassManager.parse("builtin.module(lego-to-llvm)")
+        pm.run(module.operation)
+    mlir_llvm = str(module)
+
+    return {
+        "mapping": [],
+        "shape": layout_dims,
+        "total": 0,
+        "symbolic": symbolic,
+        "mlir_lego": mlir_lego,
+        "mlir_arith": mlir_arith,
+        "mlir_llvm": mlir_llvm,
+    }
+
+
 def _compute_strides(dims):
     """Compute row-major strides for a shape."""
     strides = [1] * len(dims)

@@ -330,21 +330,32 @@ async function runVisualization() {
       data = await response.json();
     }
 
-    // Use server-inferred tile dims (from layout object), not hardcoded BM/BN
-    const tileDims = data.tile_info || null;
+    // Render visualization (only for 2D layouts with mapping data)
+    const vizContainer = document.getElementById('viz-container');
+    if (data.mapping && data.mapping.length > 0) {
+      const tileDims = data.tile_info || null;
+      render(data, { tileDims });
+      lastMapping = data;
 
-    // Render
-    render(data, { tileDims });
-    lastMapping = data;
-
-    // Update formula display
-    if (formulaOutput) {
-      const [M, N] = data.shape;
-      let info = `${M}\u00d7${N} grid \u00b7 ${data.total} elements`;
-      if (tileDims) {
-        info += ` \u00b7 ${tileDims[0]}\u00d7${tileDims[1]} tiles`;
+      if (formulaOutput) {
+        const [M, N] = data.shape;
+        let info = `${M}\u00d7${N} grid \u00b7 ${data.total} elements`;
+        if (tileDims) {
+          info += ` \u00b7 ${tileDims[0]}\u00d7${tileDims[1]} tiles`;
+        }
+        formulaOutput.textContent = info;
       }
-      formulaOutput.textContent = info;
+    } else {
+      // N-D layout — no 2D visualization, show dims info
+      if (vizContainer) {
+        vizContainer.innerHTML = `<div class="empty-state">
+          <p>N-D layout (dims: ${data.shape.join(' \u00d7 ')})</p>
+          <p style="color:var(--text-dim);font-size:12px;margin-top:4px;">2D visualization not available — see compiler panels</p>
+        </div>`;
+      }
+      if (formulaOutput) {
+        formulaOutput.textContent = `dims: ${data.shape.join(' \u00d7 ')}`;
+      }
     }
 
     // Show compiler outputs with syntax highlighting
