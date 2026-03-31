@@ -22,17 +22,46 @@
   </header>
 
   <main id="app">
-    <!-- Left: Code Editor -->
+    <!-- Left: Editor / Builder -->
     <div id="editor-panel">
-      <div class="panel-header"><h3>Layout Code</h3></div>
-      <div id="code-editor-wrapper">
-        <div id="line-numbers"></div>
-        <textarea id="code-editor" spellcheck="false" wrap="off">M, N = 8, 8
-L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
+      <div class="panel-header">
+        <div class="panel-tabs">
+          <button class="tab-btn active" data-tab="builder">Builder</button>
+          <button class="tab-btn" data-tab="code">Code</button>
+        </div>
       </div>
+
+      <!-- Builder mode -->
+      <div id="builder-tab" class="tab-content active">
+        <div class="builder-section">
+          <label>OrderBy</label>
+          <div id="perm-list"></div>
+          <button class="btn-add" id="add-perm-btn">+ Add Permutation</button>
+        </div>
+        <div class="builder-section">
+          <label>Wrap</label>
+          <select id="wrap-type" class="builder-input wrap-select">
+            <option value="group_by">GroupBy</option>
+            <option value="tile_by">TileBy</option>
+          </select>
+          <div id="wrap-config"></div>
+        </div>
+      </div>
+
+      <!-- Code mode -->
+      <div id="code-tab" class="tab-content">
+        <div id="code-editor-wrapper">
+          <div id="line-numbers"></div>
+          <textarea id="code-editor" spellcheck="false" wrap="off">M, N = 8, 8
+L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
+        </div>
+      </div>
+
       <div id="error-output"></div>
       <div id="formula-output"></div>
     </div>
+
+    <div class="divider divider-v" id="divider-left"></div>
 
     <!-- Center: Visualization -->
     <div id="viz-panel">
@@ -44,17 +73,21 @@ L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
       </div>
     </div>
 
+    <div class="divider divider-v" id="divider-right"></div>
+
     <!-- Right: Compiler Output -->
     <div id="compiler-panel">
-      <div class="compiler-section">
+      <div class="compiler-section" id="section-lego">
         <h3>LEGO Dialect</h3>
         <pre id="mlir-lego"></pre>
       </div>
-      <div class="compiler-section">
+      <div class="divider divider-h"></div>
+      <div class="compiler-section" id="section-arith">
         <h3>After lego-lower</h3>
         <pre id="mlir-arith"></pre>
       </div>
-      <div class="compiler-section">
+      <div class="divider divider-h"></div>
+      <div class="compiler-section" id="section-llvm">
         <h3>After lego-to-llvm</h3>
         <pre id="mlir-llvm"></pre>
       </div>

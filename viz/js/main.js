@@ -90,8 +90,9 @@ function _pythonToJS(expr) {
   if (tileIdx >= 0) {
     const before = expr.slice(0, tileIdx + 8); // up to and including '('
     let rest = expr.slice(tileIdx + 8);
-    // Replace (x, y, ...) with [x, y, ...] in the TileBy arguments
-    rest = rest.replace(/\(([^()]+)\)/g, '[$1]');
+    // Replace (x, y, ...) tuples with [x, y, ...] — only if they contain commas
+    // (avoids mangling function calls like Math.floor(...))
+    rest = rest.replace(/\(([^()]*,[^()]*)\)/g, '[$1]');
     expr = before + rest;
   }
   return expr;
@@ -178,6 +179,52 @@ function parseDSL(code) {
   if (M === undefined || N === undefined)
     throw new Error('Cannot determine grid dimensions');
 
+  // Validate TileBy dimensions (mirrors C++ TileByOp::verify)
+  if (layoutAST.op === 'tile_by') {
+    const gs = layoutAST.groups;
+    const nDims = gs[0].length;
+
+    // All groups must have the same number of dimensions
+    for (let l = 1; l < gs.length; l++) {
+      if (gs[l].length !== nDims)
+        throw new Error(`TileBy: all groups must have the same number of dimensions (group 0 has ${nDims}, group ${l} has ${gs[l].length})`);
+    }
+
+    // All tile dimensions must be positive integers
+    const allConst = gs.flat().every(d => Number.isFinite(d));
+    if (allConst) {
+      for (let l = 0; l < gs.length; l++)
+        for (let d = 0; d < gs[l].length; d++)
+          if (gs[l][d] <= 0)
+            throw new Error(`TileBy: dimension must be positive (group ${l}, dim ${d} = ${gs[l][d]})`);
+    }
+
+    // Volume and per-dimension checks (only when all values are concrete)
+    if (allConst && layoutAST.inner && layoutAST.inner.op === 'order_by') {
+      const innerPerms = layoutAST.inner.perms;
+      const innerDims = [];
+      for (const p of innerPerms) innerDims.push(...p.dims);
+      const innerAllConst = innerDims.every(d => Number.isFinite(d));
+
+      if (innerAllConst) {
+        const tileVolume = gs.flat().reduce((a, b) => a * b, 1);
+        const innerVolume = innerDims.reduce((a, b) => a * b, 1);
+        if (tileVolume !== innerVolume)
+          throw new Error(`TileBy: total product of tile dims (${tileVolume}) does not match input layout size (${innerVolume})`);
+
+        // Per-dimension check for single-perm OrderBy
+        if (innerPerms.length === 1) {
+          for (let d = 0; d < nDims && d < innerPerms[0].dims.length; d++) {
+            const tileProd = gs.reduce((p, g) => p * g[d], 1);
+            const innerDim = innerPerms[0].dims[d];
+            if (tileProd !== innerDim)
+              throw new Error(`TileBy: dimension ${d} tile product (${tileProd}) does not match layout dimension (${innerDim})`);
+          }
+        }
+      }
+    }
+  }
+
   // Innermost tile group determines visual tile boundaries
   const tileInfo = layoutAST.op === 'tile_by' && layoutAST.groups.length > 1
     ? layoutAST.groups[layoutAST.groups.length - 1] : null;
@@ -215,10 +262,11 @@ function layoutToMLIR(layout) {
   }
   collectDims(layout);
 
-  const constLines = [...consts.entries()]
-    .map(([v, name]) => `    ${name} = arith.constant ${v} : index`).join('\n');
-
   const ref = (v) => addConst(v);
+
+  // constLines is generated lazily — called after all ref() calls
+  const getConstLines = () => [...consts.entries()]
+    .map(([v, name]) => `    ${name} = arith.constant ${v} : index`).join('\n');
 
   // Emit a layout op, return its SSA name
   function emitLayout(node) {
@@ -267,7 +315,7 @@ function layoutToMLIR(layout) {
 
     return `module {
   func.func @apply(%i: index, %j: index) -> index {
-${constLines}
+${getConstLines()}
 ${bodyLines.join('\n')}
     %flat = lego.apply ${applyLayout}(%i, %j) : !lego.layout
     return %flat : index
@@ -292,7 +340,7 @@ ${bodyLines.join('\n')}
 
       return `module {
   func.func @apply(%i: index, %j: index) -> index {
-${constLines}
+${getConstLines()}
 ${bodyLines.join('\n')}
     %flat = lego.apply ${applyLayout}(%i, %j) : !lego.layout
     return %flat : index
@@ -358,7 +406,7 @@ ${bodyLines.join('\n')}
 
     return `module {
   func.func @apply(%i: index, %j: index) -> index {
-${constLines}
+${getConstLines()}
 ${bodyLines.join('\n')}
     %flat = lego.apply ${applyLayout}(${coordNames.join(', ')}) : !lego.layout
     return %flat : index
@@ -373,7 +421,7 @@ ${bodyLines.join('\n')}
 
     return `module {
   func.func @apply(%i: index, %j: index) -> index {
-${constLines}
+${getConstLines()}
 ${bodyLines.join('\n')}
     %flat = lego.apply ${applyLayout}(%i, %j) : !lego.layout
     return %flat : index
@@ -417,7 +465,7 @@ const PRESETS = {
   },
   'tiled': {
     label: 'Tiled',
-    code: 'M, N = 8, 8\nBM, BN = 4, 4\nL = OrderBy(Row(M, N)).TileBy([M//BM, N//BN], [BM, BN])',
+    code: 'M, N = 8, 8\nBM, BN = 2, 2\nL = OrderBy(Row(M, N)).TileBy([M//BM, N//BN], [BM, BN])',
   },
   'transposed': {
     label: 'Transposed',
@@ -624,6 +672,315 @@ editor.addEventListener('blur', () => {
 });
 
 // ============================================================================
+// Tab switching (Builder / Code)
+// ============================================================================
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab + '-tab').classList.add('active');
+    if (btn.dataset.tab === 'builder') {
+      // Code → Builder: parse code and populate builder UI
+      codeToBuilder(editor.value.trim());
+    }
+  });
+});
+
+// ============================================================================
+// Layout Builder
+// ============================================================================
+
+/** Sync builder state → code editor and auto-run visualization */
+function syncBuilderToEditor() {
+  editor.value = builderToCode();
+  updateLineNumbers();
+  if (compilerReady) runVisualization();
+}
+
+function initBuilder() {
+  addPermCard('row', [8, 8]);
+  updateWrapConfig();
+  document.getElementById('add-perm-btn').addEventListener('click', () => {
+    addPermCard('row', [4, 4]);
+    syncBuilderToEditor();
+  });
+  document.getElementById('wrap-type').addEventListener('change', () => {
+    updateWrapConfig();
+    syncBuilderToEditor();
+  });
+  // Listen for any input/select change in the builder
+  const builderTab = document.getElementById('builder-tab');
+  builderTab.addEventListener('input', syncBuilderToEditor);
+  builderTab.addEventListener('change', syncBuilderToEditor);
+}
+
+function addPermCard(type, dims, perm) {
+  const list = document.getElementById('perm-list');
+  const card = document.createElement('div');
+  card.className = 'perm-card';
+
+  const sel = document.createElement('select');
+  sel.className = 'builder-input';
+  for (const opt of ['Row', 'Col', 'RegP']) {
+    const o = document.createElement('option');
+    o.value = opt.toLowerCase();
+    o.textContent = opt;
+    sel.appendChild(o);
+  }
+  sel.value = type;
+  card.appendChild(sel);
+
+  const dimsContainer = document.createElement('span');
+  dimsContainer.className = 'dims-inputs';
+  dims.forEach(d => {
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.min = '1'; inp.value = d;
+    inp.className = 'builder-input';
+    dimsContainer.appendChild(inp);
+  });
+  card.appendChild(dimsContainer);
+
+  const addDim = document.createElement('button');
+  addDim.className = 'btn-add-dim';
+  addDim.textContent = '+';
+  addDim.title = 'Add dimension';
+  addDim.addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.min = '1'; inp.value = '2';
+    inp.className = 'builder-input';
+    dimsContainer.appendChild(inp);
+    syncBuilderToEditor();
+  });
+  card.appendChild(addDim);
+
+  // Perm input (only for RegP)
+  const permContainer = document.createElement('span');
+  permContainer.className = 'perm-indices';
+  permContainer.style.display = 'none';
+  const permLabel = document.createElement('span');
+  permLabel.className = 'perm-label';
+  permLabel.textContent = 'perm';
+  permContainer.appendChild(permLabel);
+  const permInput = document.createElement('input');
+  permInput.className = 'builder-input';
+  permInput.type = 'text';
+  permInput.value = perm ? perm.join(',') : dims.map((_, i) => i).join(',');
+  permInput.style.width = '52px';
+  permInput.placeholder = '0,1';
+  permContainer.appendChild(permInput);
+  card.appendChild(permContainer);
+
+  const rem = document.createElement('button');
+  rem.className = 'btn-remove';
+  rem.textContent = '\u00d7';
+  rem.addEventListener('click', () => { card.remove(); syncBuilderToEditor(); });
+  card.appendChild(rem);
+
+  sel.addEventListener('change', () => updatePermVisibility(card, sel.value));
+  updatePermVisibility(card, type);
+
+  list.appendChild(card);
+}
+
+function updatePermVisibility(card, type) {
+  const permContainer = card.querySelector('.perm-indices');
+  permContainer.style.display = type === 'regp' ? 'inline-flex' : 'none';
+}
+
+function updateWrapConfig() {
+  const type = document.getElementById('wrap-type').value;
+  const container = document.getElementById('wrap-config');
+  container.innerHTML = '';
+
+  if (type === 'group_by') {
+    const div = document.createElement('div');
+    div.className = 'groupby-dims';
+    const l = document.createElement('span');
+    l.className = 'perm-label'; l.textContent = 'dims';
+    div.appendChild(l);
+    for (const v of [8, 8]) {
+      const inp = document.createElement('input');
+      inp.type = 'number'; inp.min = '1'; inp.value = v;
+      inp.className = 'builder-input';
+      div.appendChild(inp);
+    }
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn-add-dim';
+    addBtn.textContent = '+';
+    addBtn.title = 'Add dimension';
+    addBtn.addEventListener('click', () => {
+      const inp = document.createElement('input');
+      inp.type = 'number'; inp.min = '1'; inp.value = '2';
+      inp.className = 'builder-input';
+      div.insertBefore(inp, addBtn);
+      syncBuilderToEditor();
+    });
+    div.appendChild(addBtn);
+    container.appendChild(div);
+  } else {
+    const levelsDiv = document.createElement('div');
+    levelsDiv.id = 'tile-levels';
+    addTileLevel(levelsDiv, [4, 4]);
+    addTileLevel(levelsDiv, [2, 2]);
+    container.appendChild(levelsDiv);
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn-add';
+    addBtn.textContent = '+ Add Level';
+    addBtn.addEventListener('click', () => { addTileLevel(levelsDiv, [2, 2]); syncBuilderToEditor(); });
+    container.appendChild(addBtn);
+  }
+}
+
+function addTileLevel(parent, dims) {
+  const level = document.createElement('div');
+  level.className = 'tile-level';
+  const l = document.createElement('span');
+  l.className = 'perm-label';
+  l.textContent = `L${parent.children.length}`;
+  level.appendChild(l);
+  const dimsContainer = document.createElement('span');
+  dimsContainer.className = 'dims-inputs';
+  dims.forEach(d => {
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.min = '1'; inp.value = d;
+    inp.className = 'builder-input';
+    dimsContainer.appendChild(inp);
+  });
+  level.appendChild(dimsContainer);
+  const addDim = document.createElement('button');
+  addDim.className = 'btn-add-dim';
+  addDim.textContent = '+';
+  addDim.title = 'Add dimension';
+  addDim.addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.min = '1'; inp.value = '2';
+    inp.className = 'builder-input';
+    dimsContainer.appendChild(inp);
+    syncBuilderToEditor();
+  });
+  level.appendChild(addDim);
+  const rem = document.createElement('button');
+  rem.className = 'btn-remove';
+  rem.textContent = '\u00d7';
+  rem.addEventListener('click', () => { level.remove(); syncBuilderToEditor(); });
+  level.appendChild(rem);
+  parent.appendChild(level);
+}
+
+/** Convert builder UI state → DSL code string */
+function builderToCode() {
+  // Collect permutations
+  const perms = [];
+  document.querySelectorAll('#perm-list .perm-card').forEach(card => {
+    const type = card.querySelector('select').value;
+    const dims = [...card.querySelectorAll('.dims-inputs input')].map(i => parseInt(i.value) || 1);
+    if (type === 'regp') {
+      const permStr = card.querySelector('.perm-indices input').value;
+      const perm = permStr.split(',').map(s => parseInt(s.trim()));
+      perms.push(`RegP((${dims.join(', ')}), (${perm.join(', ')}))`);
+    } else if (type === 'col') {
+      perms.push(`Col(${dims.join(', ')})`);
+    } else {
+      perms.push(`Row(${dims.join(', ')})`);
+    }
+  });
+
+  const orderBy = `OrderBy(${perms.join(', ')})`;
+
+  // Wrap type
+  const wrapType = document.getElementById('wrap-type').value;
+  let wrap;
+  if (wrapType === 'group_by') {
+    const dims = [...document.querySelectorAll('#wrap-config .groupby-dims input')]
+      .map(i => parseInt(i.value) || 1);
+    wrap = `.GroupBy([(${dims.join(', ')})])`;
+  } else {
+    const levels = [];
+    document.querySelectorAll('#tile-levels .tile-level').forEach(lev => {
+      const dims = [...lev.querySelectorAll('input')].map(i => parseInt(i.value) || 1);
+      levels.push(`(${dims.join(', ')})`);
+    });
+    wrap = `.TileBy(${levels.join(', ')})`;
+  }
+
+  // Derive M, N from the layout
+  return `L = ${orderBy}${wrap}`;
+}
+
+/** Parse DSL code string and populate the builder UI */
+function codeToBuilder(code) {
+  try {
+    // Use the existing sandbox to parse the layout AST
+    const { layout } = parseDSL(code);
+
+    // Clear existing perms
+    document.getElementById('perm-list').innerHTML = '';
+
+    // Extract OrderBy perms from the inner layout
+    let inner = layout;
+    let wrapType = null;
+    let wrapData = null;
+
+    if (layout.op === 'group_by') {
+      wrapType = 'group_by';
+      wrapData = layout.dims;
+      inner = layout.inner;
+    } else if (layout.op === 'tile_by') {
+      wrapType = 'tile_by';
+      wrapData = layout.groups;
+      inner = layout.inner;
+    }
+
+    // Populate permutations from order_by
+    if (inner && inner.op === 'order_by') {
+      for (const p of inner.perms) {
+        if (p.op === 'row') addPermCard('row', p.dims);
+        else if (p.op === 'col') addPermCard('col', p.dims);
+        else if (p.op === 'reg_p') addPermCard('regp', p.dims, p.perm);
+      }
+    } else if (inner) {
+      // bare layout
+      if (inner.op === 'row') addPermCard('row', inner.dims);
+      else if (inner.op === 'col') addPermCard('col', inner.dims);
+      else if (inner.op === 'reg_p') addPermCard('regp', inner.dims, inner.perm);
+    }
+
+    // Populate wrap config
+    if (wrapType) {
+      document.getElementById('wrap-type').value = wrapType;
+      updateWrapConfig();
+
+      if (wrapType === 'group_by' && wrapData) {
+        const inputs = document.querySelectorAll('#wrap-config .groupby-dims input');
+        // Clear and re-create with right number of dims
+        const container = document.querySelector('#wrap-config .groupby-dims');
+        if (container) {
+          // Remove existing inputs (keep label and add button)
+          container.querySelectorAll('input').forEach(i => i.remove());
+          const addBtn = container.querySelector('.btn-add-dim');
+          wrapData.forEach(d => {
+            const inp = document.createElement('input');
+            inp.type = 'number'; inp.min = '1'; inp.value = d;
+            inp.className = 'builder-input';
+            container.insertBefore(inp, addBtn);
+          });
+        }
+      } else if (wrapType === 'tile_by' && wrapData) {
+        const levelsDiv = document.getElementById('tile-levels');
+        if (levelsDiv) {
+          levelsDiv.innerHTML = '';
+          wrapData.forEach(g => addTileLevel(levelsDiv, g));
+        }
+      }
+    }
+  } catch (e) {
+    // If parsing fails, just leave builder as-is
+  }
+}
+
+// ============================================================================
 // Theme toggle
 // ============================================================================
 
@@ -669,6 +1026,7 @@ function selectPreset(name) {
   currentPreset = name;
   editor.value = preset.code;
   updateLineNumbers();
+  codeToBuilder(preset.code);
 
   presetBtns.forEach(btn => {
     btn.classList.toggle('active', btn.dataset.preset === name);
@@ -687,6 +1045,7 @@ presetBtns.forEach(btn => {
 // ============================================================================
 
 async function runVisualization() {
+  // Use code editor as source of truth — builder syncs to it on changes
   const code = editor.value.trim();
   if (!code) return;
 
@@ -756,9 +1115,78 @@ async function runVisualization() {
 runBtn.addEventListener('click', runVisualization);
 
 // ============================================================================
+// Resizable panels
+// ============================================================================
+
+function initDividers() {
+  // Vertical dividers (between columns)
+  document.querySelectorAll('.divider-v').forEach(divider => {
+    divider.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const left = divider.previousElementSibling;
+      const right = divider.nextElementSibling;
+      const startX = e.clientX;
+      const startLW = left.getBoundingClientRect().width;
+      const startRW = right.getBoundingClientRect().width;
+      divider.classList.add('active');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+
+      const onMove = (e) => {
+        const dx = e.clientX - startX;
+        left.style.width = Math.max(150, startLW + dx) + 'px';
+        left.style.flex = 'none';
+        right.style.width = Math.max(150, startRW - dx) + 'px';
+        right.style.flex = 'none';
+      };
+      const onUp = () => {
+        divider.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+
+  // Horizontal dividers (between compiler sections)
+  document.querySelectorAll('.divider-h').forEach(divider => {
+    divider.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const above = divider.previousElementSibling;
+      const startY = e.clientY;
+      const startH = above.getBoundingClientRect().height;
+      divider.classList.add('active');
+      document.body.style.cursor = 'row-resize';
+      document.body.style.userSelect = 'none';
+
+      const onMove = (e) => {
+        const h = Math.max(60, startH + e.clientY - startY);
+        above.style.flex = 'none';
+        above.style.height = h + 'px';
+      };
+      const onUp = () => {
+        divider.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+}
+
+initDividers();
+
+// ============================================================================
 // Initialization
 // ============================================================================
 
+initBuilder();
 selectPreset('row-major');
 runBtn.textContent = 'Loading compiler...';
 runBtn.disabled = true;
