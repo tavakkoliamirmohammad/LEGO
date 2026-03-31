@@ -170,14 +170,6 @@ void registerLegoPipelines() {
     buildLegoToROCDLPipeline);
 #endif
 
-#ifdef LEGO_HAS_WASM
-  PassPipelineRegistration<LegoToWasmPipelineOptions>("lego-to-wasm",
-    "Lower LEGO dialect to WebAssembly binary "
-    "(LEGO -> Arith -> LLVM -> WASM)",
-    [](OpPassManager &pm, const LegoToWasmPipelineOptions &opts) {
-      buildLegoToWasmPipeline(pm, opts);
-    });
-#endif
 }
 
 } // namespace lego

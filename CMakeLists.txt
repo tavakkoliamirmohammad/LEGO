@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(LEGO_MONOLITHIC_LLVM "Build LLVM/MLIR as part of the project" OFF)
 option(LEGO_ENABLE_CCACHE "Enable ccache for faster recompilation" ON)
 option(LEGO_BUILD_TESTS "Build LEGO tests" ON)
-set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV;WebAssembly" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;SPIRV;WebAssembly;AArch64)")
+set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;SPIRV;AArch64)")
 
 # --- Python & Venv Support ---
 if(NOT EMSCRIPTEN)
@@ -232,12 +232,6 @@ if("${LLVM_TARGETS_TO_BUILD}" MATCHES "AMDGPU")
   endif()
 endif()
 
-set(LEGO_HAS_WASM OFF)
-if("${LLVM_TARGETS_TO_BUILD}" MATCHES "WebAssembly")
-  set(LEGO_HAS_WASM ON)
-  add_definitions(-DLEGO_HAS_WASM)
-  message(STATUS "WebAssembly backend enabled — WASM cross-compilation available")
-endif()
 
 # For cross-compilation, use the native tablegen from LLVM_NATIVE_TOOL_DIR;
 # for native builds, use the CMake target built by add_subdirectory.
@@ -268,7 +262,7 @@ if(EMSCRIPTEN)
     "SHELL:-s STACK_SIZE=4194304"
     "SHELL:-s MODULARIZE=1"
     "SHELL:-s EXPORT_NAME='LEGOCompiler'"
-    "SHELL:-s ENVIRONMENT='web'"
+    "SHELL:-s ENVIRONMENT='web,node'"
     "SHELL:-s FILESYSTEM=0"
     "SHELL:-s DISABLE_EXCEPTION_CATCHING=1"
     -O2
@@ -282,6 +276,20 @@ if(EMSCRIPTEN)
       ${CMAKE_SOURCE_DIR}/viz/wasm/lego_driver.wasm
     COMMENT "Copying WASM driver to viz/wasm/"
   )
+
+  # WASM integration tests (Node.js >= 16 required for BigInt + WASM).
+  # Use Emscripten's bundled Node to avoid the ancient system Node.
+  set(NODE_BIN "$ENV{EMSDK_NODE}")
+  if(NODE_BIN)
+    add_custom_target(check-lego-wasm
+      COMMAND ${NODE_BIN}
+        ${CMAKE_SOURCE_DIR}/test/wasm/test_wasm_codegen.mjs
+        $<TARGET_FILE:lego_driver>
+      DEPENDS lego_driver
+      COMMENT "Running WASM codegen integration tests"
+    )
+  endif()
+
   return()
 endif()
 

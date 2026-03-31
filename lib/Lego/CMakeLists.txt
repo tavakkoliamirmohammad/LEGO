@@ -59,18 +59,11 @@ if(LEGO_HAS_AMDGPU)
   )
 endif()
 
-if(LEGO_HAS_WASM)
-  list(APPEND _GPU_BACKEND_SOURCES LegoWasmPipeline.cpp)
-  list(APPEND _GPU_BACKEND_LIBS
-    MLIRTargetLLVMIRExport
-    MLIRLLVMToLLVMIRTranslation
-    MLIRBuiltinToLLVMIRTranslation
-  )
-endif()
-
 # LLVM target components (must use LINK_COMPONENTS, not LINK_LIBS)
 set(_LLVM_COMPONENTS)
-if(LEGO_HAS_WASM)
+if(EMSCRIPTEN)
+  # The WASM driver (lego_driver) translates LLVM dialect -> LLVM IR ->
+  # wasm32 object code, so it needs the WebAssembly codegen backend.
   list(APPEND _LLVM_COMPONENTS
     WebAssemblyCodeGen WebAssemblyAsmParser WebAssemblyDesc WebAssemblyInfo
   )
@@ -131,7 +124,7 @@ add_mlir_dialect_library(MLIRLego
   MLIRLLVMDialect
   # JIT engine (excluded for Emscripten)
   ${_JIT_LIBS}
-  # IR translation (needed by both JIT and WASM pipeline)
+  # IR translation (needed by JIT pipeline)
   MLIRTargetLLVMIRExport
   MLIRLLVMToLLVMIRTranslation
   MLIRBuiltinToLLVMIRTranslation

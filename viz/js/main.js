@@ -40,6 +40,29 @@ function compileMLIR(mlirText, M, N) {
   return JSON.parse(json);
 }
 
+/**
+ * Instantiate a compiled WASM binary and compute the mapping table
+ * by calling the exported apply(i,j) function for all grid cells.
+ */
+async function computeMappingFromWasm(wasmB64, M, N) {
+  const binaryStr = atob(wasmB64);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++)
+    bytes[i] = binaryStr.charCodeAt(i);
+
+  // LLVM's WebAssembly backend imports env.__linear_memory even for
+  // pure arithmetic functions.  Provide a minimal memory instance.
+  const imports = { env: { __linear_memory: new WebAssembly.Memory({ initial: 0 }) } };
+  const { instance } = await WebAssembly.instantiate(bytes, imports);
+  const apply = instance.exports.apply;
+
+  const mapping = [];
+  for (let i = 0; i < M; i++)
+    for (let j = 0; j < N; j++)
+      mapping.push([i, j, Number(apply(BigInt(i), BigInt(j)))]);
+  return mapping;
+}
+
 // ============================================================================
 // DSL → Layout AST (sandbox-based evaluation)
 // ============================================================================
@@ -1058,13 +1081,23 @@ async function runVisualization() {
     const { mlir, shape, tileInfo } = parseDSL(code);
     const [M, N] = shape;
 
-    // 2. Compile MLIR + evaluate apply(i,j) for all cells — one call
+    // 2. Compile MLIR -> IR stages + WASM binary
     if (!compilerReady) throw new Error('Compiler not loaded yet');
     const compilerResult = compileMLIR(mlir, M, N);
     if (compilerResult.error) throw new Error(compilerResult.error);
 
+    // 3. Compute mapping by instantiating the compiled WASM module
+    let mapping;
+    if (compilerResult.wasmBinary) {
+      mapping = await computeMappingFromWasm(compilerResult.wasmBinary, M, N);
+    } else if (compilerResult.mapping) {
+      mapping = compilerResult.mapping;
+    } else {
+      throw new Error('Compiler produced no WASM binary or mapping');
+    }
+
     const data = {
-      mapping: compilerResult.mapping,
+      mapping,
       shape: compilerResult.shape || shape,
       total: M * N,
       tile_info: tileInfo,

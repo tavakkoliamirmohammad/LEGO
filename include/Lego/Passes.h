@@ -99,16 +99,6 @@ struct LegoToROCDLPipelineOptions
 };
 #endif
 
-#ifdef LEGO_HAS_WASM
-/// Options for the lego-to-wasm pipeline.
-struct LegoToWasmPipelineOptions
-    : public PassPipelineOptions<LegoToWasmPipelineOptions> {
-  PassOptions::Option<int> optLevel{
-      *this, "opt-level",
-      llvm::cl::desc("WASM optimization level (0-3)"),
-      llvm::cl::init(2)};
-};
-#endif
 
 void registerLegoPipelines();
 void buildLegoLowerPipeline(OpPassManager &pm);
@@ -128,12 +118,6 @@ void buildLegoToROCDLPipeline(OpPassManager &pm,
                                const LegoToROCDLPipelineOptions &options);
 #endif
 
-#ifdef LEGO_HAS_WASM
-void buildLegoToWasmPipeline(OpPassManager &pm,
-                              const LegoToWasmPipelineOptions &options);
-/// Overload without PassPipelineOptions (avoids RTTI issues in WASM builds).
-void buildLegoToWasmPipeline(OpPassManager &pm, int optLevel = 2);
-#endif
 
 // =========================================================================
 // Shared GPU pipeline building blocks.
