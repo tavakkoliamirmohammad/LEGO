@@ -515,6 +515,46 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     endforeach()
   endif()
 
+  # --- Cross-platform SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal via wgpu) ---
+  # These run on any machine with wgpu installed — no NVIDIA/AMD GPU required.
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c "import wgpu"
+    RESULT_VARIABLE _WGPU_RESULT OUTPUT_QUIET ERROR_QUIET)
+  if(NOT _WGPU_RESULT EQUAL 0)
+    message(STATUS "wgpu not found — SPIR-V GPU benchmarks will not be registered")
+  endif()
+  if(_WGPU_RESULT EQUAL 0)
+  macro(add_spirv_benchmark _name _script)
+    add_custom_target(check-spirv-${_name}
+      COMMAND ${CMAKE_COMMAND} -E env
+        "PYTHONPATH=${LEGO_PYTHONPATH}:${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir"
+        "${Python_EXECUTABLE}" -P
+          "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_script}" ${ARGN}
+      DEPENDS lego-prepare-wheel
+      COMMENT "Running SPIR-V GPU benchmark: ${_script} ${ARGN}"
+      USES_TERMINAL
+    )
+  endmacro()
+
+  add_spirv_benchmark(vecadd           vecadd.py           1024)
+  add_spirv_benchmark(transpose_naive  transpose_naive.py  1024 1024)
+  add_spirv_benchmark(matmul_naive     matmul_naive.py     64)
+  add_spirv_benchmark(reduce_sum       reduce_sum.py       1024)
+  add_spirv_benchmark(transpose_smem   transpose_smem.py   1024 1024)
+  add_spirv_benchmark(matmul_smem      matmul_smem.py      64)
+
+  add_custom_target(check-spirv-examples
+    DEPENDS
+      check-spirv-vecadd
+      check-spirv-transpose_naive
+      check-spirv-matmul_naive
+      check-spirv-reduce_sum
+      check-spirv-transpose_smem
+      check-spirv-matmul_smem
+    COMMENT "Running all SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal)"
+  )
+  endif() # wgpu available
+
   # --- Wheel build + verification target ---
   add_custom_target(check-lego-wheel
     COMMAND ${CMAKE_COMMAND} -E env
@@ -552,5 +592,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   if(TARGET check-gpu-examples)
     add_dependencies(check-lego-all check-gpu-examples)
+  endif()
+  if(TARGET check-spirv-examples)
+    add_dependencies(check-lego-all check-spirv-examples)
   endif()
 endif()
