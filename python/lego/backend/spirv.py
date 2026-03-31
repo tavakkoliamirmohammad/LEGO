@@ -148,20 +148,7 @@ def _extract_launch_metadata(module):
     for operand in operands[kernel_args_start:]:
         ty_str = str(operand.type)
         if "memref" in ty_str:
-            if "Workgroup" in ty_str:
-                # Workgroup (shared) memory — device-side only, no host binding.
-                # Extract element count from memref type for threadgroup alloc.
-                shaped = operand.type
-                try:
-                    # Parse size from memref<NxT> string
-                    import re as _re
-                    size_match = _re.search(r'memref<(\d+)x', ty_str)
-                    wg_numel = int(size_match.group(1)) if size_match else 0
-                except Exception:
-                    wg_numel = 0
-                bindings.append(("workgroup", wg_numel))
-            else:
-                bindings.append(("data", buf_idx))
+            bindings.append(("data", buf_idx))
             buf_idx += 1
         else:
             cv = _get_constant_value(operand)
@@ -186,140 +173,6 @@ def _extract_launch_metadata(module):
         "bindings": bindings,
         "entry_point": entry_point,
     }
-
-
-def _fix_workgroup_spirv(words):
-    """Post-process SPIR-V binary to fix workgroup variable types.
-
-    The MLIR gpu-to-spirv pass wraps workgroup buffer types in
-    OpTypeStruct (Vulkan StorageBuffer ABI), but SPIR-V requires
-    Workgroup variables to use bare array types. This function:
-    1. Finds OpBitcast from bare Workgroup ptr to struct-wrapped Workgroup ptr
-    2. Redirects the Bitcast result users to use the bare ptr directly
-    3. Removes the Bitcast and orphaned struct/pointer types
-    """
-    if not words or words[0] != 0x07230203:
-        return words
-
-    # Parse all instructions and their positions
-    instructions = []  # [(offset, opcode, length, [words])]
-    i = 5
-    while i < len(words):
-        w = words[i]
-        opcode = w & 0xFFFF
-        length = (w >> 16) & 0xFFFF
-        if length == 0:
-            break
-        instructions.append((i, opcode, length, list(words[i:i+length])))
-        i += length
-
-    # Build maps
-    OP_TYPE_POINTER = 32
-    OP_TYPE_STRUCT = 30
-    OP_VARIABLE = 59
-    OP_BITCAST = 124
-    OP_ACCESS_CHAIN = 65
-    SC_WORKGROUP = 4
-
-    type_map = {}  # id → (opcode, data)
-    variables = {}  # result_id → (ptr_type_id, storage_class)
-    bitcasts = []  # [(offset, result_id, result_type, operand)]
-
-    for offset, opcode, length, inst in instructions:
-        if opcode == OP_TYPE_POINTER:
-            result, sc, pointee = inst[1], inst[2], inst[3]
-            type_map[result] = ('pointer', sc, pointee)
-        elif opcode == OP_TYPE_STRUCT:
-            result = inst[1]
-            members = inst[2:]
-            type_map[result] = ('struct', members)
-        elif opcode == OP_VARIABLE:
-            result = inst[2]
-            ptr_ty = inst[1]
-            sc = inst[3]
-            variables[result] = (ptr_ty, sc)
-        elif opcode == OP_BITCAST:
-            result_ty, result, operand = inst[1], inst[2], inst[3]
-            bitcasts.append((offset, result, result_ty, operand))
-
-    if not bitcasts:
-        return words
-
-    # Find bitcasts from Workgroup variables to struct-wrapped Workgroup pointers.
-    # Pattern: OpBitcast %result : ptr<struct{array}, WG> = %var : ptr<array, WG>
-    replacements = {}  # bitcast_result → bitcast_operand (bare ptr)
-    nop_offsets = set()  # offsets to NOP out
-
-    for offset, result, result_ty, operand in bitcasts:
-        if operand not in variables:
-            continue
-        var_ptr_ty, var_sc = variables[operand]
-        if var_sc != SC_WORKGROUP:
-            continue
-        # Check if result_ty is ptr<struct{...}, Workgroup>
-        if result_ty not in type_map:
-            continue
-        rt = type_map[result_ty]
-        if rt[0] != 'pointer' or rt[1] != SC_WORKGROUP:
-            continue
-        pointee = rt[2]
-        if pointee not in type_map:
-            continue
-        pt = type_map[pointee]
-        if pt[0] != 'struct':
-            continue
-        # This is a bitcast from bare Workgroup ptr to struct-wrapped.
-        # Replace all uses of the bitcast result with the operand.
-        replacements[result] = operand
-        nop_offsets.add(offset)
-
-    if not replacements:
-        return words
-
-    # Find the bare array element pointer type (ptr<elemTy, Workgroup>).
-    # We need this for fixing AccessChain result types.
-    elem_ptr_types = {}  # For each replaced bitcast, find the element pointer type
-    for _, result, result_ty, operand in bitcasts:
-        if result not in replacements:
-            continue
-        # operand is the workgroup variable with ptr<array, WG> type
-        var_ptr_ty, _ = variables[operand]
-        bare_pointee = type_map[var_ptr_ty][2]  # array type id
-
-    # Rebuild the binary, applying replacements and removing bitcasts
-    fixed = []
-    i = 5
-    while i < len(words):
-        w = words[i]
-        opcode = w & 0xFFFF
-        length = (w >> 16) & 0xFFFF
-        if length == 0:
-            break
-        inst = list(words[i:i+length])
-
-        # Skip bitcast instructions that we're replacing
-        if i in nop_offsets:
-            i += length
-            continue
-
-        # Replace all references to bitcast results with their operands
-        for j in range(len(inst)):
-            if inst[j] in replacements:
-                inst[j] = replacements[inst[j]]
-
-        # Fix AccessChain that indexes into struct-wrapped workgroup:
-        # Old: OpAccessChain result_type result base [0, idx]
-        # New: OpAccessChain result_type result base [idx]
-        if opcode == OP_ACCESS_CHAIN and length > 5:
-            base = inst[3]
-            if base in variables and variables[base][1] == SC_WORKGROUP:
-                inst = inst[:4] + inst[5:]
-                inst[0] = ((len(inst)) << 16) | OP_ACCESS_CHAIN
-
-        fixed.extend(inst)
-        i += length
-
-    return words[:5] + fixed
 
 
 def compile_to_spirv(layout_or_builder, shape=None, dtype="f32", workgroup_size=64):
@@ -354,6 +207,15 @@ def compile_to_spirv(layout_or_builder, shape=None, dtype="f32", workgroup_size=
     # Extract dispatch metadata from the live module before serializing to text
     metadata = _extract_launch_metadata(module)
 
+    # Add workgroup buffer info from the builder (for Metal threadgroup alloc).
+    # Workgroup args are lowered to SPIR-V globals by LowerWorkgroupToSPIRVPass
+    # and no longer appear in the MLIR, so we get sizes from the builder.
+    workgroups = []
+    if hasattr(builder, '_shared_bufs'):
+        for sbuf in builder._shared_bufs:
+            workgroups.append(sbuf.numel)
+    metadata["workgroups"] = workgroups
+
     # Extract binary: direct attribute access, fallback to regex
     spv_words = None
     try:
@@ -369,10 +231,6 @@ def compile_to_spirv(layout_or_builder, shape=None, dtype="f32", workgroup_size=
             f"SPIR-V pipeline produced no lego.spirv_binary attribute.\n"
             f"Output IR:\n{mlir_output[:2000]}"
         )
-
-    # Fix workgroup variable types in the SPIR-V binary (the MLIR gpu-to-spirv
-    # pass wraps them in structs which is invalid for Workgroup storage class).
-    spv_words = _fix_workgroup_spirv(spv_words)
 
     return spv_words, mlir_output, metadata
 

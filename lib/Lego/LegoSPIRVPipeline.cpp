@@ -14,6 +14,7 @@
 #include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRVPass.h"
 #include "mlir/Conversion/SCFToSPIRV/SCFToSPIRVPass.h"
 #include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVAttributes.h"
@@ -168,250 +169,125 @@ struct SerializeSPIRVPass
 };
 
 // ============================================================================
-// PromoteWorkgroupToGlobalPass — promote gpu.func workgroup attributions to
-// spirv.GlobalVariable ops with Workgroup storage class.
+// LowerWorkgroupToSPIRVPass — convert gpu.func workgroup attributions to
+// spirv.GlobalVariable + spirv.AccessChain/Load/Store BEFORE gpu-to-spirv.
 //
-// The standard gpu-to-spirv pass ignores workgroup attributions. This pass
-// runs BEFORE gpu-to-spirv on gpu.module ops:
-// 1. For each workgroup attribution, record its type
-// 2. Replace uses with a memref.get_global (to be lowered later)
-// 3. Remove the attribution block args
-// 4. After gpu-to-spirv converts gpu.module → spirv.module, a second nested
-//    pass creates the actual spirv.GlobalVariable ops.
+// This pass runs on gpu.module after outlining and storage class mapping.
+// For each workgroup attribution:
+// 1. Creates spirv.GlobalVariable with bare !spirv.ptr<!spirv.array<N x T>,
+//    Workgroup> at gpu.module scope
+// 2. Replaces memref.load/store of the workgroup buffer with
+//    spirv.mlir.addressof + spirv.AccessChain + spirv.Load/Store
+// 3. Erases the workgroup block argument
+//
+// All generated ops are SPIR-V dialect ops, which gpu-to-spirv's conversion
+// target marks as legal. They pass through the full conversion untouched
+// and end up in the spirv.module.
 // ============================================================================
 
-/// Pass (on gpu.module): strip workgroup attributions from gpu.func, store
-/// their types as attributes, and erase the block args. The uses are replaced
-/// with results of `arith.constant 0 : index` as temporary placeholders that
-/// will be consumed by memref ops that get converted to SPIR-V AccessChain.
-/// The post-pass creates proper spirv.GlobalVariable + spirv.mlir.addressof.
-struct StripWorkgroupPass
-    : public PassWrapper<StripWorkgroupPass,
-                          OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(StripWorkgroupPass)
+struct LowerWorkgroupToSPIRVPass
+    : public PassWrapper<LowerWorkgroupToSPIRVPass,
+                          OperationPass<gpu::GPUModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerWorkgroupToSPIRVPass)
 
-  StringRef getArgument() const override { return "lego-strip-workgroup"; }
+  StringRef getArgument() const override {
+    return "lego-lower-workgroup-to-spirv";
+  }
   StringRef getDescription() const override {
-    return "Strip gpu.func workgroup attributions for SPIR-V";
+    return "Lower gpu.func workgroup attributions to SPIR-V ops";
   }
 
   void runOnOperation() override {
-    auto topModule = getOperation();
+    auto gpuMod = getOperation();
 
-    // Collect workgroup info from all gpu.func ops.
-    DenseMap<StringRef, SmallVector<Type, 4>> funcWGTypes;
-
-    topModule->walk([&](gpu::GPUFuncOp funcOp) {
+    gpuMod->walk([&](gpu::GPUFuncOp funcOp) {
       unsigned numWG = funcOp.getNumWorkgroupAttributions();
       if (numWG == 0)
         return;
 
       auto *ctx = funcOp.getContext();
-      SmallVector<Attribute, 4> wgTypes;
+      auto loc = funcOp.getLoc();
+      OpBuilder moduleBuilder(gpuMod.getBody(), gpuMod.getBody()->begin());
 
-      // Store types and erase attributions (reverse order).
-      for (int i = numWG - 1; i >= 0; --i) {
+      // Process each workgroup attribution (reverse order for safe erasure).
+      for (int i = static_cast<int>(numWG) - 1; i >= 0; --i) {
         auto idx = funcOp.getFirstWorkgroupAttributionIndex() + i;
-        auto arg = funcOp.getBody().front().getArgument(idx);
-        wgTypes.push_back(TypeAttr::get(arg.getType()));
+        auto blockArg = funcOp.getBody().front().getArgument(idx);
+        auto memrefTy = cast<MemRefType>(blockArg.getType());
+        auto elemTy = memrefTy.getElementType();
+        int64_t numElements = memrefTy.getNumElements();
 
-        // All uses of this block arg are memref.load/store ops.
-        // We can't replace them yet — let gpu-to-spirv handle the
-        // conversion, then fix up in the post-pass. For now, the
-        // arg must remain because removing it would invalidate uses.
-        // Instead, we leave attributions alone for gpu-to-spirv but
-        // tell it these are NOT attributions (set count=0).
-        // The block args stay, and we extend the function type to cover them.
+        // 1. Create spirv.GlobalVariable at gpu.module scope.
+        auto arrayTy = spirv::ArrayType::get(elemTy, numElements);
+        auto ptrTy = spirv::PointerType::get(
+            arrayTy, spirv::StorageClass::Workgroup);
+        auto elemPtrTy = spirv::PointerType::get(
+            elemTy, spirv::StorageClass::Workgroup);
+
+        std::string name = (funcOp.getName() + "_workgroup_" +
+                            Twine(i)).str();
+
+        auto globalOp = spirv::GlobalVariableOp::create(
+            moduleBuilder, loc, ptrTy, name, /*initializer=*/nullptr);
+
+        // 2. Replace all uses: memref.load/store → spirv.Load/Store.
+        OpBuilder funcBuilder(&funcOp.getBody().front(),
+                              funcOp.getBody().front().begin());
+
+        // Create addressof once at function entry.
+        auto addrOf = spirv::AddressOfOp::create(funcBuilder, loc, globalOp);
+
+        // Replace all uses of the workgroup block arg.
+        SmallVector<Operation *, 16> toErase;
+        for (auto &use : llvm::make_early_inc_range(blockArg.getUses())) {
+          Operation *user = use.getOwner();
+          OpBuilder b(user);
+
+          if (auto loadOp = dyn_cast<memref::LoadOp>(user)) {
+            // memref.load %smem[%idx] → spirv.AccessChain + spirv.Load
+            assert(loadOp.getIndices().size() == 1 &&
+                   "expected 1D workgroup memref");
+            auto idx_val = loadOp.getIndices()[0];
+            // Cast index to i32 for SPIR-V.
+            auto i32Ty = IntegerType::get(ctx, 32);
+            auto idxCast = arith::IndexCastOp::create(b, loc, i32Ty, idx_val);
+            auto ac = spirv::AccessChainOp::create(
+                b, loc, elemPtrTy, addrOf.getResult(),
+                ValueRange{idxCast.getResult()});
+            auto spvLoad = spirv::LoadOp::create(b, loc, ac.getResult());
+            loadOp.getResult().replaceAllUsesWith(spvLoad.getResult());
+            toErase.push_back(loadOp);
+
+          } else if (auto storeOp = dyn_cast<memref::StoreOp>(user)) {
+            // memref.store %val, %smem[%idx] → spirv.AccessChain + spirv.Store
+            assert(storeOp.getIndices().size() == 1 &&
+                   "expected 1D workgroup memref");
+            auto idx_val = storeOp.getIndices()[0];
+            auto i32Ty = IntegerType::get(ctx, 32);
+            auto idxCast = arith::IndexCastOp::create(b, loc, i32Ty, idx_val);
+            auto ac = spirv::AccessChainOp::create(
+                b, loc, elemPtrTy, addrOf.getResult(),
+                ValueRange{idxCast.getResult()});
+            spirv::StoreOp::create(b, loc, ac.getResult(),
+                                   storeOp.getValueToStore());
+            toErase.push_back(storeOp);
+          }
+          // Other uses (shouldn't happen for well-formed workgroup buffers)
+        }
+
+        for (auto *op : toErase)
+          op->erase();
+
+        // 3. Erase the workgroup block argument.
+        funcOp.getBody().front().eraseArgument(idx);
       }
 
-      // Extend function type to include workgroup args as regular args.
-      auto funcType = funcOp.getFunctionType();
-      SmallVector<Type, 8> newInputs(funcType.getInputs());
-      SmallVector<Type, 4> wgTypesList;
-      for (unsigned i = 0; i < numWG; ++i) {
-        auto idx = funcOp.getFirstWorkgroupAttributionIndex() + i;
-        auto ty = funcOp.getBody().front().getArgument(idx).getType();
-        newInputs.push_back(ty);
-        wgTypesList.push_back(ty);
-      }
-      funcOp.setFunctionType(FunctionType::get(ctx, newInputs, funcType.getResults()));
-      funcWGTypes[funcOp.getName()] = std::move(wgTypesList);
-
+      // Update workgroup attribution count to zero.
       OpBuilder b(ctx);
       funcOp->setAttr(funcOp.getNumWorkgroupAttributionsAttrName(),
                       b.getI64IntegerAttr(0));
       funcOp->removeAttr("workgroup_attrib_attrs");
-
-      std::reverse(wgTypes.begin(), wgTypes.end());
-      auto gpuMod = funcOp->getParentOfType<gpu::GPUModuleOp>();
-      gpuMod->setAttr("lego.workgroup_types", ArrayAttr::get(ctx, wgTypes));
-      gpuMod->setAttr("lego.workgroup_func",
-                       StringAttr::get(ctx, funcOp.getName()));
     });
-
-    // Fix gpu.launch_func calls to match the new function ABI.
-    topModule->walk([&](gpu::LaunchFuncOp launchOp) {
-      auto it = funcWGTypes.find(launchOp.getKernelName());
-      if (it == funcWGTypes.end())
-        return;
-
-      auto loc = launchOp.getLoc();
-      OpBuilder lb(launchOp);
-      SmallVector<Value, 8> newOperands(launchOp.getKernelOperands());
-
-      for (auto ty : it->second) {
-        auto memrefTy = cast<MemRefType>(ty);
-        auto alloc = memref::AllocOp::create(lb, loc, memrefTy);
-        newOperands.push_back(alloc.getResult());
-      }
-
-      auto newLaunch = gpu::LaunchFuncOp::create(
-          lb, loc, launchOp.getKernelAttr(),
-          launchOp.getGridSizeOperandValues(),
-          launchOp.getBlockSizeOperandValues(),
-          launchOp.getDynamicSharedMemorySize(),
-          newOperands,
-          /*asyncToken=*/nullptr,
-          launchOp.getAsyncDependencies());
-
-      for (auto attr : launchOp->getAttrs())
-        if (!newLaunch->hasAttr(attr.getName()))
-          newLaunch->setAttr(attr.getName(), attr.getValue());
-
-      launchOp.erase();
-    });
-  }
-};
-
-/// Post-pass (on spirv.module): create spirv.GlobalVariable with Workgroup
-/// storage for each stripped workgroup attribution, then replace the
-/// corresponding spirv.mlir.addressof (which references a struct-wrapped
-/// StorageBuffer interface variable) with an addressof to the new Workgroup
-/// global. Finally, erase the old interface variable.
-struct InjectWorkgroupGlobalsPass
-    : public PassWrapper<InjectWorkgroupGlobalsPass,
-                          OperationPass<spirv::ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InjectWorkgroupGlobalsPass)
-
-  StringRef getArgument() const override {
-    return "lego-inject-workgroup-globals";
-  }
-  StringRef getDescription() const override {
-    return "Inject spirv.GlobalVariable for workgroup memory";
-  }
-
-  void runOnOperation() override {
-    auto spvMod = getOperation();
-
-    // Find workgroup metadata from sibling gpu.module.
-    ArrayAttr typesAttr;
-    auto parentMod = spvMod->getParentOfType<ModuleOp>();
-    if (!parentMod)
-      return;
-    for (auto &op : parentMod.getBody()->getOperations()) {
-      typesAttr = op.getAttrOfType<ArrayAttr>("lego.workgroup_types");
-      if (typesAttr) {
-        op.removeAttr("lego.workgroup_types");
-        op.removeAttr("lego.workgroup_func");
-        break;
-      }
-    }
-    if (!typesAttr || typesAttr.empty())
-      return;
-
-    int64_t numWG = typesAttr.size();
-
-    // Find interface variables with binding attrs, sorted by binding.
-    SmallVector<std::pair<int, spirv::GlobalVariableOp>, 8> boundGlobals;
-    for (auto g : spvMod.getOps<spirv::GlobalVariableOp>()) {
-      auto b = g->getAttrOfType<IntegerAttr>("binding");
-      if (b)
-        boundGlobals.push_back({b.getInt(), g});
-    }
-    llvm::sort(boundGlobals, [](auto &a, auto &b) { return a.first < b.first; });
-
-    if (static_cast<int64_t>(boundGlobals.size()) < numWG)
-      return;
-
-    auto *ctx = spvMod.getContext();
-    OpBuilder modBuilder(spvMod.getBody(), spvMod.getBody()->begin());
-    auto loc = spvMod.getLoc();
-
-    for (int64_t i = 0; i < numWG; ++i) {
-      auto memrefTy = cast<ShapedType>(
-          cast<TypeAttr>(typesAttr[i]).getValue());
-      auto elemTy = memrefTy.getElementType();
-      int64_t n = memrefTy.getNumElements();
-
-      // Create bare array type (no struct wrapper) with Workgroup storage.
-      auto arrayTy = spirv::ArrayType::get(elemTy, n);
-      auto wgPtrTy = spirv::PointerType::get(arrayTy, spirv::StorageClass::Workgroup);
-
-      std::string wgName = "__workgroup_" + std::to_string(i);
-      auto wgGlobal = spirv::GlobalVariableOp::create(
-          modBuilder, loc, wgPtrTy, wgName, /*initializer=*/nullptr);
-
-      // Find the old struct-wrapped interface variable and replace addressof uses.
-      int64_t oldIdx = boundGlobals.size() - numWG + i;
-      auto oldGlobal = boundGlobals[oldIdx].second;
-
-      // Find all addressof ops referencing the old global.
-      SmallVector<spirv::AddressOfOp, 4> oldAddressOfs;
-      spvMod->walk([&](spirv::AddressOfOp addrOf) {
-        if (addrOf.getVariable() == oldGlobal.getSymName())
-          oldAddressOfs.push_back(addrOf);
-      });
-
-      for (auto addrOf : oldAddressOfs) {
-        OpBuilder b(addrOf);
-        auto newAddrOf = spirv::AddressOfOp::create(b, loc, wgGlobal);
-
-        // The old addressof produces ptr<struct{array<N x T>}, StorageBuffer>.
-        // The new one produces ptr<array<N x T>, Workgroup>.
-        // Users are AccessChain ops that index [0][idx] into the struct.
-        // We need to skip the struct index (first AccessChain index = 0).
-        for (auto &use : llvm::make_early_inc_range(addrOf.getResult().getUses())) {
-          auto accessChain = dyn_cast<spirv::AccessChainOp>(use.getOwner());
-          if (accessChain && accessChain.getIndices().size() >= 2) {
-            // Old: AccessChain ptr<struct{array}> [0, idx]
-            // New: AccessChain ptr<array> [idx]  (skip struct index)
-            OpBuilder acb(accessChain);
-            auto elemPtrTy = spirv::PointerType::get(
-                elemTy, spirv::StorageClass::Workgroup);
-            SmallVector<Value, 4> newIndices(
-                accessChain.getIndices().begin() + 1,
-                accessChain.getIndices().end());
-            auto newAC = spirv::AccessChainOp::create(
-                acb, loc, elemPtrTy, newAddrOf.getResult(), newIndices);
-            accessChain.getResult().replaceAllUsesWith(newAC.getResult());
-            accessChain.erase();
-          } else {
-            // Direct use — just replace.
-            use.set(newAddrOf.getResult());
-          }
-        }
-        addrOf.erase();
-      }
-
-      // Remove the old struct-wrapped interface variable.
-      auto oldName = oldGlobal.getSymName();
-      auto newName = wgGlobal.getSymName();
-      oldGlobal.erase();
-
-      // Fix spirv.EntryPoint interface: replace old global ref with new one.
-      spvMod->walk([&](spirv::EntryPointOp entryPt) {
-        auto iface = entryPt.getInterface();
-        SmallVector<Attribute, 8> newIface;
-        for (auto attr : iface) {
-          auto sym = cast<FlatSymbolRefAttr>(attr);
-          if (sym.getValue() == oldName)
-            newIface.push_back(FlatSymbolRefAttr::get(ctx, newName));
-          else
-            newIface.push_back(attr);
-        }
-        entryPt.setInterfaceAttr(ArrayAttr::get(ctx, newIface));
-      });
-    }
   }
 };
 
@@ -439,17 +315,18 @@ void buildLegoToSPIRVPipeline(OpPassManager &pm,
   // Step 4: Outline inline gpu.launch into gpu.module + gpu.func.
   pm.addPass(createGpuKernelOutliningPass());
 
-  // Step 5: Strip workgroup attributions (promote to regular function args),
-  // add dummy operands to gpu.launch_func, and store type metadata.
-  pm.addPass(std::make_unique<StripWorkgroupPass>());
+  // Step 5: Lower workgroup attributions to SPIR-V ops (spirv.GlobalVariable
+  // + spirv.Load/Store). These ops are legal in the gpu-to-spirv conversion
+  // target and pass through untouched into the spirv.module.
+  pm.addNestedPass<gpu::GPUModuleOp>(
+      std::make_unique<LowerWorkgroupToSPIRVPass>());
 
   // Step 6: Set SPIR-V target environment on gpu.module ops.
   pm.addPass(std::make_unique<SetSPIRVTargetEnvPass>(
       options.spirvVersion, options.clientAPI));
 
   // Step 7: Convert GPU module to SPIR-V module.
-  // mapMemorySpace=false because step 3 already mapped memory spaces.
-  pm.addPass(createConvertGPUToSPIRVPass(/*mapMemorySpace=*/false));
+  pm.addPass(createConvertGPUToSPIRVPass(/*mapMemorySpace=*/true));
 
   // Step 8: Convert remaining dialects inside spirv.module.
   pm.addNestedPass<spirv::ModuleOp>(createConvertArithToSPIRVPass());
@@ -459,16 +336,9 @@ void buildLegoToSPIRVPipeline(OpPassManager &pm,
   pm.addNestedPass<spirv::ModuleOp>(createConvertMathToSPIRVPass());
   pm.addNestedPass<spirv::ModuleOp>(createConvertIndexToSPIRVPass());
 
-  // Step 9: Finalize SPIR-V module (ABI lowering, VCE update).
+  // Step 9: Finalize SPIR-V module.
   pm.addNestedPass<spirv::ModuleOp>(spirv::createSPIRVLowerABIAttributesPass());
   pm.addNestedPass<spirv::ModuleOp>(spirv::createSPIRVUpdateVCEPass());
-
-  // Step 9b: Replace struct-wrapped StorageBuffer interface variables
-  // for workgroup args with bare-typed Workgroup globals. Must run
-  // after ABI lowering (which processes interface variables) but
-  // before serialization.
-  pm.addNestedPass<spirv::ModuleOp>(
-      std::make_unique<InjectWorkgroupGlobalsPass>());
 
   // Step 10: Serialize spirv.module to binary blob attribute.
   pm.addPass(std::make_unique<SerializeSPIRVPass>());

@@ -372,18 +372,13 @@ def _dispatch_wgpu(builder, shader_code, entry_point, metadata, init_mod):
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC)
 
     entries = []
-    binding_idx = 0
-    for kind, val in bindings:
-        if kind == "workgroup":
-            # Workgroup memory is device-side only — no host binding.
-            continue
+    for i, (kind, val) in enumerate(bindings):
         if kind == "data":
             buf = data_bufs[val]
         else:
             buf = device.create_buffer_with_data(
                 data=_make_binding_array(kind, val), usage=wgpu.BufferUsage.STORAGE)
-        entries.append({"binding": binding_idx, "resource": {"buffer": buf}})
-        binding_idx += 1
+        entries.append({"binding": i, "resource": {"buffer": buf}})
 
     bind_group = device.create_bind_group(
         layout=pipeline.get_bind_group_layout(0), entries=entries)
@@ -428,11 +423,12 @@ def _dispatch_metal(builder, metal_source, entry_point, metadata, init_mod):
     threads = metadata["threads"]
     data_arrays, last = _prepare_data_arrays(builder, init_mod)
 
-    # Create Metal buffers per binding order (skip workgroup — device-side only)
+    tg_count = metadata.get("_metal_threadgroup_slots", 0)
+
+    # Create Metal buffers for all bindings (constants + data).
+    # Naga exposes all SPIR-V interface variables as [[buffer(N)]].
     metal_bufs = []
     for kind, val in bindings:
-        if kind == "workgroup":
-            continue
         if kind == "data":
             arr = data_arrays[val]
         else:
@@ -446,16 +442,12 @@ def _dispatch_metal(builder, metal_source, entry_point, metadata, init_mod):
     encoder.setComputePipelineState_(pipeline)
 
     # Set threadgroup memory for workgroup buffers (before data buffers).
-    tg_idx = 0
-    for kind, val in bindings:
-        if kind == "workgroup":
-            wg_size = val * 4  # val = element count, 4 bytes per f32
-            encoder.setThreadgroupMemoryLength_atIndex_(wg_size, tg_idx)
-            tg_idx += 1
+    for tg_idx, numel in enumerate(metadata.get("workgroups", [])):
+        encoder.setThreadgroupMemoryLength_atIndex_(numel * 4, tg_idx)
 
-    # Bind data/constant buffers after the threadgroup slots.
+    # Bind buffers after the threadgroup slots.
     for i, buf in enumerate(metal_bufs):
-        encoder.setBuffer_offset_atIndex_(buf, 0, tg_idx + i)
+        encoder.setBuffer_offset_atIndex_(buf, 0, tg_count + i)
     encoder.dispatchThreadgroups_threadsPerThreadgroup_(
         Metal.MTLSizeMake(*grid), Metal.MTLSizeMake(*threads))
     encoder.endEncoding()
@@ -464,16 +456,12 @@ def _dispatch_metal(builder, metal_source, entry_point, metadata, init_mod):
     if cmd_buf.error() is not None:
         raise RuntimeError(f"GPU error: {cmd_buf.error()}")
 
-    # Find output buffer (index into metal_bufs which skips workgroup entries)
-    buf_idx = 0
+    # Find output buffer
     out_buf = None
-    for k, v in bindings:
-        if k == "workgroup":
-            continue
+    for i, (k, v) in enumerate(bindings):
         if k == "data" and v == last:
-            out_buf = metal_bufs[buf_idx]
+            out_buf = metal_bufs[i]
             break
-        buf_idx += 1
     out_data = np.frombuffer(
         out_buf.contents().as_buffer(out_buf.length()), dtype=np.float32).copy()
     return out_data, device.name()
@@ -504,7 +492,10 @@ def run_gpu_verify(builder, expected, target, label=None, atol=0, rtol=0,
                 ep = re.search(r'fn (\w+)\(@builtin', shader_code)
                 entry_point = ep.group(1) if ep else metadata["entry_point"]
             elif target == "metal":
-                shader_code = _fix_metal_buffer_bindings(shader_code)
+                shader_code, tg_count, buf_count = _fix_metal_buffer_bindings(
+                    shader_code)
+                metadata["_metal_threadgroup_slots"] = tg_count
+                metadata["_metal_buffer_slots"] = buf_count
                 ep = re.search(r'kernel void (\w+)\(', shader_code)
                 entry_point = ep.group(1) if ep else metadata["entry_point"]
     except Exception as e:
@@ -599,162 +590,25 @@ def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rto
 def _fix_metal_buffer_bindings(metal_source):
     """Replace naga's [[user(fake0)]] with proper [[buffer(N)]] attributes.
 
-    Accounts for threadgroup parameters in the kernel signature, which
-    occupy implicit argument table slots before the [[buffer(N)]] entries.
+    Parses the kernel signature to count threadgroup parameters (which
+    occupy implicit argument table slots before [[buffer]] entries) and
+    returns (fixed_source, num_threadgroup_params, num_buffer_params).
     """
-    # Count threadgroup parameters in the kernel signature (they occupy
-    # argument table indices before the explicit buffer bindings).
+    # Count threadgroup parameters in the kernel signature.
     kernel_match = re.search(r'kernel void \w+\([^)]+\)', metal_source, re.DOTALL)
     threadgroup_count = 0
     if kernel_match:
         sig = kernel_match.group(0)
         threadgroup_count = len(re.findall(r'threadgroup\s+\w+', sig))
 
+    # Count and replace [[user(fake0)]] with [[buffer(N)]].
+    buffer_count = 0
     idx = threadgroup_count
     def repl(m):
-        nonlocal idx
+        nonlocal idx, buffer_count
         result = f"[[buffer({idx})]]"
         idx += 1
+        buffer_count += 1
         return result
-    return re.sub(r'\[\[user\(fake0\)\]\]', repl, metal_source)
-
-
-def run_metal_verify(builder, expected, label=None, atol=0, rtol=0, init_mod=10000):
-    """Run via SPIR-V → naga → Metal Shading Language → Metal GPU.
-
-    Uses PyObjC to dispatch the compute kernel on Apple GPU.
-    Returns True/False/None (None = skipped).
-    """
-    try:
-        import Metal
-    except ImportError:
-        print("  Metal execution: SKIP (pyobjc-framework-Metal not installed)",
-              file=sys.stderr)
-        return None
-
-    from lego.backend.spirv import compile_to_target
-
-    try:
-        result = compile_to_target(builder, target="metal", name="verify_metal")
-    except Exception as e:
-        print(f"  Metal execution: FAIL (compile: {e})", file=sys.stderr)
-        return False
-
-    bindings = result.metadata["bindings"]
-    grid = result.metadata["grid"]
-    threads = result.metadata["threads"]
-
-    # Fix naga's [[user(fake0)]] → [[buffer(N)]]
-    metal_source = _fix_metal_buffer_bindings(result.kernel_source)
-
-    # Find entry point name
-    ep_match = re.search(r'kernel void (\w+)\(', metal_source)
-    if not ep_match:
-        print("  Metal execution: FAIL (no kernel entry point in Metal source)",
-              file=sys.stderr)
-        return False
-    entry_point = ep_match.group(1)
-
-    try:
-        device = Metal.MTLCreateSystemDefaultDevice()
-        if device is None:
-            print("  Metal execution: SKIP (no Metal device)", file=sys.stderr)
-            return None
-
-        # Compile Metal source
-        options = Metal.MTLCompileOptions.new()
-        library, err = device.newLibraryWithSource_options_error_(
-            metal_source, options, None)
-        if library is None:
-            print(f"  Metal execution: FAIL (compile: {err})", file=sys.stderr)
-            return False
-
-        func = library.newFunctionWithName_(entry_point)
-        if func is None:
-            print(f"  Metal execution: FAIL (function '{entry_point}' not found)",
-                  file=sys.stderr)
-            return False
-
-        pipeline, err = device.newComputePipelineStateWithFunction_error_(func, None)
-        if pipeline is None:
-            print(f"  Metal execution: FAIL (pipeline: {err})", file=sys.stderr)
-            return False
-
-        # Create buffers matching SPIR-V binding order
-        global_bufs = builder._global_bufs
-        last_data = len(global_bufs) - 1
-        data_arrays = {}
-        for j, gbuf in enumerate(global_bufs):
-            n = gbuf.numel
-            if j < last_data:
-                data_arrays[j] = _init_data(n, init_mod=init_mod)
-            else:
-                data_arrays[j] = np.zeros(n, dtype=np.float32)
-
-        metal_bufs = []
-        for kind, val in bindings:
-            if kind == "const_int":
-                arr = np.array([val], dtype=np.uint32)
-            elif kind == "const_float":
-                arr = np.array([val], dtype=np.float32)
-            elif kind == "const":
-                arr = np.array([val], dtype=np.uint32)
-            else:
-                arr = data_arrays[val]
-            buf = device.newBufferWithBytes_length_options_(
-                arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared)
-            metal_bufs.append(buf)
-
-        # Dispatch
-        queue = device.newCommandQueue()
-        cmd_buf = queue.commandBuffer()
-        encoder = cmd_buf.computeCommandEncoder()
-        encoder.setComputePipelineState_(pipeline)
-
-        for i, buf in enumerate(metal_bufs):
-            encoder.setBuffer_offset_atIndex_(buf, 0, i)
-
-        threads_per_grid = Metal.MTLSizeMake(grid[0], grid[1], grid[2])
-        threads_per_tg = Metal.MTLSizeMake(threads[0], threads[1], threads[2])
-        encoder.dispatchThreadgroups_threadsPerThreadgroup_(
-            threads_per_grid, threads_per_tg)
-        encoder.endEncoding()
-        cmd_buf.commit()
-        cmd_buf.waitUntilCompleted()
-
-        if cmd_buf.error() is not None:
-            print(f"  Metal execution: FAIL (GPU error: {cmd_buf.error()})",
-                  file=sys.stderr)
-            return False
-
-        # Read back output buffer
-        out_buf = None
-        for kind, val in bindings:
-            if kind == "data" and val == last_data:
-                out_buf = metal_bufs[bindings.index((kind, val))]
-                break
-
-        if out_buf is None:
-            print("  Metal execution: FAIL (output buffer not found)", file=sys.stderr)
-            return False
-
-        out_ptr = out_buf.contents().as_buffer(out_buf.length())
-        out_data = np.frombuffer(out_ptr, dtype=np.float32).copy()
-
-        if atol > 0 or rtol > 0:
-            ok = np.allclose(out_data, expected.astype(np.float32), atol=atol, rtol=rtol)
-            max_err = float(np.max(np.abs(out_data - expected.astype(np.float32))))
-        else:
-            gpu_values = out_data.astype(np.int32)
-            ok = np.array_equal(gpu_values, expected)
-            max_err = int(np.max(np.abs(gpu_values - expected)))
-        tag = f" ({label})" if label else ""
-        print(f"  Metal execution{tag}: {'PASS' if ok else 'FAIL'} "
-              f"— {len(expected)} elements, max error={max_err} [{device.name()}]",
-              file=sys.stderr)
-        return ok
-    except Exception as e:
-        print(f"  Metal execution: FAIL ({e})", file=sys.stderr)
-        import traceback
-        traceback.print_exc(file=sys.stderr)
-        return False
+    fixed = re.sub(r'\[\[user\(fake0\)\]\]', repl, metal_source)
+    return fixed, threadgroup_count, buffer_count
