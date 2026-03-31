@@ -69,6 +69,38 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Ambient glow — subtle radial light behind the UI in dark mode */
+[data-theme="dark"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 70% 50% at 15% 20%, rgba(108, 140, 255, 0.12) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 60% at 85% 80%, rgba(34, 197, 94, 0.08) 0%, transparent 70%),
+    radial-gradient(ellipse 90% 40% at 50% -5%, rgba(140, 160, 255, 0.10) 0%, transparent 60%);
+}
+
+[data-theme="dark"] header,
+[data-theme="dark"] #editor-panel,
+[data-theme="dark"] #compiler-panel {
+  position: relative; z-index: 1;
+}
+
+[data-theme="dark"] #app { position: relative; z-index: 1; }
+
+/* Subtle border glow on panels */
+[data-theme="dark"] #editor-panel {
+  box-shadow: inset -1px 0 0 rgba(108, 140, 255, 0.1);
+}
+[data-theme="dark"] #compiler-panel {
+  box-shadow: inset 1px 0 0 rgba(108, 140, 255, 0.1);
+}
+[data-theme="dark"] header {
+  box-shadow: 0 1px 0 rgba(108, 140, 255, 0.1), 0 4px 20px rgba(0,0,0,0.3);
+}
+
 /* ================================================================
    HEADER — tight, confident, single-line
    ================================================================ */
@@ -100,60 +132,62 @@ header h1 span {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 16px;
 }
 
-/* Presets — pill buttons */
-.presets { display: flex; gap: 4px; }
+/* Presets — subtle, grouped */
+.presets {
+  display: flex;
+  gap: 2px;
+  background: var(--surface2);
+  border-radius: 6px;
+  padding: 2px;
+}
 
 .preset-btn {
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 20px;
+  border: none;
+  border-radius: 4px;
   color: var(--text-dim);
-  padding: 4px 12px;
+  padding: 5px 11px;
   font-family: var(--font-body);
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
-  letter-spacing: 0.3px;
+  transition: all 0.15s ease;
 }
 
 .preset-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-glow);
+  color: var(--text);
+  background: var(--surface3);
 }
 
 .preset-btn.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: white;
-  box-shadow: 0 2px 12px var(--accent-glow);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
 }
 
-/* Run button — the star */
+/* Run button — prominent, separated */
 #run-btn {
-  background: var(--accent);
+  background: #22c55e;
   border: none;
-  border-radius: 20px;
-  color: white;
-  padding: 6px 22px;
+  border-radius: 6px;
+  color: #fff;
+  padding: 7px 28px;
   font-family: var(--font-body);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   white-space: nowrap;
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
+  letter-spacing: 0.3px;
   transition: all 0.2s ease;
-  box-shadow: 0 2px 16px var(--accent-glow);
+  box-shadow: 0 2px 12px rgba(34, 197, 94, 0.25);
 }
 
-#run-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 24px rgba(108, 140, 255, 0.35); }
+#run-btn:hover { background: #16a34a; transform: translateY(-1px); box-shadow: 0 4px 20px rgba(34, 197, 94, 0.35); }
 #run-btn:active { transform: translateY(0); }
-#run-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+#run-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; background: var(--text-dim); }
 
 #theme-btn {
   background: transparent;
@@ -475,7 +509,7 @@ input.builder-input::-webkit-inner-spin-button {
 
 #viz-panel {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   padding: 24px;
   overflow: auto;
@@ -486,9 +520,8 @@ input.builder-input::-webkit-inner-spin-button {
 
 #viz-container {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 0;
-  margin-top: 10px;
 }
 
 .viz-section {
