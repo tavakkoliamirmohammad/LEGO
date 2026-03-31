@@ -148,7 +148,20 @@ def _extract_launch_metadata(module):
     for operand in operands[kernel_args_start:]:
         ty_str = str(operand.type)
         if "memref" in ty_str:
-            bindings.append(("data", buf_idx))
+            if "Workgroup" in ty_str:
+                # Workgroup (shared) memory — device-side only, no host binding.
+                # Extract element count from memref type for threadgroup alloc.
+                shaped = operand.type
+                try:
+                    # Parse size from memref<NxT> string
+                    import re as _re
+                    size_match = _re.search(r'memref<(\d+)x', ty_str)
+                    wg_numel = int(size_match.group(1)) if size_match else 0
+                except Exception:
+                    wg_numel = 0
+                bindings.append(("workgroup", wg_numel))
+            else:
+                bindings.append(("data", buf_idx))
             buf_idx += 1
         else:
             cv = _get_constant_value(operand)

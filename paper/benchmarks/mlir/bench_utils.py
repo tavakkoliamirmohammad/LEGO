@@ -311,11 +311,19 @@ def _make_binding_array(kind, val):
 
 
 def _prepare_data_arrays(builder, init_mod=10000):
-    """Create input/output numpy arrays for a kernel's global buffers."""
+    """Create input/output numpy arrays for a kernel's global buffers.
+
+    Skips shared (workgroup) buffers — those are device-side only.
+    Returns (arrays_dict, last_data_index) where last_data_index is the
+    output buffer's index in _global_bufs.
+    """
     global_bufs = builder._global_bufs
-    last = len(global_bufs) - 1
+    # Find the last non-shared buffer (the output buffer)
+    last = max(j for j, g in enumerate(global_bufs) if not g.shared)
     arrays = {}
     for j, gbuf in enumerate(global_bufs):
+        if gbuf.shared:
+            continue
         if j < last:
             arrays[j] = _init_data(gbuf.numel, init_mod=init_mod)
         else:
@@ -364,13 +372,18 @@ def _dispatch_wgpu(builder, shader_code, entry_point, metadata, init_mod):
                 usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC)
 
     entries = []
-    for i, (kind, val) in enumerate(bindings):
+    binding_idx = 0
+    for kind, val in bindings:
+        if kind == "workgroup":
+            # Workgroup memory is device-side only — no host binding.
+            continue
         if kind == "data":
             buf = data_bufs[val]
         else:
             buf = device.create_buffer_with_data(
                 data=_make_binding_array(kind, val), usage=wgpu.BufferUsage.STORAGE)
-        entries.append({"binding": i, "resource": {"buffer": buf}})
+        entries.append({"binding": binding_idx, "resource": {"buffer": buf}})
+        binding_idx += 1
 
     bind_group = device.create_bind_group(
         layout=pipeline.get_bind_group_layout(0), entries=entries)
@@ -415,10 +428,15 @@ def _dispatch_metal(builder, metal_source, entry_point, metadata, init_mod):
     threads = metadata["threads"]
     data_arrays, last = _prepare_data_arrays(builder, init_mod)
 
-    # Create Metal buffers per binding order
+    # Create Metal buffers per binding order (skip workgroup — device-side only)
     metal_bufs = []
     for kind, val in bindings:
-        arr = data_arrays[val] if kind == "data" else _make_binding_array(kind, val)
+        if kind == "workgroup":
+            continue
+        if kind == "data":
+            arr = data_arrays[val]
+        else:
+            arr = _make_binding_array(kind, val)
         metal_bufs.append(device.newBufferWithBytes_length_options_(
             arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared))
 
@@ -426,8 +444,18 @@ def _dispatch_metal(builder, metal_source, entry_point, metadata, init_mod):
     cmd_buf = queue.commandBuffer()
     encoder = cmd_buf.computeCommandEncoder()
     encoder.setComputePipelineState_(pipeline)
+
+    # Set threadgroup memory for workgroup buffers (before data buffers).
+    tg_idx = 0
+    for kind, val in bindings:
+        if kind == "workgroup":
+            wg_size = val * 4  # val = element count, 4 bytes per f32
+            encoder.setThreadgroupMemoryLength_atIndex_(wg_size, tg_idx)
+            tg_idx += 1
+
+    # Bind data/constant buffers after the threadgroup slots.
     for i, buf in enumerate(metal_bufs):
-        encoder.setBuffer_offset_atIndex_(buf, 0, i)
+        encoder.setBuffer_offset_atIndex_(buf, 0, tg_idx + i)
     encoder.dispatchThreadgroups_threadsPerThreadgroup_(
         Metal.MTLSizeMake(*grid), Metal.MTLSizeMake(*threads))
     encoder.endEncoding()
@@ -436,9 +464,16 @@ def _dispatch_metal(builder, metal_source, entry_point, metadata, init_mod):
     if cmd_buf.error() is not None:
         raise RuntimeError(f"GPU error: {cmd_buf.error()}")
 
-    # Find output buffer
-    out_buf = metal_bufs[[i for i, (k, v) in enumerate(bindings)
-                          if k == "data" and v == last][0]]
+    # Find output buffer (index into metal_bufs which skips workgroup entries)
+    buf_idx = 0
+    out_buf = None
+    for k, v in bindings:
+        if k == "workgroup":
+            continue
+        if k == "data" and v == last:
+            out_buf = metal_bufs[buf_idx]
+            break
+        buf_idx += 1
     out_data = np.frombuffer(
         out_buf.contents().as_buffer(out_buf.length()), dtype=np.float32).copy()
     return out_data, device.name()
@@ -562,8 +597,20 @@ def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rto
 
 
 def _fix_metal_buffer_bindings(metal_source):
-    """Replace naga's [[user(fake0)]] with proper [[buffer(N)]] attributes."""
-    idx = 0
+    """Replace naga's [[user(fake0)]] with proper [[buffer(N)]] attributes.
+
+    Accounts for threadgroup parameters in the kernel signature, which
+    occupy implicit argument table slots before the [[buffer(N)]] entries.
+    """
+    # Count threadgroup parameters in the kernel signature (they occupy
+    # argument table indices before the explicit buffer bindings).
+    kernel_match = re.search(r'kernel void \w+\([^)]+\)', metal_source, re.DOTALL)
+    threadgroup_count = 0
+    if kernel_match:
+        sig = kernel_match.group(0)
+        threadgroup_count = len(re.findall(r'threadgroup\s+\w+', sig))
+
+    idx = threadgroup_count
     def repl(m):
         nonlocal idx
         result = f"[[buffer({idx})]]"
