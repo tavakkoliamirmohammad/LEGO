@@ -23,3 +23,7 @@ dist/
 python/examples/spirv_backends/output/
 python/lego/bin/naga
 python/lego/bin/naga.exe
+
+# Emscripten WASM build artifacts
+viz/wasm/lego_driver.js
+viz/wasm/lego_driver.wasm
