@@ -7,21 +7,21 @@
    ================================================================ */
 
 :root, [data-theme="dark"] {
-  --bg: #0c0e1a;
-  --surface: #12152a;
-  --surface2: #1a1e38;
-  --surface3: #222747;
-  --accent: #ff4d6d;
-  --accent-glow: rgba(255, 77, 109, 0.15);
-  --accent-dim: #c9354d;
-  --text: #e8eaf0;
-  --text-dim: #6b7094;
-  --border: #252a48;
-  --border-hover: #3a4070;
-  --editor-bg: #0f1224;
-  --cell-border: #2d325a;
-  --line-num: #3a3f68;
-  --success: #22c997;
+  --bg: #141418;
+  --surface: #1c1c22;
+  --surface2: #26262e;
+  --surface3: #303038;
+  --accent: #6c8cff;
+  --accent-glow: rgba(108, 140, 255, 0.12);
+  --accent-dim: #5570d4;
+  --text: #e4e4ec;
+  --text-dim: #7a7a8e;
+  --border: #2e2e38;
+  --border-hover: #44444f;
+  --editor-bg: #18181e;
+  --cell-border: #36363f;
+  --line-num: #44444f;
+  --success: #3dd9a0;
   --font-body: 'DM Sans', sans-serif;
   --font-mono: 'IBM Plex Mono', 'JetBrains Mono', monospace;
   --radius: 8px;
@@ -130,7 +130,7 @@ header h1 span {
   background: var(--accent);
   border-color: var(--accent);
   color: white;
-  box-shadow: 0 2px 12px rgba(255, 77, 109, 0.3);
+  box-shadow: 0 2px 12px var(--accent-glow);
 }
 
 /* Run button — the star */
@@ -148,10 +148,10 @@ header h1 span {
   letter-spacing: 0.8px;
   text-transform: uppercase;
   transition: all 0.2s ease;
-  box-shadow: 0 2px 16px rgba(255, 77, 109, 0.25);
+  box-shadow: 0 2px 16px var(--accent-glow);
 }
 
-#run-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(255, 77, 109, 0.4); }
+#run-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 24px rgba(108, 140, 255, 0.35); }
 #run-btn:active { transform: translateY(0); }
 #run-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
 
@@ -603,13 +603,13 @@ svg.has-hover .connection.highlighted { opacity: 1; stroke-width: 2.5; }
 }
 
 /* MLIR syntax highlighting */
-.hl-op { color: #64b5f6; }
-.hl-type { color: #ce93d8; }
-.hl-ssa { color: #ffab91; }
-.hl-num { color: #ffab91; }
-.hl-kw { color: #a5d6a7; font-weight: 600; }
-.hl-string { color: #a5d6a7; }
-.hl-comment { color: #546e7a; font-style: italic; }
+.hl-op { color: #7fadff; }
+.hl-type { color: #c4a0f5; }
+.hl-ssa { color: #f0a67a; }
+.hl-num { color: #f0a67a; }
+.hl-kw { color: #7ee8b0; font-weight: 600; }
+.hl-string { color: #7ee8b0; }
+.hl-comment { color: #5a5a6e; font-style: italic; }
 
 /* ================================================================
    AUTOCOMPLETE
