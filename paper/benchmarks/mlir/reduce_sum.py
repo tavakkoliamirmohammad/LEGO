@@ -60,7 +60,7 @@ if __name__ == "__main__":
 
     run_benchmark(
         reduce_sum, compute_expected,
-        targets=["cuda", "llvmspirv"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
         label=f"N={N}",
         init_mod=10,
     )

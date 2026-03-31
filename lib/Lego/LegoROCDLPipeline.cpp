@@ -5,6 +5,8 @@
 /// Only the target-specific middle phase lives here (SetROCDLTargetPass +
 /// GPU→ROCDL conversion).  The shared front and tail are in Passes.cpp.
 
+#ifdef LEGO_HAS_AMDGPU
+
 #include "Lego/Passes.h"
 
 #include "mlir/Conversion/GPUToROCDL/GPUToROCDLPass.h"
@@ -81,3 +83,5 @@ void buildLegoToROCDLPipeline(OpPassManager &pm,
 
 } // namespace lego
 } // namespace mlir
+
+#endif // LEGO_HAS_AMDGPU

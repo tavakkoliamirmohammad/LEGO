@@ -1,3 +1,4 @@
+// REQUIRES: amdgpu
 // RUN: lego-opt %s --lego-to-rocdl='format=assembly' | FileCheck %s
 
 // Test: LEGO layout ops inside gpu.launch lower through ROCDL pipeline.
