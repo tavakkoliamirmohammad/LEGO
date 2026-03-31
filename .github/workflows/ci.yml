@@ -221,6 +221,33 @@ jobs:
             viz/wasm/lego_driver.wasm
           retention-days: 30
 
+  # ── Deploy LEGO Studio to GitHub Pages ──
+  deploy-pages:
+    needs: wasm-viz
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/viz'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Download viz artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lego-studio
+          path: site
+
+      - name: Upload to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4
+
   # ── Stage 2: Package wheels (runs after build) ──
   package:
     needs: build
