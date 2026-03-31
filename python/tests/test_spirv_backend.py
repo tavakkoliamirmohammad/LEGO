@@ -150,7 +150,7 @@ class TestSPIRVPipeline:
     @requires_spirv
     def test_row_layout_compiles(self):
         from lego.backend.spirv import compile_to_spirv
-        words, mlir = compile_to_spirv(Row(256), shape=(256,))
+        words, mlir, _ = compile_to_spirv(Row(256), shape=(256,))
         assert len(words) > 10
         # SPIR-V magic number
         assert words[0] == 0x07230203
@@ -158,21 +158,21 @@ class TestSPIRVPipeline:
     @requires_spirv
     def test_col_layout_compiles(self):
         from lego.backend.spirv import compile_to_spirv
-        words, _ = compile_to_spirv(Col(16, 16), shape=(16, 16))
+        words, *_ = compile_to_spirv(Col(16, 16), shape=(16, 16))
         assert words[0] == 0x07230203
 
     @requires_spirv
     def test_2d_row_layout_compiles(self):
         from lego.backend.spirv import compile_to_spirv
         layout = Row(16, 16)
-        words, _ = compile_to_spirv(layout, shape=(16, 16))
+        words, *_ = compile_to_spirv(layout, shape=(16, 16))
         assert words[0] == 0x07230203
 
     @requires_spirv
     def test_2d_col_layout_compiles(self):
         from lego.backend.spirv import compile_to_spirv
         layout = Col(8, 8)
-        words, _ = compile_to_spirv(layout, shape=(8, 8))
+        words, *_ = compile_to_spirv(layout, shape=(8, 8))
         assert words[0] == 0x07230203
 
     @requires_spirv
@@ -180,14 +180,14 @@ class TestSPIRVPipeline:
         """TileBy: tile 8x8 into 4x4 blocks → two-level [4,4],[2,2]."""
         from lego.backend.spirv import compile_to_spirv
         layout = OrderBy(Row(8, 8)).TileBy([4, 4], [2, 2])
-        words, _ = compile_to_spirv(layout, shape=(8, 8))
+        words, *_ = compile_to_spirv(layout, shape=(8, 8))
         assert words[0] == 0x07230203
         assert len(words) > 100  # TileBy generates more index math
 
     @requires_spirv
     def test_spirv_binary_attribute_in_output(self):
         from lego.backend.spirv import compile_to_spirv
-        _, mlir = compile_to_spirv(Row(64), shape=(64,))
+        _, mlir, *_ = compile_to_spirv(Row(64), shape=(64,))
         assert "lego.spirv_binary" in mlir
 
     @requires_spirv
@@ -195,7 +195,7 @@ class TestSPIRVPipeline:
         from lego.backend.spirv import compile_to_spirv
         # f32 and i32 should work; f64 needs Float64 capability (future work)
         for dtype in ["f32", "i32"]:
-            words, _ = compile_to_spirv(Row(64), shape=(64,), dtype=dtype)
+            words, *_ = compile_to_spirv(Row(64), shape=(64,), dtype=dtype)
             assert words[0] == 0x07230203, f"Failed for dtype={dtype}"
 
 
@@ -211,7 +211,7 @@ class TestNagaConversion:
     def test_spv_to_wgsl(self):
         from lego.backend.spirv import compile_to_spirv
         from lego.backend.naga import spv_bytes_to_file, spv_to_wgsl
-        words, _ = compile_to_spirv(Row(256), shape=(256,))
+        words, *_ = compile_to_spirv(Row(256), shape=(256,))
         with tempfile.TemporaryDirectory() as d:
             spv_path = spv_bytes_to_file(words, os.path.join(d, "k.spv"))
             wgsl_path = spv_to_wgsl(spv_path)
@@ -224,7 +224,7 @@ class TestNagaConversion:
     def test_spv_to_metal(self):
         from lego.backend.spirv import compile_to_spirv
         from lego.backend.naga import spv_bytes_to_file, spv_to_metal
-        words, _ = compile_to_spirv(Row(256), shape=(256,))
+        words, *_ = compile_to_spirv(Row(256), shape=(256,))
         with tempfile.TemporaryDirectory() as d:
             spv_path = spv_bytes_to_file(words, os.path.join(d, "k.spv"))
             metal_path = spv_to_metal(spv_path)
@@ -236,7 +236,7 @@ class TestNagaConversion:
     def test_spv_validates(self):
         from lego.backend.spirv import compile_to_spirv
         from lego.backend.naga import spv_bytes_to_file, validate
-        words, _ = compile_to_spirv(Row(256), shape=(256,))
+        words, *_ = compile_to_spirv(Row(256), shape=(256,))
         with tempfile.TemporaryDirectory() as d:
             spv_path = spv_bytes_to_file(words, os.path.join(d, "k.spv"))
             assert validate(spv_path)
@@ -345,21 +345,21 @@ class TestMultiTargetCompile:
     def test_spirv_magic_number(self):
         """SPIR-V binary must start with the magic number 0x07230203."""
         from lego.backend.spirv import compile_to_spirv
-        words, _ = compile_to_spirv(Row(128), shape=(128,))
+        words, *_ = compile_to_spirv(Row(128), shape=(128,))
         assert words[0] == 0x07230203
 
     @requires_spirv
     def test_workgroup_size_1(self):
         """Edge case: workgroup_size=1 should still produce valid SPIR-V."""
         from lego.backend.spirv import compile_to_spirv
-        words, _ = compile_to_spirv(Row(16), shape=(16,), workgroup_size=1)
+        words, *_ = compile_to_spirv(Row(16), shape=(16,), workgroup_size=1)
         assert words[0] == 0x07230203
 
     @requires_spirv
     def test_non_power_of_2_shape(self):
         """Non-power-of-2 shapes should compile correctly."""
         from lego.backend.spirv import compile_to_spirv
-        words, _ = compile_to_spirv(Row(100), shape=(100,))
+        words, *_ = compile_to_spirv(Row(100), shape=(100,))
         assert words[0] == 0x07230203
 
     @requires_spirv
@@ -398,7 +398,7 @@ class TestKernelBuilder:
             ctx.store_flat(ctx.addf(va, vb), 2, gid)
 
         builder = make_elementwise_kernel([a, b, c], vecadd, name="vecadd")
-        words, _ = compile_to_spirv(builder)
+        words, *_ = compile_to_spirv(builder)
         assert words[0] == 0x07230203
 
     @requires_spirv
@@ -433,7 +433,7 @@ class TestKernelBuilder:
             ctx.store_flat(ctx.mulf(v, v), 1, gid)
 
         builder = make_elementwise_kernel([a, b], scale, name="square")
-        words, _ = compile_to_spirv(builder)
+        words, *_ = compile_to_spirv(builder)
         assert words[0] == 0x07230203
 
     @requires_spirv
@@ -452,7 +452,7 @@ class TestKernelBuilder:
             ctx.store(val, 1, [i, j])
 
         builder = KernelBuilder(buffers=[src, dst], kernel_body=transpose_body, name="transpose")
-        words, _ = compile_to_spirv(builder)
+        words, *_ = compile_to_spirv(builder)
         assert words[0] == 0x07230203
 
     @requires_spirv

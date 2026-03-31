@@ -53,7 +53,7 @@ if __name__ == "__main__":
 
     run_benchmark(
         matmul_naive, compute_expected,
-        targets=["cuda", "llvmspirv"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
         label=f"{M}x{N}x{K}",
         init_mod=10,
     )

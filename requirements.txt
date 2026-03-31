@@ -1,4 +1,4 @@
-numpy==2.1.2
+numpy==2.4.4
 sympy==1.14.0
 matplotlib==3.10.8
 pandas==3.0.1
@@ -7,5 +7,7 @@ nanobind==2.12.0
 pytest==9.0.2
 lit==18.1.8
 torch==2.10.0
-triton==3.6.0
+triton==3.6.0; sys_platform != 'darwin'
+wgpu==0.31.0
+pyobjc-framework-Metal==12.1; sys_platform == 'darwin'
 setuptools==80.9.0

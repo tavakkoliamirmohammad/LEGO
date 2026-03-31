@@ -88,5 +88,5 @@ from bench_utils import run_transpose_benchmark
 if __name__ == "__main__":
     run_transpose_benchmark(
         transpose_smem, {"A": A_layout, "B": B_layout}, N,
-        targets=["cuda", "llvmspirv"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
     )

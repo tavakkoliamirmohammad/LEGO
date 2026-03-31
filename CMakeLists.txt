@@ -393,6 +393,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     MLIR_BINDINGS_PYTHON_NB_DOMAIN lego)
 
   # --- Type stub generation (requires nanobind stubgen) ---
+  # Generates .pyi stubs for LEGO dialect extensions (LayoutType, ViewType,
+  # register_lego_dialect).  Core MLIR stubs (ir.pyi, passmanager.pyi) are
+  # not generated here due to a nanobind domain conflict in out-of-tree builds.
   option(LEGO_PYTHON_STUBGEN "Generate .pyi type stubs for LEGO extensions" ON)
   if(LEGO_PYTHON_STUBGEN)
     get_target_property(_lego_extension_srcs
@@ -405,6 +408,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/type_stubs/_mlir_libs"
       OUTPUTS
         _legoDialects/__init__.pyi
+        _legoDialects/lego.pyi
       DEPENDS_TARGET_SRC_DEPS "${_lego_extension_srcs}"
       IMPORT_PATHS
         "${CMAKE_BINARY_DIR}/python_packages/lego"
@@ -412,8 +416,22 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     declare_mlir_python_sources(LegoPythonSources.type_stub_gen
       ROOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/type_stubs"
       ADD_TO_PARENT LegoPythonSources
-      SOURCES _mlir_libs/_legoDialects/__init__.pyi)
+      SOURCES
+        _mlir_libs/_legoDialects/__init__.pyi
+        _mlir_libs/_legoDialects/lego.pyi)
     add_dependencies(LegoPythonModules "${NB_STUBGEN_CUSTOM_TARGET}")
+
+    # Copy generated stubs into the assembled package so they ship with
+    # the wheel and are visible to IDEs via PYTHONPATH.
+    set(_stub_src "${CMAKE_CURRENT_BINARY_DIR}/type_stubs/_mlir_libs/_legoDialects")
+    set(_stub_dst "${CMAKE_BINARY_DIR}/python_packages/lego/lego/mlir/_mlir_libs/_legoDialects")
+    add_custom_command(TARGET LegoPythonModules POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_stub_dst}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_stub_src}/__init__.pyi" "${_stub_dst}/__init__.pyi"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${_stub_src}/lego.pyi" "${_stub_dst}/lego.pyi"
+      COMMENT "Copying LEGO type stubs into assembled package")
   endif()
 
   # Copy generated _lego_ops_gen.py into source tree for dev imports.
@@ -581,6 +599,46 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     endforeach()
   endif()
 
+  # --- Cross-platform SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal via wgpu) ---
+  # These run on any machine with wgpu installed — no NVIDIA/AMD GPU required.
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c "import wgpu"
+    RESULT_VARIABLE _WGPU_RESULT OUTPUT_QUIET ERROR_QUIET)
+  if(NOT _WGPU_RESULT EQUAL 0)
+    message(STATUS "wgpu not found — SPIR-V GPU benchmarks will not be registered")
+  endif()
+  if(_WGPU_RESULT EQUAL 0)
+  macro(add_spirv_benchmark _name _script)
+    add_custom_target(check-spirv-${_name}
+      COMMAND ${CMAKE_COMMAND} -E env
+        "PYTHONPATH=${LEGO_PYTHONPATH}:${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir"
+        "${Python_EXECUTABLE}" -P
+          "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_script}" ${ARGN}
+      DEPENDS lego-prepare-wheel
+      COMMENT "Running SPIR-V GPU benchmark: ${_script} ${ARGN}"
+      USES_TERMINAL
+    )
+  endmacro()
+
+  add_spirv_benchmark(vecadd           vecadd.py           1024)
+  add_spirv_benchmark(transpose_naive  transpose_naive.py  1024 1024)
+  add_spirv_benchmark(matmul_naive     matmul_naive.py     64)
+  add_spirv_benchmark(reduce_sum       reduce_sum.py       1024)
+  add_spirv_benchmark(transpose_smem   transpose_smem.py   1024 1024)
+  add_spirv_benchmark(matmul_smem      matmul_smem.py      64)
+
+  add_custom_target(check-spirv-examples
+    DEPENDS
+      check-spirv-vecadd
+      check-spirv-transpose_naive
+      check-spirv-matmul_naive
+      check-spirv-reduce_sum
+      check-spirv-transpose_smem
+      check-spirv-matmul_smem
+    COMMENT "Running all SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal)"
+  )
+  endif() # wgpu available
+
   # --- Wheel build + verification target ---
   add_custom_target(check-lego-wheel
     COMMAND ${CMAKE_COMMAND} -E env
@@ -618,6 +676,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   if(TARGET check-gpu-examples)
     add_dependencies(check-lego-all check-gpu-examples)
+  endif()
+  if(TARGET check-spirv-examples)
+    add_dependencies(check-lego-all check-spirv-examples)
   endif()
 endif()
 
