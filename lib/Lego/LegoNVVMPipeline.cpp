@@ -5,6 +5,8 @@
 /// Only the target-specific middle phase lives here (SetNVVMTargetPass +
 /// GPU→NVVM conversion).  The shared front and tail are in Passes.cpp.
 
+#ifdef LEGO_HAS_NVPTX
+
 #include "Lego/Passes.h"
 
 #include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
@@ -81,3 +83,5 @@ void buildLegoToNVVMPipeline(OpPassManager &pm,
 
 } // namespace lego
 } // namespace mlir
+
+#endif // LEGO_HAS_NVPTX

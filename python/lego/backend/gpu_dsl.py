@@ -23,9 +23,9 @@ import textwrap
 from dataclasses import dataclass
 from typing import Tuple
 
-from mlir.ir import InsertionPoint, F32Type
-from mlir.dialects import arith as arith_dialect
-from mlir.dialects import scf as scf_dialect
+from lego.mlir.ir import InsertionPoint, F32Type
+from lego.mlir.dialects import arith as arith_dialect
+from lego.mlir.dialects import scf as scf_dialect
 
 from lego.core import Row
 from lego.backend.compiler import DType
