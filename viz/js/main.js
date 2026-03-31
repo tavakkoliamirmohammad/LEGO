@@ -482,7 +482,7 @@ const COMPLETIONS = [
   { text: 'Row',      hint: 'Row(dim1, dim2, ...)' },
   { text: 'Col',      hint: 'Col(dim1, dim2, ...)' },
   { text: 'RegP',     hint: 'RegP((dims), (perm))' },
-  { text: 'GenP',     hint: 'GenP((dims), f_apply, f_inv)' },
+
   { text: 'GroupBy',  hint: 'GroupBy([(dim1, dim2)])' },
   { text: 'TileBy',   hint: 'TileBy([outer_dims], [tile_sizes])' },
 ];
@@ -502,7 +502,6 @@ const formulaOutput = document.getElementById('formula-output');
 // ============================================================================
 
 let currentPreset = 'row-major';
-let lastMapping = null;
 
 // ============================================================================
 // Autocomplete logic
@@ -1076,8 +1075,6 @@ async function runVisualization() {
     if (data.mapping && data.mapping.length > 0) {
       const tileDims = tileInfo || null;
       render(data, { tileDims });
-      lastMapping = data;
-
       if (formulaOutput) {
         const [M, N] = shape;
         let info = `${M}\u00d7${N} grid \u00b7 ${data.total} elements`;
@@ -1088,7 +1085,6 @@ async function runVisualization() {
       }
     }
 
-    // 5. Show compiler outputs
     // 5. Show compiler outputs
     for (const [id, key] of [
       ['mlir-lego', 'lego'],
