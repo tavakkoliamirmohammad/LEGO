@@ -146,6 +146,81 @@ jobs:
           path: build-artifacts.tar.gz
           retention-days: 1
 
+  # ── WASM Viz Build ──
+  # Builds the browser-side LEGO compiler (lego_driver.wasm).
+  # Artifacts can be deployed to GitHub Pages.
+  wasm-viz:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build lld ccache
+
+      - name: Set up ccache (native)
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: wasm-native
+          max-size: 2G
+
+      - name: Build native tblgen tools
+        run: |
+          cmake -G Ninja -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLEGO_MONOLITHIC_LLVM=ON \
+            -DLEGO_LLVM_TARGETS="X86" \
+            -DLLVM_USE_LINKER=lld \
+            -DLEGO_BUILD_TESTS=OFF \
+            -DMLIR_ENABLE_BINDINGS_PYTHON=OFF
+          cmake --build build --target mlir-tblgen llvm-tblgen llvm-min-tblgen -j$(nproc)
+
+      - name: Install Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 'latest'
+
+      - name: Set up ccache (wasm)
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: wasm-emscripten
+          max-size: 2G
+
+      - name: Configure WASM build
+        run: |
+          emcmake cmake -B build-wasm -G Ninja \
+            -DLEGO_MONOLITHIC_LLVM=ON \
+            -DLLVM_NATIVE_TOOL_DIR=$PWD/build/llvm-build/bin \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLEGO_BUILD_TESTS=OFF \
+            -Wno-dev
+
+      - name: Build WASM driver
+        run: cmake --build build-wasm --target lego_driver -j$(nproc)
+
+      - name: Verify output
+        run: |
+          ls -lh viz/wasm/lego_driver.js viz/wasm/lego_driver.wasm
+          echo "WASM size: $(du -h viz/wasm/lego_driver.wasm | cut -f1)"
+
+      - name: Upload viz site
+        uses: actions/upload-artifact@v4
+        with:
+          name: lego-studio
+          path: |
+            viz/index.html
+            viz/css/
+            viz/js/
+            viz/wasm/lego_driver.js
+            viz/wasm/lego_driver.wasm
+          retention-days: 30
+
   # ── Stage 2: Package wheels (runs after build) ──
   package:
     needs: build
