@@ -65,6 +65,29 @@ if(LEGO_MONOLITHIC_LLVM)
   endif()
 
   set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
+
+  # --- Emscripten cross-compilation ---
+  # Cross-compiling LLVM/MLIR to WebAssembly requires pre-built native
+  # tablegen tools (they run at build time to generate C++ from .td files).
+  if(EMSCRIPTEN)
+    if(NOT LLVM_NATIVE_TOOL_DIR)
+      message(FATAL_ERROR
+        "LLVM_NATIVE_TOOL_DIR is required for Emscripten cross-compilation.\n"
+        "Point it at the bin/ directory of a native LLVM/MLIR build, e.g.:\n"
+        "  -DLLVM_NATIVE_TOOL_DIR=${CMAKE_SOURCE_DIR}/build/llvm-build/bin")
+    endif()
+    # Only the WebAssembly backend is needed in the browser
+    set(LEGO_LLVM_TARGETS "WebAssembly" CACHE STRING "" FORCE)
+    # Disable features unavailable under Emscripten
+    set(LLVM_ENABLE_THREADS OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_TERMINFO OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_LIBXML2 OFF CACHE BOOL "" FORCE)
+    set(LLVM_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(LLVM_BUILD_UTILS OFF CACHE BOOL "" FORCE)
+  endif()
+
   set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
 
   # LEGO_ENABLE_RUNNERS is auto-detected below; if the user sets it
@@ -76,6 +99,8 @@ if(LEGO_MONOLITHIC_LLVM)
   # Minimal LLVM/MLIR build: disable components LEGO does not need
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
+  set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
+  set(LLVM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_BINDINGS OFF CACHE BOOL "" FORCE)
   if(NOT EMSCRIPTEN)
     set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "" FORCE)
@@ -214,7 +239,13 @@ if("${LLVM_TARGETS_TO_BUILD}" MATCHES "WebAssembly")
   message(STATUS "WebAssembly backend enabled — WASM cross-compilation available")
 endif()
 
-set(MLIR_TABLEGEN_EXE mlir-tblgen)
+# For cross-compilation, use the native tablegen from LLVM_NATIVE_TOOL_DIR;
+# for native builds, use the CMake target built by add_subdirectory.
+if(EMSCRIPTEN AND LLVM_NATIVE_TOOL_DIR)
+  set(MLIR_TABLEGEN_EXE "${LLVM_NATIVE_TOOL_DIR}/mlir-tblgen")
+else()
+  set(MLIR_TABLEGEN_EXE mlir-tblgen)
+endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_BINARY_DIR}/include)
@@ -223,7 +254,9 @@ add_subdirectory(include/Lego)
 add_subdirectory(lib/Lego)
 
 if(EMSCRIPTEN)
-  # WASM build: only build the driver, skip lego-opt/Python/tests
+  # WASM build: only build the driver, skip lego-opt/Python/tests.
+  # The resulting lego_driver.js + lego_driver.wasm contain the full
+  # LEGO compiler with IR printing at every pipeline stage.
   add_executable(lego_driver viz/wasm/lego_driver.cpp)
   target_link_libraries(lego_driver PRIVATE MLIRLego)
   set_target_properties(lego_driver PROPERTIES SUFFIX ".js")
@@ -232,9 +265,12 @@ if(EMSCRIPTEN)
     "SHELL:-s EXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','stringToUTF8','lengthBytesUTF8']"
     "SHELL:-s ALLOW_MEMORY_GROWTH=1"
     "SHELL:-s INITIAL_MEMORY=67108864"
+    "SHELL:-s STACK_SIZE=4194304"
     "SHELL:-s MODULARIZE=1"
     "SHELL:-s EXPORT_NAME='LEGOCompiler'"
     "SHELL:-s ENVIRONMENT='web'"
+    "SHELL:-s FILESYSTEM=0"
+    "SHELL:-s DISABLE_EXCEPTION_CATCHING=1"
     -O2
   )
   add_custom_command(TARGET lego_driver POST_BUILD
@@ -577,54 +613,11 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
 endif()
 
-# --- WASM Viz Driver (Emscripten) ---
-# Builds the full LEGO/MLIR compiler as a WebAssembly module for
-# browser-based layout visualization with IR output.
+# --- WASM Viz Driver ---
+# The WASM driver is built via Emscripten cross-compilation in a separate
+# build directory.  See build_wasm.sh for the automated workflow:
 #
-# To build: cmake --build . --target lego-viz-wasm
-# Requires Emscripten (emcc) in PATH.
-find_program(EMCC_BIN emcc)
-if(EMCC_BIN)
-  set(WASM_DRIVER_SRC "${CMAKE_SOURCE_DIR}/viz/wasm/lego_driver.cpp")
-  set(WASM_OUT_DIR "${CMAKE_SOURCE_DIR}/viz/wasm")
-  set(WASM_OUT_JS "${WASM_OUT_DIR}/lego_driver.js")
-
-  # Collect include paths and library paths from the current build
-  set(WASM_INCLUDES
-    "-I${CMAKE_SOURCE_DIR}/include"
-    "-I${CMAKE_BINARY_DIR}/include"
-    "-I${LLVM_INCLUDE_DIRS}"
-    "-I${MLIR_INCLUDE_DIRS}"
-  )
-
-  add_custom_command(
-    OUTPUT ${WASM_OUT_JS}
-    COMMAND ${EMCC_BIN}
-      ${WASM_DRIVER_SRC}
-      ${WASM_INCLUDES}
-      -L${CMAKE_BINARY_DIR}/lib
-      -lMLIRLego
-      -lMLIRParser -lMLIRPass -lMLIRTransforms
-      -lMLIRArithDialect -lMLIRFuncDialect -lMLIRSCFDialect
-      -lMLIRMemRefDialect -lMLIRIndexDialect
-      -lMLIRControlFlowDialect -lMLIRLLVMDialect
-      -lMLIRIR -lMLIRSupport -lLLVMSupport
-      -s EXPORTED_FUNCTIONS="['_lego_compile','_lego_free','_malloc','_free']"
-      -s EXPORTED_RUNTIME_METHODS="['ccall','cwrap','UTF8ToString','stringToUTF8','lengthBytesUTF8']"
-      -s ALLOW_MEMORY_GROWTH=1
-      -s INITIAL_MEMORY=67108864
-      -s MODULARIZE=1
-      -s EXPORT_NAME='LEGOCompiler'
-      -s ENVIRONMENT='web'
-      -O2
-      -o ${WASM_OUT_JS}
-    DEPENDS ${WASM_DRIVER_SRC} MLIRLego
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-    COMMENT "Building LEGO WASM driver (Emscripten)"
-  )
-
-  add_custom_target(lego-viz-wasm DEPENDS ${WASM_OUT_JS})
-  message(STATUS "Emscripten found — 'lego-viz-wasm' target available")
-else()
-  message(STATUS "Emscripten not found — 'lego-viz-wasm' target not available")
-endif()
+#   ./build_wasm.sh
+#
+# This produces viz/wasm/lego_driver.js + viz/wasm/lego_driver.wasm
+# containing the full LEGO compiler with IR printing support.

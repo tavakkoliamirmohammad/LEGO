@@ -63,7 +63,7 @@ struct SerializeWasmPass
     }
 
     // 2. Look up the wasm32 target
-    std::string triple = "wasm32-unknown-unknown";
+    llvm::Triple triple("wasm32-unknown-unknown");
     llvmModule->setTargetTriple(triple);
 
     std::string error;
@@ -134,8 +134,7 @@ struct SerializeWasmPass
 namespace mlir {
 namespace lego {
 
-void buildLegoToWasmPipeline(OpPassManager &pm,
-                              const LegoToWasmPipelineOptions &options) {
+void buildLegoToWasmPipelineImpl(OpPassManager &pm, int optLevel) {
   // Phase 1: Lower LEGO ops to arith (shared with all backends).
   buildLegoLowerPipeline(pm);
 
@@ -151,7 +150,16 @@ void buildLegoToWasmPipeline(OpPassManager &pm,
   pm.addPass(createCSEPass());
 
   // Phase 3: Translate LLVM dialect to WASM binary.
-  pm.addPass(std::make_unique<SerializeWasmPass>(options.optLevel));
+  pm.addPass(std::make_unique<SerializeWasmPass>(optLevel));
+}
+
+void buildLegoToWasmPipeline(OpPassManager &pm,
+                              const LegoToWasmPipelineOptions &options) {
+  buildLegoToWasmPipelineImpl(pm, options.optLevel);
+}
+
+void buildLegoToWasmPipeline(OpPassManager &pm, int optLevel) {
+  buildLegoToWasmPipelineImpl(pm, optLevel);
 }
 
 } // namespace lego

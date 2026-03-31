@@ -1,15 +1,11 @@
 /// LEGO WASM Driver — runs the full MLIR/LEGO compiler in the browser.
 ///
 /// Exposes C functions callable from JavaScript:
-///   - lego_compile(mlir_text) -> JSON with IR at each stage + wasm blob
+///   - lego_compile(mlir_text, M, N) -> JSON with IR + mapping
 ///   - lego_free(ptr) -> free returned memory
 ///
-/// For each layout, returns:
-///   1. LEGO dialect IR (after canonicalize + CSE)
-///   2. Arith IR (after lego-lower)
-///   3. LLVM IR (after lego-to-llvm)
-///   4. WASM binary blob (after lego-to-wasm) — browser instantiates this
-///      and calls apply(i,j) to compute the mapping
+/// After lowering to arith, evaluates @apply(i,j) for all (i,j) in
+/// [0,M)×[0,N) and returns the complete mapping alongside the IR.
 ///
 /// Compiled with Emscripten to produce lego_driver.js + lego_driver.wasm.
 
@@ -18,6 +14,7 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -28,10 +25,13 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/ADT/DenseMap.h"
 
 #include <string>
 #include <cstring>
-#include <vector>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
@@ -58,7 +58,12 @@ static MLIRContext *getGlobalContext() {
     ctx->loadDialect<index::IndexDialect>();
     ctx->loadDialect<cf::ControlFlowDialect>();
     ctx->loadDialect<LLVM::LLVMDialect>();
-    lego::registerLegoPipelines();
+    registerBuiltinDialectTranslation(*ctx);
+    registerLLVMDialectTranslation(*ctx);
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmPrinters();
+    llvm::InitializeAllTargetInfos();
   }
   return ctx;
 }
@@ -97,64 +102,73 @@ static char *toCString(const std::string &s) {
   return buf;
 }
 
-/// Base64 encode binary data for JSON transport.
-static std::string base64Encode(const uint8_t *data, size_t len) {
-  static const char table[] =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string result;
-  result.reserve(((len + 2) / 3) * 4);
-  for (size_t i = 0; i < len; i += 3) {
-    uint32_t n = ((uint32_t)data[i]) << 16;
-    if (i + 1 < len) n |= ((uint32_t)data[i + 1]) << 8;
-    if (i + 2 < len) n |= data[i + 2];
-    result += table[(n >> 18) & 0x3F];
-    result += table[(n >> 12) & 0x3F];
-    result += (i + 1 < len) ? table[(n >> 6) & 0x3F] : '=';
-    result += (i + 2 < len) ? table[n & 0x3F] : '=';
+// ============================================================================
+// Arith evaluator — run the lowered @apply for concrete (i,j)
+// ============================================================================
+
+static int64_t evalArith(func::FuncOp func, int64_t i, int64_t j) {
+  llvm::DenseMap<Value, int64_t> v;
+  auto &entry = func.getBody().front();
+  v[entry.getArgument(0)] = i;
+  if (entry.getNumArguments() > 1)
+    v[entry.getArgument(1)] = j;
+
+  for (auto &op : entry.without_terminator()) {
+    if (auto c = dyn_cast<arith::ConstantOp>(op))
+      v[c.getResult()] = cast<IntegerAttr>(c.getValue()).getInt();
+    else if (auto o = dyn_cast<arith::AddIOp>(op))
+      v[o.getResult()] = v[o.getLhs()] + v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::SubIOp>(op))
+      v[o.getResult()] = v[o.getLhs()] - v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::MulIOp>(op))
+      v[o.getResult()] = v[o.getLhs()] * v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::DivUIOp>(op))
+      v[o.getResult()] = (uint64_t)v[o.getLhs()] / (uint64_t)v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::RemUIOp>(op))
+      v[o.getResult()] = (uint64_t)v[o.getLhs()] % (uint64_t)v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::ShLIOp>(op))
+      v[o.getResult()] = v[o.getLhs()] << v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::ShRUIOp>(op))
+      v[o.getResult()] = (uint64_t)v[o.getLhs()] >> v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::ShRSIOp>(op))
+      v[o.getResult()] = v[o.getLhs()] >> v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::AndIOp>(op))
+      v[o.getResult()] = v[o.getLhs()] & v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::OrIOp>(op))
+      v[o.getResult()] = v[o.getLhs()] | v[o.getRhs()];
+    else if (auto o = dyn_cast<arith::XOrIOp>(op))
+      v[o.getResult()] = v[o.getLhs()] ^ v[o.getRhs()];
+    else if (isa<arith::ExtUIOp, arith::ExtSIOp, arith::TruncIOp,
+                 arith::IndexCastOp, arith::IndexCastUIOp>(op))
+      v[op.getResult(0)] = v[op.getOperand(0)];
   }
-  return result;
+
+  auto ret = cast<func::ReturnOp>(entry.getTerminator());
+  return v[ret.getOperand(0)];
 }
 
 // ============================================================================
-// Exported: compile MLIR text through all pipeline stages
+// Exported: compile MLIR + compute mapping
 // ============================================================================
 
-/// Compile MLIR text and return IR at each pipeline stage + WASM blob.
-///
-/// Returns a JSON string:
-/// {
-///   "lego": "...",        // LEGO dialect IR
-///   "arith": "...",       // After lego-lower
-///   "llvm": "...",        // After lego-to-llvm
-///   "wasm_b64": "...",    // Base64-encoded WASM binary (if lego-to-wasm succeeded)
-///   "error": "..."        // Only present on failure
-/// }
-///
-/// Caller must free() the returned pointer via lego_free().
 extern "C" EXPORT
-char *lego_compile(const char *mlir_text) {
+char *lego_compile(const char *mlir_text, int M, int N) {
   auto *ctx = getGlobalContext();
 
   auto moduleRef = parseSourceString<ModuleOp>(mlir_text, ctx);
-  if (!moduleRef) {
+  if (!moduleRef)
     return toCString("{\"error\": \"Failed to parse MLIR\"}");
-  }
 
-  // Clone for each stage (passes mutate in place)
   auto cloneLower = moduleRef->clone();
   auto cloneLLVM = moduleRef->clone();
-#ifdef LEGO_HAS_WASM
-  auto cloneWasm = moduleRef->clone();
-#endif
 
   // Stage 1: LEGO dialect after canonicalize + CSE
   {
     PassManager pm(ctx);
     pm.addPass(createCanonicalizerPass());
     pm.addPass(createCSEPass());
-    if (failed(pm.run(*moduleRef))) {
+    if (failed(pm.run(*moduleRef)))
       return toCString("{\"error\": \"canonicalize+cse failed\"}");
-    }
   }
   std::string legoIR = moduleToString(moduleRef->getOperation());
 
@@ -162,46 +176,52 @@ char *lego_compile(const char *mlir_text) {
   {
     PassManager pm(ctx);
     lego::buildLegoLowerPipeline(pm);
-    if (failed(pm.run(cloneLower))) {
+    if (failed(pm.run(cloneLower)))
       return toCString("{\"error\": \"lego-lower failed\"}");
-    }
   }
   std::string arithIR = moduleToString(cloneLower.getOperation());
+
+  // Evaluate apply(i,j) for all (i,j) in [0,M)×[0,N)
+  std::string mappingJSON;
+  if (M > 0 && N > 0) {
+    auto fn = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+        cloneLower.getOperation(), StringAttr::get(ctx, "apply"));
+    if (fn) {
+      mappingJSON.reserve(M * N * 16);
+      mappingJSON = "[";
+      for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+          if (i || j) mappingJSON += ',';
+          mappingJSON += '[';
+          mappingJSON += std::to_string(i);
+          mappingJSON += ',';
+          mappingJSON += std::to_string(j);
+          mappingJSON += ',';
+          mappingJSON += std::to_string(evalArith(fn, i, j));
+          mappingJSON += ']';
+        }
+      }
+      mappingJSON += ']';
+    }
+  }
 
   // Stage 3: After lego-to-llvm
   {
     PassManager pm(ctx);
     lego::buildLegoToLLVMPipeline(pm);
-    if (failed(pm.run(cloneLLVM))) {
+    if (failed(pm.run(cloneLLVM)))
       return toCString("{\"error\": \"lego-to-llvm failed\"}");
-    }
   }
   std::string llvmIR = moduleToString(cloneLLVM.getOperation());
 
-  // Stage 4: lego-to-wasm (produces binary blob)
-  std::string wasmB64;
-#ifdef LEGO_HAS_WASM
-  {
-    PassManager pm(ctx);
-    lego::buildLegoToWasmPipeline(pm, lego::LegoToWasmPipelineOptions{});
-    if (!failed(pm.run(cloneWasm))) {
-      // Extract base64-encoded WASM binary from module attribute
-      if (auto attr = cloneWasm.getOperation()->getAttrOfType<StringAttr>(
-              "lego.wasm_binary")) {
-        wasmB64 = attr.getValue().str();
-      }
-    }
-  }
-  cloneWasm.getOperation()->erase();
-#endif
-
-  // Build JSON response
+  // JSON response
   std::string json = "{";
-  json += "\"lego\": \"" + escapeJSON(legoIR) + "\", ";
-  json += "\"arith\": \"" + escapeJSON(arithIR) + "\", ";
-  json += "\"llvm\": \"" + escapeJSON(llvmIR) + "\"";
-  if (!wasmB64.empty()) {
-    json += ", \"wasm_b64\": \"" + wasmB64 + "\"";
+  json += "\"lego\":\"" + escapeJSON(legoIR) + "\",";
+  json += "\"arith\":\"" + escapeJSON(arithIR) + "\",";
+  json += "\"llvm\":\"" + escapeJSON(llvmIR) + "\"";
+  if (!mappingJSON.empty()) {
+    json += ",\"mapping\":" + mappingJSON;
+    json += ",\"shape\":[" + std::to_string(M) + "," + std::to_string(N) + "]";
   }
   json += "}";
 
@@ -211,7 +231,6 @@ char *lego_compile(const char *mlir_text) {
   return toCString(json);
 }
 
-/// Free a string returned by lego_compile.
 extern "C" EXPORT
 void lego_free(char *ptr) {
   free(ptr);

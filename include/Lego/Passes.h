@@ -131,6 +131,8 @@ void buildLegoToROCDLPipeline(OpPassManager &pm,
 #ifdef LEGO_HAS_WASM
 void buildLegoToWasmPipeline(OpPassManager &pm,
                               const LegoToWasmPipelineOptions &options);
+/// Overload without PassPipelineOptions (avoids RTTI issues in WASM builds).
+void buildLegoToWasmPipeline(OpPassManager &pm, int optLevel = 2);
 #endif
 
 // =========================================================================

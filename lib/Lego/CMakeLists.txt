@@ -68,6 +68,23 @@ if(LEGO_HAS_WASM)
   )
 endif()
 
+# LLVM target components (must use LINK_COMPONENTS, not LINK_LIBS)
+set(_LLVM_COMPONENTS)
+if(LEGO_HAS_WASM)
+  list(APPEND _LLVM_COMPONENTS
+    WebAssemblyCodeGen WebAssemblyAsmParser WebAssemblyDesc WebAssemblyInfo
+  )
+endif()
+
+# --- JIT engine (unavailable under Emscripten — requires dlopen/libffi) ---
+if(NOT EMSCRIPTEN)
+  set(_JIT_SOURCES LegoJITEngine.cpp)
+  set(_JIT_LIBS MLIRExecutionEngine)
+else()
+  set(_JIT_SOURCES)
+  set(_JIT_LIBS)
+endif()
+
 # --- Core dialect library ---
 add_mlir_dialect_library(MLIRLego
   PARTIAL_SOURCES_INTENDED
@@ -87,8 +104,8 @@ add_mlir_dialect_library(MLIRLego
   LegoVerifyCoalescing.cpp
   LegoVerifyBankConflicts.cpp
   SMTUtils.cpp
-  # JIT
-  LegoJITEngine.cpp
+  # JIT (excluded for Emscripten)
+  ${_JIT_SOURCES}
   # GPU backends (conditional)
   ${_GPU_BACKEND_SOURCES}
 
@@ -112,8 +129,9 @@ add_mlir_dialect_library(MLIRLego
   MLIRSCFToControlFlow
   MLIRControlFlowDialect
   MLIRLLVMDialect
-  # JIT engine
-  MLIRExecutionEngine
+  # JIT engine (excluded for Emscripten)
+  ${_JIT_LIBS}
+  # IR translation (needed by both JIT and WASM pipeline)
   MLIRTargetLLVMIRExport
   MLIRLLVMToLLVMIRTranslation
   MLIRBuiltinToLLVMIRTranslation
@@ -138,6 +156,9 @@ add_mlir_dialect_library(MLIRLego
   ${_GPU_BACKEND_LIBS}
   # Index to LLVM (needed for GPU host lowering)
   MLIRIndexToLLVM
+
+  LINK_COMPONENTS
+  ${_LLVM_COMPONENTS}
 )
 
 add_subdirectory(CAPI)

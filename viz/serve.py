@@ -1,243 +1,53 @@
 #!/usr/bin/env python3
-"""
-LEGO Layout Visualizer — local development server.
+"""Simple static file server for the LEGO Layout Visualizer.
 
-Endpoints:
-  GET  /           — serves the static visualization app
-  POST /compile    — compiles a layout to WASM or returns JSON mapping
+The compiler runs entirely in the browser via WebAssembly — no Python
+compilation backend is needed.  This server just serves static files
+with the correct MIME types for .wasm and .js.
 
 Usage:
-  python viz/serve.py                    # default port 8080
-  python viz/serve.py --port 3000        # custom port
-
-Requires: PYTHONPATH set to include python/ (for lego imports).
+    python viz/serve.py [--port PORT]
+    # Then open http://localhost:8080
 """
 
 import argparse
-import json
+import http.server
+import functools
 import os
-import sys
-import traceback
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse
 
-# Add the LEGO build python packages to path (has compiled MLIR bindings).
-# Then sync any new source modules (like wasm.py) from the source tree
-# into the build tree so they're importable alongside the MLIR bindings.
-LEGO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_build_pkg = os.path.join(LEGO_ROOT, "build", "python_packages", "lego")
-_src_pkg = os.path.join(LEGO_ROOT, "python")
+class WasmHandler(http.server.SimpleHTTPRequestHandler):
+    """Adds WASM MIME type and CORS headers for local development."""
 
-if os.path.isdir(_build_pkg):
-    # Sync new/changed source files into build tree
-    import shutil
-    _src_wasm = os.path.join(_src_pkg, "lego", "backend", "wasm.py")
-    _dst_wasm = os.path.join(_build_pkg, "lego", "backend", "wasm.py")
-    if os.path.exists(_src_wasm):
-        shutil.copy2(_src_wasm, _dst_wasm)
-    sys.path.insert(0, _build_pkg)
-else:
-    sys.path.insert(0, _src_pkg)
-
-
-def _extract_tile_info(layout, shape):
-    """Extract tile dimensions from a layout object, if it's a tiled layout."""
-    from lego.core import TileByLayout
-    if not isinstance(layout, TileByLayout):
-        return None
-
-    try:
-        tile_groups = layout._tile_groups
-        if not tile_groups or len(tile_groups) < 2:
-            return None
-
-        # tile_groups[0] = outer dims (tile counts), tile_groups[1] = inner dims (tile sizes)
-        inner = tile_groups[-1]  # last group is tile sizes
-        tile_sizes = [int(d) for d in inner]
-        # Pad to match shape rank
-        while len(tile_sizes) < len(shape):
-            tile_sizes.append(1)
-        return tile_sizes[:len(shape)]
-    except Exception:
-        return None
-
-
-def _compile_layout(code):
-    """Execute user layout code and compile to mapping JSON.
-
-    The user code must define M, N (grid dimensions) and L (layout).
-    All variables are user-defined in the editor.
-
-    Returns a dict with {mapping, shape, total} ready for JSON serialization.
-    """
-    import sympy as sp
-    from lego.core import OrderBy, Row, Col, RegP, GenP, GroupBy, TileByLayout
-
-    # Build namespace with LEGO primitives only
-    namespace = {
-        "OrderBy": OrderBy,
-        "Row": Row,
-        "Col": Col,
-        "RegP": RegP,
-        "GenP": GenP,
-        "GroupBy": GroupBy,
-        "sp": sp,
+    extensions_map = {
+        **http.server.SimpleHTTPRequestHandler.extensions_map,
+        '.wasm': 'application/wasm',
+        '.mjs': 'application/javascript',
     }
 
-    # Execute user code — user defines M, N, L, and any other variables
-    exec(code, namespace)
-
-    layout = namespace.get("L")
-    if layout is None:
-        raise ValueError(
-            "Layout not found. Your code must assign to a variable named 'L'.\n"
-            "Example:\n  M, N = 8, 8\n  L = OrderBy(Row(M, N)).GroupBy([(M, N)])"
-        )
-
-    M = namespace.get("M")
-    N = namespace.get("N")
-
-    # If M/N not defined, return compiler panels only (no 2D visualization)
-    if M is None or N is None:
-        from lego.backend.wasm import compile_ir_only
-        result = compile_ir_only(layout)
-        result["type"] = "ir_only"
-        return result
-
-    shape = (int(M), int(N))
-
-    # Extract tile info from the layout object
-    tile_info = _extract_tile_info(layout, shape)
-
-    # Try WASM compilation first, fall back to JIT-based JSON mapping
-    try:
-        from lego.backend.wasm import compile_to_wasm
-        wasm_bytes = compile_to_wasm(layout, shape)
-        return {"type": "wasm", "data": wasm_bytes, "tile_info": tile_info}
-    except Exception:
-        pass
-
-    # Fallback: compute mapping via MLIR JIT
-    try:
-        from lego.backend.wasm import compile_mapping_json
-        result = compile_mapping_json(layout, shape)
-        result["type"] = "json"
-        result["tile_info"] = tile_info
-        return result
-    except Exception as e:
-        # Try symbolic fallback, but preserve the real error
-        jit_error = str(e)
-        try:
-            return _eval_symbolic(layout, shape)
-        except Exception:
-            # Surface the original JIT error with helpful context
-            raise ValueError(
-                f"Layout compilation failed: {jit_error}\n\n"
-                f"TileBy syntax: L = OrderBy(Row(M, N)).TileBy([M//BM, N//BN], [BM, BN])\n"
-                f"GroupBy syntax: L = OrderBy(Row(M, N)).GroupBy([(M, N)])"
-            ) from None
-
-
-def _eval_symbolic(layout, shape):
-    """Pure symbolic evaluation fallback — no MLIR needed for simple layouts."""
-    import sympy as sp
-
-    mapping = []
-    total = 1
-    for s in shape:
-        total *= int(s)
-
-    if len(shape) == 2:
-        M, N = int(shape[0]), int(shape[1])
-        syms = sp.symbols("i j", integer=True)
-        try:
-            expr = layout.apply(*syms)
-            for i in range(M):
-                for j in range(N):
-                    flat = int(expr.subs({syms[0]: i, syms[1]: j}))
-                    mapping.append([i, j, flat])
-            return {"type": "json", "mapping": mapping, "shape": list(shape), "total": total}
-        except Exception:
-            pass
-
-    raise ValueError("Could not evaluate layout. Ensure MLIR is built.")
-
-
-class VizHandler(SimpleHTTPRequestHandler):
-    """HTTP handler that serves static files and the /compile API."""
-
-    def __init__(self, *args, **kwargs):
-        # Serve files from the viz/ directory
-        super().__init__(*args, directory=os.path.dirname(os.path.abspath(__file__)), **kwargs)
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path == "/compile":
-            self._handle_compile()
-        else:
-            self.send_error(404, "Not Found")
-
-    def _handle_compile(self):
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-
-            code = body["code"]
-
-            result = _compile_layout(code)
-
-            if result["type"] == "wasm":
-                self.send_response(200)
-                self.send_header("Content-Type", "application/wasm")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(result["data"])
-            else:
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(json.dumps(result).encode())
-
-        except Exception as e:
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "error": str(e),
-                "traceback": traceback.format_exc(),
-            }).encode())
-
-    def do_OPTIONS(self):
-        """Handle CORS preflight."""
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-
-    def log_message(self, format, *args):
-        """Quieter logging — skip static file requests."""
-        if "POST" in str(args):
-            super().log_message(format, *args)
+    def end_headers(self):
+        self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
+        self.send_header('Cross-Origin-Embedder-Policy', 'require-corp')
+        super().end_headers()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LEGO Layout Visualizer")
-    parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--host", default="localhost")
+    parser = argparse.ArgumentParser(description='LEGO Viz static server')
+    parser.add_argument('--port', type=int, default=8080)
     args = parser.parse_args()
 
-    server = HTTPServer((args.host, args.port), VizHandler)
-    print(f"LEGO Visualizer: http://{args.host}:{args.port}")
-    print("Press Ctrl+C to stop.")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopped.")
-        server.server_close()
+    viz_dir = os.path.dirname(os.path.abspath(__file__))
+    handler = functools.partial(WasmHandler, directory=viz_dir)
+
+    with http.server.HTTPServer(('', args.port), handler) as httpd:
+        print(f'Serving LEGO Visualizer at http://localhost:{args.port}')
+        print(f'  Static files: {viz_dir}')
+        print(f'  WASM compiler: wasm/lego_driver.wasm')
+        print('Press Ctrl+C to stop.')
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print('\nShutting down.')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

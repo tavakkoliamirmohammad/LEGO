@@ -47,10 +47,6 @@ L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
     <!-- Right: Compiler Output -->
     <div id="compiler-panel">
       <div class="compiler-section">
-        <h3>Symbolic</h3>
-        <pre id="symbolic-output"></pre>
-      </div>
-      <div class="compiler-section">
         <h3>LEGO Dialect</h3>
         <pre id="mlir-lego"></pre>
       </div>
@@ -65,6 +61,8 @@ L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
     </div>
   </main>
 
+  <!-- WASM compiler (Emscripten module — must load before main.js) -->
+  <script src="wasm/lego_driver.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>
 </html>
