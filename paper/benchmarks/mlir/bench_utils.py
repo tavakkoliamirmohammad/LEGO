@@ -194,10 +194,9 @@ def run_transpose_benchmark(builder, layouts, N, targets, extra_verify=None):
     init = (np.arange(N * N, dtype=np.int32) * 37 + 17) % 10000
     expected = init.reshape(N, N).T.ravel()
     run_cuda_verify(builder, expected, label=f"{N}x{N}")
-    if "vulkan" in targets:
-        run_vulkan_verify(builder, expected, label=f"{N}x{N}")
-    if "webgpu" in targets:
-        run_webgpu_verify(builder, expected, label=f"{N}x{N}")
+    for t in ("vulkan", "webgpu", "metal"):
+        if t in targets:
+            run_gpu_verify(builder, expected, t, label=f"{N}x{N}")
 
 
 def run_cuda_verify(builder, expected, label=None, atol=0, rtol=0, init_mod=10000):
@@ -300,172 +299,217 @@ def _init_data(n, init_mod=10000):
     return ((np.arange(n, dtype=np.int32) * 37 + 17) % init_mod).astype(np.float32)
 
 
-def _parse_spirv_launch(mlir):
-    """Parse bindings and grid dimensions from lowered SPIR-V MLIR.
 
-    Returns (bindings, grid) where bindings is a list of ("const", value)
-    or ("data", buf_index) in the order they appear in gpu.launch_func args,
-    and grid is [x, y, z] workgroup counts.
-    """
-    bindings = []
-    args_match = re.search(r'args\((.+)\)', mlir)
-    if args_match:
-        buf_idx = 0
-        for m in re.finditer(r'(%c(\d+)\s*:\s*index|%arg\d+\s*:\s*memref)',
-                             args_match.group(1)):
-            if m.group(0).startswith('%c'):
-                bindings.append(("const", int(m.group(2))))
-            else:
-                bindings.append(("data", buf_idx))
-                buf_idx += 1
-
-    grid = [1, 1, 1]
-    blocks_match = re.search(r'blocks in \(([^)]+)\)', mlir)
-    if blocks_match:
-        for i, part in enumerate(blocks_match.group(1).split(',')):
-            m = re.match(r'\s*%c(\d+)', part.strip())
-            if m:
-                grid[i] = int(m.group(1))
-
-    return bindings, grid
+def _make_binding_array(kind, val):
+    """Convert a single binding descriptor to a numpy array."""
+    if kind == "const_int":
+        return np.array([val], dtype=np.uint32)
+    elif kind == "const_float":
+        return np.array([val], dtype=np.float32)
+    else:
+        raise ValueError(f"Unknown binding kind: {kind}")
 
 
-def _run_wgpu_dispatch(builder, expected, label, target_name,
-                       shader_code, entry_point, bindings, grid, atol=0, rtol=0):
-    """Shared wgpu dispatch: create buffers, run kernel, verify output."""
+def _prepare_data_arrays(builder, init_mod=10000):
+    """Create input/output numpy arrays for a kernel's global buffers."""
+    global_bufs = builder._global_bufs
+    last = len(global_bufs) - 1
+    arrays = {}
+    for j, gbuf in enumerate(global_bufs):
+        if j < last:
+            arrays[j] = _init_data(gbuf.numel, init_mod=init_mod)
+        else:
+            arrays[j] = np.zeros(gbuf.numel, dtype=np.float32)
+    return arrays, last
+
+
+def _compare_output(out_data, expected, atol, rtol):
+    """Compare GPU output to expected. Returns (ok, max_err)."""
+    if atol > 0 or rtol > 0:
+        expected_f = expected.astype(np.float32) if hasattr(expected, 'astype') \
+            else np.array(expected, dtype=np.float32)
+        ok = np.allclose(out_data, expected_f, atol=atol, rtol=rtol)
+        max_err = float(np.max(np.abs(out_data - expected_f)))
+    else:
+        gpu_int = out_data.astype(np.int32)
+        ok = np.array_equal(gpu_int, expected)
+        max_err = int(np.max(np.abs(gpu_int - expected)))
+    return ok, max_err
+
+
+def _dispatch_wgpu(builder, shader_code, entry_point, metadata, init_mod):
+    """Dispatch via wgpu (Vulkan or WebGPU). Returns (out_data, gpu_info) or raises."""
     import wgpu
 
-    try:
-        adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
-        device = adapter.request_device_sync()
-    except Exception as e:
-        print(f"  {target_name} execution: SKIP (no GPU adapter: {e})",
-              file=sys.stderr)
-        return None
+    adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
+    device = adapter.request_device_sync()
 
-    try:
-        shader = device.create_shader_module(code=shader_code)
-        pipeline = device.create_compute_pipeline(
-            layout="auto",
-            compute={"module": shader, "entry_point": entry_point})
+    shader = device.create_shader_module(code=shader_code)
+    pipeline = device.create_compute_pipeline(
+        layout="auto", compute={"module": shader, "entry_point": entry_point})
 
-        # Allocate data buffers (input: pseudo-random, output: zeros+readable)
-        global_bufs = builder._global_bufs
-        last_data = len(global_bufs) - 1
-        data_bufs = {}
-        for j, gbuf in enumerate(global_bufs):
-            n = gbuf.numel
-            if j < last_data:
-                data_bufs[j] = device.create_buffer_with_data(
-                    data=_init_data(n), usage=wgpu.BufferUsage.STORAGE)
-            else:
-                data_bufs[j] = device.create_buffer(
-                    size=n * 4,
-                    usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC)
+    bindings = metadata["bindings"]
+    grid = metadata["grid"]
+    data_arrays, last = _prepare_data_arrays(builder, init_mod)
 
-        # Build binding entries in MLIR arg order (interleaved consts + data)
-        entries = []
-        for i, (kind, val) in enumerate(bindings):
-            if kind == "const":
-                buf = device.create_buffer_with_data(
-                    data=np.array([val], dtype=np.uint32),
-                    usage=wgpu.BufferUsage.STORAGE)
-            else:
-                buf = data_bufs[val]
-            entries.append({"binding": i, "resource": {"buffer": buf}})
-
-        bind_group = device.create_bind_group(
-            layout=pipeline.get_bind_group_layout(0), entries=entries)
-
-        enc = device.create_command_encoder()
-        p = enc.begin_compute_pass()
-        p.set_pipeline(pipeline)
-        p.set_bind_group(0, bind_group)
-        p.dispatch_workgroups(*grid)
-        p.end()
-        device.queue.submit([enc.finish()])
-
-        # Read back and compare
-        out_data = np.frombuffer(
-            device.queue.read_buffer(data_bufs[last_data]).cast("f"),
-            dtype=np.float32)
-        if atol > 0 or rtol > 0:
-            gpu_values = out_data
-            expected_f = expected.astype(np.float32) if hasattr(expected, 'astype') else np.array(expected, dtype=np.float32)
-            ok = np.allclose(gpu_values, expected_f, atol=atol, rtol=rtol)
-            max_err = float(np.max(np.abs(gpu_values - expected_f)))
+    # Build wgpu buffers (data + constants interleaved per binding order)
+    data_bufs = {}
+    for j in data_arrays:
+        if j < last:
+            data_bufs[j] = device.create_buffer_with_data(
+                data=data_arrays[j], usage=wgpu.BufferUsage.STORAGE)
         else:
-            gpu_values = out_data.astype(np.int32)
-            ok = np.array_equal(gpu_values, expected)
-            max_err = int(np.max(np.abs(gpu_values - expected)))
-        tag = f" ({label})" if label else ""
-        gpu_info = f"{adapter.info['device']}, {adapter.info['backend_type']}"
-        print(f"  {target_name} execution{tag}: {'PASS' if ok else 'FAIL'} "
-              f"— {len(expected)} elements, max error={max_err} [{gpu_info}]",
-              file=sys.stderr)
-        return ok
+            data_bufs[j] = device.create_buffer(
+                size=data_arrays[j].nbytes,
+                usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC)
+
+    entries = []
+    for i, (kind, val) in enumerate(bindings):
+        if kind == "data":
+            buf = data_bufs[val]
+        else:
+            buf = device.create_buffer_with_data(
+                data=_make_binding_array(kind, val), usage=wgpu.BufferUsage.STORAGE)
+        entries.append({"binding": i, "resource": {"buffer": buf}})
+
+    bind_group = device.create_bind_group(
+        layout=pipeline.get_bind_group_layout(0), entries=entries)
+
+    enc = device.create_command_encoder()
+    p = enc.begin_compute_pass()
+    p.set_pipeline(pipeline)
+    p.set_bind_group(0, bind_group)
+    p.dispatch_workgroups(*grid)
+    p.end()
+    device.queue.submit([enc.finish()])
+
+    out_data = np.frombuffer(
+        device.queue.read_buffer(data_bufs[last]).cast("f"), dtype=np.float32)
+    gpu_info = f"{adapter.info['device']}, {adapter.info['backend_type']}"
+    return out_data, gpu_info
+
+
+def _dispatch_metal(builder, metal_source, entry_point, metadata, init_mod):
+    """Dispatch via PyObjC Metal. Returns (out_data, gpu_info) or raises."""
+    import Metal
+
+    device = Metal.MTLCreateSystemDefaultDevice()
+    if device is None:
+        raise RuntimeError("no Metal device")
+
+    library, err = device.newLibraryWithSource_options_error_(
+        metal_source, Metal.MTLCompileOptions.new(), None)
+    if library is None:
+        raise RuntimeError(f"Metal compile: {err}")
+
+    func = library.newFunctionWithName_(entry_point)
+    if func is None:
+        raise RuntimeError(f"function '{entry_point}' not found")
+
+    pipeline, err = device.newComputePipelineStateWithFunction_error_(func, None)
+    if pipeline is None:
+        raise RuntimeError(f"pipeline: {err}")
+
+    bindings = metadata["bindings"]
+    grid = metadata["grid"]
+    threads = metadata["threads"]
+    data_arrays, last = _prepare_data_arrays(builder, init_mod)
+
+    # Create Metal buffers per binding order
+    metal_bufs = []
+    for kind, val in bindings:
+        arr = data_arrays[val] if kind == "data" else _make_binding_array(kind, val)
+        metal_bufs.append(device.newBufferWithBytes_length_options_(
+            arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared))
+
+    queue = device.newCommandQueue()
+    cmd_buf = queue.commandBuffer()
+    encoder = cmd_buf.computeCommandEncoder()
+    encoder.setComputePipelineState_(pipeline)
+    for i, buf in enumerate(metal_bufs):
+        encoder.setBuffer_offset_atIndex_(buf, 0, i)
+    encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+        Metal.MTLSizeMake(*grid), Metal.MTLSizeMake(*threads))
+    encoder.endEncoding()
+    cmd_buf.commit()
+    cmd_buf.waitUntilCompleted()
+    if cmd_buf.error() is not None:
+        raise RuntimeError(f"GPU error: {cmd_buf.error()}")
+
+    # Find output buffer
+    out_buf = metal_bufs[[i for i, (k, v) in enumerate(bindings)
+                          if k == "data" and v == last][0]]
+    out_data = np.frombuffer(
+        out_buf.contents().as_buffer(out_buf.length()), dtype=np.float32).copy()
+    return out_data, device.name()
+
+
+def run_gpu_verify(builder, expected, target, label=None, atol=0, rtol=0,
+                   init_mod=10000):
+    """Run a compiled kernel on GPU and verify correctness.
+
+    Supports targets: "vulkan", "webgpu", "metal".
+    Returns True/False/None (None = skipped).
+    """
+    target_name = target.capitalize()
+
+    # --- Compile ---
+    try:
+        if target == "vulkan":
+            from lego.backend.spirv import compile_to_spirv
+            spv_words, _, metadata = compile_to_spirv(builder)
+            shader_code = np.array(spv_words, dtype=np.uint32).tobytes()
+            entry_point = metadata["entry_point"]
+        else:
+            from lego.backend.spirv import compile_to_target
+            result = compile_to_target(builder, target=target, name=f"verify_{target}")
+            metadata = result.metadata
+            shader_code = result.kernel_source
+            if target == "webgpu":
+                ep = re.search(r'fn (\w+)\(@builtin', shader_code)
+                entry_point = ep.group(1) if ep else metadata["entry_point"]
+            elif target == "metal":
+                shader_code = _fix_metal_buffer_bindings(shader_code)
+                ep = re.search(r'kernel void (\w+)\(', shader_code)
+                entry_point = ep.group(1) if ep else metadata["entry_point"]
+    except Exception as e:
+        print(f"  {target_name} execution: FAIL (compile: {e})", file=sys.stderr)
+        return False
+
+    # --- Dispatch ---
+    try:
+        if target in ("vulkan", "webgpu"):
+            try:
+                import wgpu  # noqa: F401
+            except ImportError:
+                print(f"  {target_name} execution: SKIP (wgpu not installed)",
+                      file=sys.stderr)
+                return None
+            out_data, gpu_info = _dispatch_wgpu(
+                builder, shader_code, entry_point, metadata, init_mod)
+        elif target == "metal":
+            try:
+                import Metal  # noqa: F401
+            except ImportError:
+                print("  Metal execution: SKIP (pyobjc-framework-Metal not installed)",
+                      file=sys.stderr)
+                return None
+            out_data, gpu_info = _dispatch_metal(
+                builder, shader_code, entry_point, metadata, init_mod)
+        else:
+            print(f"  {target_name} execution: SKIP (unknown target)", file=sys.stderr)
+            return None
     except Exception as e:
         print(f"  {target_name} execution: FAIL ({e})", file=sys.stderr)
         return False
 
-
-def run_webgpu_verify(builder, expected, label=None, atol=0, rtol=0):
-    """Run via SPIR-V → naga → WGSL → wgpu. Returns True/False/None."""
-    try:
-        import wgpu  # noqa: F401
-    except ImportError:
-        print("  WebGPU execution: SKIP (wgpu not installed)", file=sys.stderr)
-        return None
-
-    from lego.backend.spirv import compile_to_target, compile_to_spirv
-
-    try:
-        result = compile_to_target(builder, target="webgpu", name="verify")
-    except Exception as e:
-        print(f"  WebGPU execution: FAIL (compile: {e})", file=sys.stderr)
-        return False
-
-    _, mlir = compile_to_spirv(builder)
-    bindings, grid = _parse_spirv_launch(mlir)
-
-    ep_match = re.search(r'fn (\w+)\(@builtin', result.kernel_source)
-    if not ep_match:
-        print("  WebGPU execution: FAIL (no entry point in WGSL)", file=sys.stderr)
-        return False
-
-    return _run_wgpu_dispatch(
-        builder, expected, label, "WebGPU",
-        result.kernel_source, ep_match.group(1), bindings, grid, atol=atol, rtol=rtol)
-
-
-def run_vulkan_verify(builder, expected, label=None, atol=0, rtol=0):
-    """Run via raw SPIR-V binary → wgpu (Vulkan). Returns True/False/None."""
-    try:
-        import wgpu  # noqa: F401
-    except ImportError:
-        print("  Vulkan execution: SKIP (wgpu not installed)", file=sys.stderr)
-        return None
-
-    from lego.backend.spirv import compile_to_spirv
-
-    try:
-        spv_words, mlir = compile_to_spirv(builder)
-    except Exception as e:
-        print(f"  Vulkan execution: FAIL (compile: {e})", file=sys.stderr)
-        return False
-
-    bindings, grid = _parse_spirv_launch(mlir)
-    spv_bytes = np.array(spv_words, dtype=np.uint32).tobytes()
-
-    # Entry point name from gpu.launch_func @module::@entry
-    ep_match = re.search(r'gpu\.launch_func\s+@\w+::@(\w+)', mlir)
-    if not ep_match:
-        print("  Vulkan execution: FAIL (no entry point in MLIR)", file=sys.stderr)
-        return False
-
-    return _run_wgpu_dispatch(
-        builder, expected, label, "Vulkan",
-        spv_bytes, ep_match.group(1), bindings, grid, atol=atol, rtol=rtol)
+    # --- Verify ---
+    ok, max_err = _compare_output(out_data, expected, atol, rtol)
+    tag = f" ({label})" if label else ""
+    print(f"  {target_name} execution{tag}: {'PASS' if ok else 'FAIL'} "
+          f"— {len(expected)} elements, max error={max_err} [{gpu_info}]",
+          file=sys.stderr)
+    return ok
 
 
 def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rtol=0,
@@ -511,7 +555,159 @@ def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rto
     # Host-side verification
     print("\nVerification:", file=sys.stderr)
     run_cuda_verify(builder, expected, label=label, atol=atol, rtol=rtol, init_mod=init_mod)
-    if "vulkan" in targets:
-        run_vulkan_verify(builder, expected, label=label, atol=atol, rtol=rtol)
-    if "webgpu" in targets:
-        run_webgpu_verify(builder, expected, label=label, atol=atol, rtol=rtol)
+    for t in ("vulkan", "webgpu", "metal"):
+        if t in targets:
+            run_gpu_verify(builder, expected, t, label=label, atol=atol, rtol=rtol,
+                           init_mod=init_mod)
+
+
+def _fix_metal_buffer_bindings(metal_source):
+    """Replace naga's [[user(fake0)]] with proper [[buffer(N)]] attributes."""
+    idx = 0
+    def repl(m):
+        nonlocal idx
+        result = f"[[buffer({idx})]]"
+        idx += 1
+        return result
+    return re.sub(r'\[\[user\(fake0\)\]\]', repl, metal_source)
+
+
+def run_metal_verify(builder, expected, label=None, atol=0, rtol=0, init_mod=10000):
+    """Run via SPIR-V → naga → Metal Shading Language → Metal GPU.
+
+    Uses PyObjC to dispatch the compute kernel on Apple GPU.
+    Returns True/False/None (None = skipped).
+    """
+    try:
+        import Metal
+    except ImportError:
+        print("  Metal execution: SKIP (pyobjc-framework-Metal not installed)",
+              file=sys.stderr)
+        return None
+
+    from lego.backend.spirv import compile_to_target
+
+    try:
+        result = compile_to_target(builder, target="metal", name="verify_metal")
+    except Exception as e:
+        print(f"  Metal execution: FAIL (compile: {e})", file=sys.stderr)
+        return False
+
+    bindings = result.metadata["bindings"]
+    grid = result.metadata["grid"]
+    threads = result.metadata["threads"]
+
+    # Fix naga's [[user(fake0)]] → [[buffer(N)]]
+    metal_source = _fix_metal_buffer_bindings(result.kernel_source)
+
+    # Find entry point name
+    ep_match = re.search(r'kernel void (\w+)\(', metal_source)
+    if not ep_match:
+        print("  Metal execution: FAIL (no kernel entry point in Metal source)",
+              file=sys.stderr)
+        return False
+    entry_point = ep_match.group(1)
+
+    try:
+        device = Metal.MTLCreateSystemDefaultDevice()
+        if device is None:
+            print("  Metal execution: SKIP (no Metal device)", file=sys.stderr)
+            return None
+
+        # Compile Metal source
+        options = Metal.MTLCompileOptions.new()
+        library, err = device.newLibraryWithSource_options_error_(
+            metal_source, options, None)
+        if library is None:
+            print(f"  Metal execution: FAIL (compile: {err})", file=sys.stderr)
+            return False
+
+        func = library.newFunctionWithName_(entry_point)
+        if func is None:
+            print(f"  Metal execution: FAIL (function '{entry_point}' not found)",
+                  file=sys.stderr)
+            return False
+
+        pipeline, err = device.newComputePipelineStateWithFunction_error_(func, None)
+        if pipeline is None:
+            print(f"  Metal execution: FAIL (pipeline: {err})", file=sys.stderr)
+            return False
+
+        # Create buffers matching SPIR-V binding order
+        global_bufs = builder._global_bufs
+        last_data = len(global_bufs) - 1
+        data_arrays = {}
+        for j, gbuf in enumerate(global_bufs):
+            n = gbuf.numel
+            if j < last_data:
+                data_arrays[j] = _init_data(n, init_mod=init_mod)
+            else:
+                data_arrays[j] = np.zeros(n, dtype=np.float32)
+
+        metal_bufs = []
+        for kind, val in bindings:
+            if kind == "const_int":
+                arr = np.array([val], dtype=np.uint32)
+            elif kind == "const_float":
+                arr = np.array([val], dtype=np.float32)
+            elif kind == "const":
+                arr = np.array([val], dtype=np.uint32)
+            else:
+                arr = data_arrays[val]
+            buf = device.newBufferWithBytes_length_options_(
+                arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared)
+            metal_bufs.append(buf)
+
+        # Dispatch
+        queue = device.newCommandQueue()
+        cmd_buf = queue.commandBuffer()
+        encoder = cmd_buf.computeCommandEncoder()
+        encoder.setComputePipelineState_(pipeline)
+
+        for i, buf in enumerate(metal_bufs):
+            encoder.setBuffer_offset_atIndex_(buf, 0, i)
+
+        threads_per_grid = Metal.MTLSizeMake(grid[0], grid[1], grid[2])
+        threads_per_tg = Metal.MTLSizeMake(threads[0], threads[1], threads[2])
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+            threads_per_grid, threads_per_tg)
+        encoder.endEncoding()
+        cmd_buf.commit()
+        cmd_buf.waitUntilCompleted()
+
+        if cmd_buf.error() is not None:
+            print(f"  Metal execution: FAIL (GPU error: {cmd_buf.error()})",
+                  file=sys.stderr)
+            return False
+
+        # Read back output buffer
+        out_buf = None
+        for kind, val in bindings:
+            if kind == "data" and val == last_data:
+                out_buf = metal_bufs[bindings.index((kind, val))]
+                break
+
+        if out_buf is None:
+            print("  Metal execution: FAIL (output buffer not found)", file=sys.stderr)
+            return False
+
+        out_ptr = out_buf.contents().as_buffer(out_buf.length())
+        out_data = np.frombuffer(out_ptr, dtype=np.float32).copy()
+
+        if atol > 0 or rtol > 0:
+            ok = np.allclose(out_data, expected.astype(np.float32), atol=atol, rtol=rtol)
+            max_err = float(np.max(np.abs(out_data - expected.astype(np.float32))))
+        else:
+            gpu_values = out_data.astype(np.int32)
+            ok = np.array_equal(gpu_values, expected)
+            max_err = int(np.max(np.abs(gpu_values - expected)))
+        tag = f" ({label})" if label else ""
+        print(f"  Metal execution{tag}: {'PASS' if ok else 'FAIL'} "
+              f"— {len(expected)} elements, max error={max_err} [{device.name()}]",
+              file=sys.stderr)
+        return ok
+    except Exception as e:
+        print(f"  Metal execution: FAIL ({e})", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return False
