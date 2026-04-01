@@ -498,7 +498,6 @@ class KernelContext:
         flat_memref = self._buf_vals[buf_index]
         elem_ty = F32Type.get()
         target_ty = MemRefType.get([rows, cols], elem_ty)
-        # Static offset=0, sizes=[rows,cols], strides=[cols,1]
         return memref_dialect.ReinterpretCastOp(
             target_ty, flat_memref,
             offsets=[], sizes=[], strides=[],
@@ -506,46 +505,26 @@ class KernelContext:
             static_sizes=DenseI64ArrayAttr.get([rows, cols]),
             static_strides=DenseI64ArrayAttr.get([cols, 1])).result
 
-    @staticmethod
-    def _mma_type(rows, cols, dtype_str, operand):
-        """Parse !gpu.mma_matrix<RxCxDTYPE, "XOp"> type."""
-        from lego.mlir.ir import Type
-        return Type.parse(f'!gpu.mma_matrix<{rows}x{cols}x{dtype_str}, "{operand}">')
+    def tensor_core(self, tile_m, tile_n, tile_k, a_dtype="f16", c_dtype="f32"):
+        """Create a TensorCore handle for MMA operations.
 
-    def mma_load_a(self, buf_2d, row, col, lead_dim, tile_m, tile_k):
-        """Load A fragment as f16: !gpu.mma_matrix<MxKxf16, "AOp">."""
-        return gpu_dialect.SubgroupMmaLoadMatrixOp(
-            self._mma_type(tile_m, tile_k, "f16", "AOp"),
-            buf_2d, [row, col], lead_dim).result
+        Usage::
 
-    def mma_load_b(self, buf_2d, row, col, lead_dim, tile_k, tile_n):
-        """Load B fragment as f16: !gpu.mma_matrix<KxNxf16, "BOp">."""
-        return gpu_dialect.SubgroupMmaLoadMatrixOp(
-            self._mma_type(tile_k, tile_n, "f16", "BOp"),
-            buf_2d, [row, col], lead_dim).result
-
-    def mma_zero_c(self, tile_m, tile_n):
-        """Create zero-initialized f32 accumulator: !gpu.mma_matrix<MxNxf32, "COp">."""
-        zero = arith_dialect.ConstantOp(F32Type.get(), 0.0).result
-        return gpu_dialect.SubgroupMmaConstantMatrixOp(
-            self._mma_type(tile_m, tile_n, "f32", "COp"), zero).result
-
-    def mma_compute(self, a_frag, b_frag, c_frag):
-        """Compute D = A * B + C using tensor core MMA."""
-        return gpu_dialect.SubgroupMmaComputeOp(a_frag, b_frag, c_frag).result
-
-    def mma_store(self, frag, buf_2d, row, col, lead_dim):
-        """Store MMA result fragment to 2D memref."""
-        gpu_dialect.SubgroupMmaStoreMatrixOp(frag, buf_2d, [row, col], lead_dim)
+            tc = tensor_core(16, 16, 16)
+            acc = tc.zero()
+            a = tc.load_a(A2d, row, col, lead_dim)
+            b = tc.load_b(B2d, row, col, lead_dim)
+            acc = tc.mma(a, b, acc)
+            tc.store(acc, C2d, row, col, lead_dim)
+        """
+        return _TensorCoreHandle(tile_m, tile_n, tile_k, a_dtype, c_dtype)
 
     # --- Math operations ---
 
     def exp(self, val):
         """Compute e^val (math.exp)."""
         from lego.mlir.ir import Operation
-        op = Operation.create(
-            "math.exp", results=[val.type], operands=[val])
-        return op.result
+        return Operation.create("math.exp", results=[val.type], operands=[val]).result
 
     # --- Arithmetic helpers ---
 
@@ -564,7 +543,6 @@ class KernelContext:
     def muli(self, a, b):
         return arith_dialect.MulIOp(a, b).result
 
-    # Keep old simple API as aliases
     def add(self, a, b):
         return self.addf(a, b)
 
@@ -574,41 +552,24 @@ class KernelContext:
     # --- Constants ---
 
     def const_f32(self, value):
-        """Create a constant f32 MLIR Value."""
         return arith_dialect.ConstantOp(F32Type.get(), float(value)).result
 
     def const_index(self, value):
-        """Create a constant index MLIR Value."""
         return _index_const(int(value))
 
     # --- For-range loop with accumulator ---
 
     def for_range(self, n, body_fn, init_vals=None):
-        """SCF for loop 0..n with optional carried accumulator values.
-
-        Args:
-            n: Python int or MLIR index Value — loop bound.
-            body_fn: If init_vals is None: body_fn(loop_idx) -> None.
-                     If init_vals provided: body_fn(loop_idx, *carry) -> [updated_carry].
-            init_vals: List of initial MLIR Values for iter_args (loop-carried
-                       accumulators).
-
-        Returns:
-            List of final carry values (MLIR Values), or None if no init_vals.
-        """
+        """SCF for loop 0..n with optional carried accumulator values."""
         if isinstance(n, int):
             n = _index_const(n)
-
         if init_vals is None:
             loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1))
             with InsertionPoint(loop.body):
                 body_fn(loop.induction_variable)
                 scf_dialect.YieldOp([])
             return None
-
-        loop = scf_dialect.ForOp(
-            _index_const(0), n, _index_const(1), init_vals
-        )
+        loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1), init_vals)
         with InsertionPoint(loop.body):
             iv = loop.induction_variable
             carry_args = list(loop.inner_iter_args)
@@ -619,7 +580,6 @@ class KernelContext:
     # --- Conditionals ---
 
     def if_(self, cond, then_fn):
-        """Execute then_fn only if cond is true (no results, no else)."""
         if_op = scf_dialect.IfOp(cond, has_else=False)
         with InsertionPoint(if_op.then_block):
             then_fn()
@@ -628,27 +588,61 @@ class KernelContext:
     # --- Comparisons ---
 
     def lt(self, a, b):
-        """Unsigned integer less-than comparison (for index values)."""
-        return arith_dialect.CmpIOp(
-            arith_dialect.CmpIPredicate.ult, a, b
-        ).result
+        return arith_dialect.CmpIOp(arith_dialect.CmpIPredicate.ult, a, b).result
 
     def eq(self, a, b):
-        """Integer equality comparison."""
-        return arith_dialect.CmpIOp(
-            arith_dialect.CmpIPredicate.eq, a, b
-        ).result
+        return arith_dialect.CmpIOp(arith_dialect.CmpIPredicate.eq, a, b).result
 
-    # Legacy flat-index API (for simple element-wise kernels)
     def load_raw(self, buf_index, gid=None):
         if gid is None:
             raise ValueError("load_raw requires a gid argument")
         return self.load_flat(buf_index, gid)
 
-    def store_raw(self, value, buf_index, gid=None):
-        if gid is None:
-            raise ValueError("store_raw requires a gid argument")
-        self.store_flat(value, buf_index, gid)
+
+class _TensorCoreHandle:
+    """Handle for warp-collective MMA operations.
+
+    Wraps gpu.subgroup_mma_* ops with typed fragment management.
+    Created via ``ctx.tensor_core(M, N, K, a_dtype, c_dtype)``.
+    """
+
+    def __init__(self, tile_m, tile_n, tile_k, a_dtype="f16", c_dtype="f32"):
+        self.tile_m = tile_m
+        self.tile_n = tile_n
+        self.tile_k = tile_k
+        self.a_dtype = a_dtype
+        self.c_dtype = c_dtype
+
+    def _mma_type(self, rows, cols, dtype_str, operand):
+        from lego.mlir.ir import Type
+        return Type.parse(f'!gpu.mma_matrix<{rows}x{cols}x{dtype_str}, "{operand}">')
+
+    def load_a(self, buf_2d, row, col, lead_dim):
+        """Load A fragment from 2D memref."""
+        mma_type = self._mma_type(self.tile_m, self.tile_k, self.a_dtype, "AOp")
+        return gpu_dialect.SubgroupMmaLoadMatrixOp(
+            mma_type, buf_2d, [row, col], lead_dim).result
+
+    def load_b(self, buf_2d, row, col, lead_dim):
+        """Load B fragment from 2D memref."""
+        mma_type = self._mma_type(self.tile_k, self.tile_n, self.a_dtype, "BOp")
+        return gpu_dialect.SubgroupMmaLoadMatrixOp(
+            mma_type, buf_2d, [row, col], lead_dim).result
+
+    def zero(self):
+        """Create zero-initialized accumulator fragment."""
+        mma_type = self._mma_type(self.tile_m, self.tile_n, self.c_dtype, "COp")
+        zero = arith_dialect.ConstantOp(F32Type.get(), 0.0).result
+        return gpu_dialect.SubgroupMmaConstantMatrixOp(mma_type, zero).result
+
+    def mma(self, a_frag, b_frag, c_frag):
+        """Compute D = A * B + C (warp-collective MMA)."""
+        return gpu_dialect.SubgroupMmaComputeOp(a_frag, b_frag, c_frag).result
+
+    def store(self, frag, buf_2d, row, col, lead_dim):
+        """Store result fragment to 2D memref."""
+        gpu_dialect.SubgroupMmaStoreMatrixOp(frag, buf_2d, [row, col], lead_dim)
+
 
 
 # ============================================================================

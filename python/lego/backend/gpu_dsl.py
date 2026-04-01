@@ -29,7 +29,10 @@ from lego.mlir.dialects import scf as scf_dialect
 
 from lego.core import Row
 from lego.backend.compiler import DType
-from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer, _index_const
+from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer, _index_const, _TensorCoreHandle
+
+# Public alias for TensorCore — used inside @gpu_kernel bodies
+TensorCore = _TensorCoreHandle
 
 
 # ============================================================================
@@ -89,6 +92,7 @@ INDEX = "index"          # MLIR index Value
 F32 = "f32"              # MLIR f32 Value
 I1 = "i1"               # MLIR i1 Value
 MMA_FRAG = "mma_frag"   # MLIR !gpu.mma_matrix Value
+CT_OBJ = "ct_obj"       # compile-time Python object (TensorCore, etc.)
 
 
 def _is_ct(tag):
@@ -393,6 +397,9 @@ class _Compiler:
                 return (int(v), CT_INT)
             if isinstance(v, float):
                 return (v, CT_FLOAT)
+            # Compile-time objects (TensorCore, layouts, etc.)
+            if isinstance(v, _TensorCoreHandle):
+                return (v, CT_OBJ)
             raise TypeError(f"Unsupported type for '{name}': {type(v)}")
         raise NameError(f"Undefined: {name}")
 
@@ -519,6 +526,9 @@ class _Compiler:
     # -- function calls ------------------------------------------------
 
     def _call(self, node):
+        # Handle method calls: obj.method(args) where obj is a compile-time object
+        if isinstance(node.func, ast.Attribute):
+            return self._method_call(node)
         if not isinstance(node.func, ast.Name):
             raise NotImplementedError(f"Call {ast.dump(node.func)}")
         name = node.func.id
@@ -641,6 +651,43 @@ class _Compiler:
             val, vtag = self._expr(node.args[0])
             return (self.ctx.exp(val), F32)
         raise NotImplementedError(f"Unknown function: {name}")
+
+    def _method_call(self, node):
+        """Handle obj.method(args) calls — e.g., tc.load_a(buf, row, col, ld)."""
+        obj_name = node.func.value.id
+        method = node.func.attr
+        # Look up object in local env first, then outer scope
+        obj_val, obj_tag = self.env.get(obj_name, (None, None))
+        if obj_val is None and obj_name in self.outer:
+            obj_val = self.outer[obj_name]
+            obj_tag = CT_OBJ if isinstance(obj_val, _TensorCoreHandle) else None
+
+        # If obj is a compile-time object (like TensorCore), call its method
+        if obj_tag == CT_OBJ and hasattr(obj_val, method):
+            # TensorCore methods that return MLIR Values
+            fn = getattr(obj_val, method)
+            if method == "zero":
+                return (fn(), MMA_FRAG)
+            if method in ("load_a", "load_b"):
+                buf_2d, _ = self._expr(node.args[0])
+                row = self._idx(self._expr(node.args[1]))
+                col = self._idx(self._expr(node.args[2]))
+                lead_dim = self._eval_ct(node.args[3])
+                return (fn(buf_2d, row, col, lead_dim), MMA_FRAG)
+            if method == "mma":
+                a, _ = self._expr(node.args[0])
+                b, _ = self._expr(node.args[1])
+                c, _ = self._expr(node.args[2])
+                return (fn(a, b, c), MMA_FRAG)
+            if method == "store":
+                frag, _ = self._expr(node.args[0])
+                buf_2d, _ = self._expr(node.args[1])
+                row = self._idx(self._expr(node.args[2]))
+                col = self._idx(self._expr(node.args[3]))
+                lead_dim = self._eval_ct(node.args[4])
+                fn(frag, buf_2d, row, col, lead_dim)
+                return (None, CT_INT)
+        raise NotImplementedError(f"Method call: {obj_name}.{method}")
 
     def _eval_ct(self, node):
         """Evaluate an AST node as a compile-time Python expression."""

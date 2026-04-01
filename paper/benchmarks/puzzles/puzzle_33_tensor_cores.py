@@ -17,7 +17,7 @@ Sub-test 2: Tensor core MMA kernel structure (CUDA-only).
 import sys
 import numpy as np
 from lego.core import OrderBy, Row
-from lego.backend.gpu_dsl import gpu_kernel, Buffer, Shared
+from lego.backend.gpu_dsl import gpu_kernel, Buffer, Shared, TensorCore
 
 if len(sys.argv) == 2:
     M = N = K = int(sys.argv[1])
@@ -55,14 +55,22 @@ def matmul_tiled(A: Buffer(A_layout, M, K), B: Buffer(B_layout, K, N),
     C[block_id.y, block_id.x, thread_id.y, thread_id.x] = acc
 
 
-# --- Sub-test 2: Tensor core MMA ---
+# --- Sub-test 2: Tensor core MMA via TensorCore class ---
+# MMA tile: 16x16x16 (WMMA standard for f16→f32 on SM70+)
+MMA_M = 16
+MMA_N = 16
+MMA_K = 16
+
 mma_A_layout = Row(M * K)
 mma_B_layout = Row(K * N)
 mma_C_layout = Row(M * N)
-NUM_K_TILES = K // TILE
+NUM_K_TILES = K // MMA_K
+
+# TensorCore instance — captures tile shape and dtypes at Python scope
+tc = TensorCore(MMA_M, MMA_N, MMA_K, a_dtype="f16", c_dtype="f32")
 
 
-@gpu_kernel(grid=(N // TILE, M // TILE), block=(WARP_SIZE,))
+@gpu_kernel(grid=(N // MMA_N, M // MMA_M), block=(WARP_SIZE,))
 def matmul_mma(A: Buffer(mma_A_layout, M * K),
                B: Buffer(mma_B_layout, K * N),
                C: Buffer(mma_C_layout, M * N)):
@@ -70,22 +78,22 @@ def matmul_mma(A: Buffer(mma_A_layout, M * K),
     A2d = mma_reshape(A, M, K)
     B2d = mma_reshape(B, K, N)
     C2d = mma_reshape(C, M, N)
-    tile_row = block_id.y * TILE
-    tile_col = block_id.x * TILE
+    tile_row = block_id.y * MMA_M
+    tile_col = block_id.x * MMA_N
     # Zero-initialize f32 accumulator
-    acc = mma_zero_c(TILE, TILE)
-    # Tile loop over K — compile-time unrolled (scf.for can't carry MMA fragments)
+    acc = tc.zero()
+    # Tile loop over K — compile-time unrolled
     t = 0
     while t < NUM_K_TILES:
-        k_off = t * TILE
+        k_off = t * MMA_K
         # Load f16 A/B fragments (warp-collective WMMA)
-        a_frag = mma_load_a(A2d, tile_row, k_off, K, TILE, TILE)
-        b_frag = mma_load_b(B2d, k_off, tile_col, N, TILE, TILE)
+        a_frag = tc.load_a(A2d, tile_row, k_off, K)
+        b_frag = tc.load_b(B2d, k_off, tile_col, N)
         # D = A * B + C (tensor core MMA)
-        acc = mma_compute(a_frag, b_frag, acc)
+        acc = tc.mma(a_frag, b_frag, acc)
         t = t + 1
     # Store f32 result
-    mma_store(acc, C2d, tile_row, tile_col, N)
+    tc.store(acc, C2d, tile_row, tile_col, N)
 
 
 from bench_utils import run_benchmark
