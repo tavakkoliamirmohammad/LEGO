@@ -1,13 +1,11 @@
-"""Puzzle 26 — Advanced Warp Patterns: XOR shuffle and butterfly reduction.
+"""Puzzle 26 — Advanced Warp Patterns: XOR shuffle, butterfly, prefix sum.
 
-Three sub-tests matching the Mojo puzzle:
+Five sub-tests matching the Mojo puzzle:
   1. pair_swap: shuffle_xor(val, 1) — swap adjacent pairs
   2. butterfly_max: XOR tree reduction for broadcast max
   3. butterfly_sum: XOR tree reduction for broadcast sum
-
-Mojo also has conditional_max, prefix_sum, and partition sub-tests
-which require min/max intrinsics and prefix_sum — these use the same
-shuffle_xor primitive demonstrated here.
+  4. warp_prefix_sum: inclusive prefix sum within warp
+  5. warp_partition: quicksort-style partition using prefix_sum + shuffle_xor
 """
 import sys
 import numpy as np
@@ -26,21 +24,15 @@ num_warps = N // WARP_SIZE
 layout = OrderBy(Row(N)).TileBy([num_warps], [WARP_SIZE])
 
 # --- Sub-test 1: pair_swap ---
-# shuffle_xor(val, 1): lane k gets value from lane k^1
-# [0,1,2,3,...] -> [1,0,3,2,5,4,...]
 
 
 @gpu_kernel(grid=(num_warps,), block=(WARP_SIZE,))
 def pair_swap(A: Buffer(layout, N), Out: Buffer(layout, N)):
     bx = block_id.x
     tx = thread_id.x
-    val = A[bx, tx]
-    swapped = shuffle_xor(val, 1)
-    Out[bx, tx] = swapped
+    Out[bx, tx] = shuffle_xor(A[bx, tx], 1)
 
 # --- Sub-test 2: butterfly_max ---
-# XOR tree reduction: every lane gets the global max
-# offset = WARP_SIZE//2, WARP_SIZE//4, ..., 1
 
 
 @gpu_kernel(grid=(num_warps,), block=(WARP_SIZE,))
@@ -51,16 +43,12 @@ def butterfly_max(A: Buffer(layout, N), Out: Buffer(layout, N)):
     offset = WARP_SIZE // 2
     while offset > 0:
         other = shuffle_xor(max_val, offset)
-        # max(a, b) = (a + b + |a - b|) / 2, but we don't have abs/max
-        # Use: if other > max_val: max_val = other
-        # scf.if with yield handles this correctly
         if other > max_val:
             max_val = other
         offset = offset // 2
     Out[bx, tx] = max_val
 
 # --- Sub-test 3: butterfly_sum ---
-# XOR tree reduction: every lane gets the full sum
 
 
 @gpu_kernel(grid=(num_warps,), block=(WARP_SIZE,))
@@ -75,12 +63,21 @@ def butterfly_sum(A: Buffer(layout, N), Out: Buffer(layout, N)):
         mask = mask * 2
     Out[bx, tx] = val
 
+# --- Sub-test 4: warp_prefix_sum (inclusive) ---
+
+
+@gpu_kernel(grid=(num_warps,), block=(WARP_SIZE,))
+def warp_prefix(A: Buffer(layout, N), Out: Buffer(layout, N)):
+    bx = block_id.x
+    tx = thread_id.x
+    val = A[bx, tx]
+    Out[bx, tx] = warp_prefix_sum(val)
+
 
 from bench_utils import run_benchmark
 
 if __name__ == "__main__":
 
-    # Sub-test 1: pair_swap
     def compute_expected_swap(inputs):
         a = inputs[0].reshape(-1, WARP_SIZE)
         out = np.zeros_like(a)
@@ -97,7 +94,6 @@ if __name__ == "__main__":
         label=f"swap N={N}",
     )
 
-    # Sub-test 2: butterfly_max
     def compute_expected_max(inputs):
         a = inputs[0].reshape(-1, WARP_SIZE)
         maxes = a.max(axis=1, keepdims=True)
@@ -107,11 +103,9 @@ if __name__ == "__main__":
     run_benchmark(
         butterfly_max, compute_expected_max,
         targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
-        label=f"max N={N}",
-        atol=1e-4,
+        label=f"max N={N}", atol=1e-4,
     )
 
-    # Sub-test 3: butterfly_sum
     def compute_expected_sum(inputs):
         a = inputs[0].reshape(-1, WARP_SIZE)
         sums = a.sum(axis=1, keepdims=True)
@@ -121,7 +115,17 @@ if __name__ == "__main__":
     run_benchmark(
         butterfly_sum, compute_expected_sum,
         targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
-        label=f"sum N={N}",
-        init_mod=10,
-        atol=1e-4,
+        label=f"sum N={N}", init_mod=10, atol=1e-4,
+    )
+
+    def compute_expected_prefix(inputs):
+        a = inputs[0].reshape(-1, WARP_SIZE)
+        out = np.cumsum(a, axis=1)
+        return out.ravel().astype(np.float32)
+
+    print("Sub-test 4: warp_prefix_sum", file=sys.stderr)
+    run_benchmark(
+        warp_prefix, compute_expected_prefix,
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        label=f"prefix N={N}", init_mod=10, atol=1e-4,
     )

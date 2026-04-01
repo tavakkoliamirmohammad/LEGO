@@ -579,6 +579,21 @@ class _Compiler:
         if name == "all_reduce_min":
             val, vtag = self._expr(node.args[0])
             return (self.ctx.all_reduce_min(val), F32)
+        # --- Subgroup broadcast ---
+        if name == "broadcast":
+            val, vtag = self._expr(node.args[0])
+            lane = 0
+            if len(node.args) > 1:
+                lane_v, lane_t = self._expr(node.args[1])
+                lane = int(lane_v) if _is_ct(lane_t) else lane_v
+            return (self.ctx.subgroup_broadcast(val, lane), F32)
+        # --- Warp prefix sum ---
+        if name == "warp_prefix_sum":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.warp_prefix_sum_inclusive(val), F32)
+        if name == "warp_prefix_sum_exclusive":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.warp_prefix_sum_exclusive(val), F32)
         # --- Math operations ---
         if name == "exp":
             val, vtag = self._expr(node.args[0])

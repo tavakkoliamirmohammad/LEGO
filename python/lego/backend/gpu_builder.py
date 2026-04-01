@@ -441,6 +441,81 @@ class KernelContext:
         from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
         return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.MINNUMF).result
 
+    # --- Subgroup broadcast ---
+
+    def subgroup_broadcast(self, val, lane=0):
+        """Broadcast value from a specific lane to all lanes in subgroup.
+
+        Implemented via shuffle_idx(val, lane) which is universally supported
+        (gpu.subgroup_broadcast lacks NVVM lowering for specific_lane mode).
+        """
+        return self.shuffle_idx(val, lane)
+
+    # --- Warp prefix sum (built from shuffle_up + add) ---
+
+    def warp_prefix_sum_inclusive(self, val, warp_size=32):
+        """Inclusive prefix sum within subgroup via Hillis-Steele shuffle_up.
+
+        Each lane k gets sum(val[0..k]). Built from log2(warp_size)
+        shuffle_up + add steps.
+        """
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        i32 = IntegerType.get_signless(32)
+        result = val
+        offset = 1
+        while offset < warp_size:
+            w = self._i32_const(warp_size)
+            off = self._i32_const(offset)
+            shuffled = gpu_dialect.ShuffleOp(result, off, w, ShuffleMode.UP)
+            neighbor = shuffled.shuffleResult
+            valid = shuffled.valid
+            # Add neighbor only if valid (lane >= offset)
+            added = arith_dialect.AddFOp(result, neighbor).result
+            result = arith_dialect.SelectOp(valid, added, result).result
+            offset *= 2
+        return result
+
+    def warp_prefix_sum_exclusive(self, val, warp_size=32):
+        """Exclusive prefix sum: each lane k gets sum(val[0..k-1]), lane 0 gets 0."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        # Shift values up by 1 lane, lane 0 gets 0
+        i32 = IntegerType.get_signless(32)
+        w = self._i32_const(warp_size)
+        off = self._i32_const(1)
+        shuffled = gpu_dialect.ShuffleOp(val, off, w, ShuffleMode.UP)
+        shifted = shuffled.shuffleResult
+        valid = shuffled.valid
+        zero = arith_dialect.ConstantOp(F32Type.get(), 0.0).result
+        result = arith_dialect.SelectOp(valid, shifted, zero).result
+        # Now do inclusive prefix sum on the shifted values
+        return self.warp_prefix_sum_inclusive(result, warp_size)
+
+    # --- Subgroup MMA operations ---
+
+    def mma_load(self, memref, indices, lead_dim, shape, elem_type, operand):
+        """Load a matrix fragment for MMA.
+
+        Args:
+            memref: source memref
+            indices: list of index values [row, col]
+            lead_dim: leading dimension (int)
+            shape: tuple (rows, cols) for the MMA tile
+            elem_type: element type (e.g., F16Type, F32Type)
+            operand: "AOp", "BOp", or "COp"
+        """
+        from lego.mlir.ir import Type
+        mma_type = gpu_dialect.MMAMatrixType.get(list(shape), elem_type, operand)
+        return gpu_dialect.SubgroupMmaLoadMatrixOp(
+            mma_type, memref, indices, lead_dim).result
+
+    def mma_store(self, src, dst_memref, indices, lead_dim):
+        """Store a matrix fragment from MMA result."""
+        gpu_dialect.SubgroupMmaStoreMatrixOp(src, dst_memref, indices, lead_dim)
+
+    def mma_compute(self, a_frag, b_frag, c_frag):
+        """Compute D = A * B + C using tensor core MMA."""
+        return gpu_dialect.SubgroupMmaComputeOp(a_frag, b_frag, c_frag).result
+
     # --- Math operations ---
 
     def exp(self, val):
