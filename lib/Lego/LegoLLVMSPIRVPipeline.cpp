@@ -14,8 +14,57 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 using namespace mlir;
+
+namespace {
+
+/// Lowers gpu.all_reduce ops into shared memory + shuffle tree reduction.
+struct LowerGpuAllReduceLLVMSPVPass
+    : public PassWrapper<LowerGpuAllReduceLLVMSPVPass,
+                          OperationPass<gpu::GPUModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuAllReduceLLVMSPVPass)
+
+  StringRef getArgument() const override {
+    return "lego-lower-gpu-all-reduce-llvmspv";
+  }
+  StringRef getDescription() const override {
+    return "Lower gpu.all_reduce to shared memory + shuffle tree (LLVM SPV)";
+  }
+
+  void runOnOperation() override {
+    RewritePatternSet patterns(&getContext());
+    populateGpuAllReducePatterns(patterns);
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+      signalPassFailure();
+  }
+};
+
+/// Lowers gpu.subgroup_reduce to gpu.shuffle (butterfly pattern).
+struct LowerGpuSubgroupReduceLLVMSPVPass
+    : public PassWrapper<LowerGpuSubgroupReduceLLVMSPVPass,
+                          OperationPass<gpu::GPUModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuSubgroupReduceLLVMSPVPass)
+
+  StringRef getArgument() const override {
+    return "lego-lower-subgroup-reduce-llvmspv";
+  }
+  StringRef getDescription() const override {
+    return "Lower gpu.subgroup_reduce to gpu.shuffle (LLVM SPV)";
+  }
+
+  void runOnOperation() override {
+    RewritePatternSet patterns(&getContext());
+    populateGpuLowerSubgroupReduceToShufflePatterns(patterns, 32, 32);
+    populateGpuLowerClusteredSubgroupReduceToShufflePatterns(patterns, 32, 32);
+    populateGpuBreakDownSubgroupReducePatterns(patterns, 32);
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+      signalPassFailure();
+  }
+};
+
+} // namespace
 
 namespace mlir {
 namespace lego {

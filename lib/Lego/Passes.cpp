@@ -103,6 +103,10 @@ void buildLegoGPUOutlinePipeline(OpPassManager &pm) {
   buildLegoLowerPipeline(pm);
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  // Sink arith.constant and other index ops back into gpu.launch bodies.
+  // CSE/canonicalize may hoist them, but they must be inside the kernel
+  // for outlining to capture them (especially i32 constants for gpu.shuffle).
+  pm.addPass(createGpuLaunchSinkIndexComputationsPass());
   pm.addPass(createGpuKernelOutliningPass());
 }
 

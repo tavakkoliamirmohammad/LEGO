@@ -39,7 +39,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from lego.mlir.ir import (
     Context, Location, Module, InsertionPoint,
-    IndexType, MemRefType, FunctionType, StringAttr, IntegerAttr,
+    IndexType, IntegerType, MemRefType, FunctionType, StringAttr, IntegerAttr,
     F32Type,
 )
 from lego.mlir.dialects import func as func_dialect
@@ -351,6 +351,95 @@ class KernelContext:
     def barrier(self):
         """Insert a GPU barrier (thread synchronization)."""
         gpu_dialect.BarrierOp()
+
+    # --- Warp / subgroup operations ---
+
+    def _i32_const(self, value):
+        """Create a constant i32 MLIR Value."""
+        i32 = IntegerType.get_signless(32)
+        return arith_dialect.ConstantOp(i32, IntegerAttr.get(i32, int(value))).result
+
+    def lane_id(self):
+        """Return the lane ID within the subgroup (warp)."""
+        return gpu_dialect.LaneIdOp().result
+
+    def subgroup_size(self):
+        """Return the number of lanes in a subgroup."""
+        return gpu_dialect.SubgroupSizeOp().result
+
+    def shuffle_down(self, val, offset, width=32):
+        """Shuffle value down by offset within subgroup."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        w = self._i32_const(width)
+        off = self._i32_const(offset) if isinstance(offset, int) else \
+            arith_dialect.IndexCastOp(IntegerType.get_signless(32), offset).result
+        return gpu_dialect.ShuffleOp(val, off, w, ShuffleMode.DOWN).shuffleResult
+
+    def shuffle_up(self, val, offset, width=32):
+        """Shuffle value up by offset within subgroup."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        w = self._i32_const(width)
+        off = self._i32_const(offset) if isinstance(offset, int) else \
+            arith_dialect.IndexCastOp(IntegerType.get_signless(32), offset).result
+        return gpu_dialect.ShuffleOp(val, off, w, ShuffleMode.UP).shuffleResult
+
+    def shuffle_xor(self, val, mask, width=32):
+        """Shuffle value with XOR mask within subgroup (butterfly pattern)."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        w = self._i32_const(width)
+        m = self._i32_const(mask) if isinstance(mask, int) else \
+            arith_dialect.IndexCastOp(IntegerType.get_signless(32), mask).result
+        return gpu_dialect.ShuffleOp(val, m, w, ShuffleMode.XOR).shuffleResult
+
+    def shuffle_idx(self, val, lane, width=32):
+        """Shuffle: get value from specific lane (broadcast pattern)."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        w = self._i32_const(width)
+        ln = self._i32_const(lane) if isinstance(lane, int) else \
+            arith_dialect.IndexCastOp(IntegerType.get_signless(32), lane).result
+        return gpu_dialect.ShuffleOp(val, ln, w, ShuffleMode.IDX).shuffleResult
+
+    def subgroup_reduce_add(self, val):
+        """Reduce value across all lanes in subgroup with addition."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.SubgroupReduceOp(val, AllReduceOperation.ADD).result
+
+    def subgroup_reduce_mul(self, val):
+        """Reduce value across all lanes in subgroup with multiplication."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.SubgroupReduceOp(val, AllReduceOperation.MUL).result
+
+    def subgroup_reduce_max(self, val):
+        """Reduce value across all lanes in subgroup with max."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.SubgroupReduceOp(val, AllReduceOperation.MAXNUMF).result
+
+    def subgroup_reduce_min(self, val):
+        """Reduce value across all lanes in subgroup with min."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.SubgroupReduceOp(val, AllReduceOperation.MINNUMF).result
+
+    # --- Block-wide operations ---
+
+    def all_reduce_add(self, val):
+        """Reduce value across all threads in the workgroup with addition."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.ADD).result
+
+    def all_reduce_mul(self, val):
+        """Reduce value across all threads in the workgroup with multiplication."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.MUL).result
+
+    def all_reduce_max(self, val):
+        """Reduce value across all threads in the workgroup with max."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.MAXNUMF).result
+
+    def all_reduce_min(self, val):
+        """Reduce value across all threads in the workgroup with min."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.MINNUMF).result
 
     # --- Arithmetic helpers ---
 

@@ -542,6 +542,42 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       matmul_smem.py:64
       reduce_sum.py:1024
     )
+
+    # --- Mojo GPU Puzzles expressed in LEGO DSL ---
+    add_example_group(puzzle "${CMAKE_SOURCE_DIR}/paper/benchmarks/puzzles"
+      "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
+      puzzle_01_map.py:256
+      puzzle_02_zip.py:256
+      puzzle_03_guards.py:20
+      puzzle_04_2dmap.py:4
+      puzzle_05_broadcast.py:4
+      puzzle_06_blocks.py:1024
+      puzzle_07_2dblocks.py:256
+      puzzle_08_shared_mem.py:256
+      puzzle_09_debugging.py:256
+      puzzle_10_memory_errors.py:3
+      puzzle_11_pooling.py:8
+      puzzle_12_dot_product.py:256
+      puzzle_13_conv1d.py:15:4
+      puzzle_14_prefix_sum.py:16
+      puzzle_15_axis_sum.py:4:256
+      puzzle_16_matmul.py:64
+      puzzle_17_conv1d_op.py:15:4
+      puzzle_18_softmax.py:4:16
+      puzzle_19_attention.py:4:8
+      puzzle_21_embedding.py:4:8
+      puzzle_22_fusion.py:256
+      puzzle_23_functional.py:256
+      puzzle_24_warp_reduce.py:256
+      puzzle_25_warp_shuffle.py:256
+      puzzle_26_warp_advanced.py:256
+      puzzle_27_block_reduce.py:256
+      puzzle_28_async_copy.py:1024
+      puzzle_29_pipeline.py:1024
+      puzzle_32_bank_conflicts.py:64
+      puzzle_33_tensor_cores.py:64
+      puzzle_34_clusters.py:1024
+    )
   endif()
 
   # --- Cross-platform SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal via wgpu) ---
@@ -622,6 +658,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   if(TARGET check-gpu-examples)
     add_dependencies(check-lego-all check-gpu-examples)
+  endif()
+  if(TARGET check-puzzle-examples)
+    add_dependencies(check-lego-all check-puzzle-examples)
   endif()
   if(TARGET check-spirv-examples)
     add_dependencies(check-lego-all check-spirv-examples)

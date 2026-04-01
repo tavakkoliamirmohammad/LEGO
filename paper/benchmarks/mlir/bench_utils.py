@@ -526,6 +526,12 @@ def run_gpu_verify(builder, expected, target, label=None, atol=0, rtol=0,
             print(f"  {target_name} execution: SKIP (unknown target)", file=sys.stderr)
             return None
     except Exception as e:
+        err_str = str(e)
+        # Treat missing GPU capabilities (e.g., subgroup) as SKIP, not FAIL.
+        if "missing capability" in err_str or "Capabilities(SUBGROUP)" in err_str:
+            print(f"  {target_name} execution: SKIP (missing GPU capability)",
+                  file=sys.stderr)
+            return None
         print(f"  {target_name} execution: FAIL ({e})", file=sys.stderr)
         return False
 
@@ -580,11 +586,20 @@ def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rto
 
     # Host-side verification
     print("\nVerification:", file=sys.stderr)
-    run_cuda_verify(builder, expected, label=label, atol=atol, rtol=rtol, init_mod=init_mod)
+    failures = []
+    result = run_cuda_verify(builder, expected, label=label, atol=atol, rtol=rtol, init_mod=init_mod)
+    if result is False:
+        failures.append("cuda")
     for t in ("vulkan", "webgpu", "metal"):
         if t in targets:
-            run_gpu_verify(builder, expected, t, label=label, atol=atol, rtol=rtol,
-                           init_mod=init_mod)
+            result = run_gpu_verify(builder, expected, t, label=label, atol=atol, rtol=rtol,
+                                    init_mod=init_mod)
+            if result is False:
+                failures.append(t)
+    if failures:
+        print(f"\nFATAL: verification failed on: {', '.join(failures)}",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 def _fix_metal_buffer_bindings(metal_source):

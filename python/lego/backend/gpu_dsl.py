@@ -290,17 +290,63 @@ class _Compiler:
             for s in stmts:
                 self._stmt(s)
             return
-        has_else = bool(node.orelse)
-        if_op = scf_dialect.IfOp(cv, has_else=has_else)
-        with InsertionPoint(if_op.then_block):
-            for s in node.body:
-                self._stmt(s)
-            scf_dialect.YieldOp([])
-        if has_else:
-            with InsertionPoint(if_op.else_block):
-                for s in node.orelse:
+
+        # Detect which env variables are modified in then/else bodies.
+        # These must be yielded from scf.if so their updated values
+        # dominate uses after the if.
+        env_before = set(self.env)
+        modified = (self._modified_names(node.body)
+                    | self._modified_names(node.orelse)) & env_before
+        yield_names = sorted(modified)
+
+        if not yield_names:
+            # No local variables modified — simple fire-and-forget if
+            has_else = bool(node.orelse)
+            if_op = scf_dialect.IfOp(cv, has_else=has_else)
+            with InsertionPoint(if_op.then_block):
+                for s in node.body:
                     self._stmt(s)
                 scf_dialect.YieldOp([])
+            if has_else:
+                with InsertionPoint(if_op.else_block):
+                    for s in node.orelse:
+                        self._stmt(s)
+                    scf_dialect.YieldOp([])
+            return
+
+        # Promote init vals to runtime so scf.if can yield them
+        init_vals, init_tags = [], []
+        for n in yield_names:
+            v, t = self.env[n]
+            if _is_ct(t):
+                v, t = _to_runtime(self.ctx, v, t)
+                self.env[n] = (v, t)
+            init_vals.append(v)
+            init_tags.append(t)
+
+        result_types = [v.type for v in init_vals]
+        if_op = scf_dialect.IfOp(cv, result_types, has_else=True)
+
+        # Then block
+        with InsertionPoint(if_op.then_block):
+            # Reset env to use block args (init vals dominate inside region)
+            for n, v, t in zip(yield_names, init_vals, init_tags):
+                self.env[n] = (v, t)
+            for s in node.body:
+                self._stmt(s)
+            scf_dialect.YieldOp([self.env[n][0] for n in yield_names])
+
+        # Else block — execute else body if present, otherwise pass through
+        with InsertionPoint(if_op.else_block):
+            for n, v, t in zip(yield_names, init_vals, init_tags):
+                self.env[n] = (v, t)
+            for s in node.orelse:
+                self._stmt(s)
+            scf_dialect.YieldOp([self.env[n][0] for n in yield_names])
+
+        # After the if: env points to the if-op results
+        for i, n in enumerate(yield_names):
+            self.env[n] = (if_op.results[i], init_tags[i])
 
     # -- while (compile-time unroll) -----------------------------------
 
@@ -363,7 +409,8 @@ class _Compiler:
     def _binop_ct(lv, lt, rv, rt, op):
         ops = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
                ast.Mult: lambda a, b: a * b, ast.FloorDiv: lambda a, b: a // b,
-               ast.Mod: lambda a, b: a % b, ast.Div: lambda a, b: a / b}
+               ast.Mod: lambda a, b: a % b, ast.Div: lambda a, b: a / b,
+               ast.Pow: lambda a, b: a ** b}
         r = ops[op](lv, rv)
         tag = CT_FLOAT if isinstance(r, float) or lt == CT_FLOAT or rt == CT_FLOAT else CT_INT
         return (r if tag == CT_FLOAT else int(r), tag)
@@ -480,6 +527,44 @@ class _Compiler:
             layout = self._eval_ct(node.args[1])
             self.ctx.set_layout(buf_idx, layout)
             return (None, CT_INT)
+        # --- Warp / subgroup operations ---
+        if name == "lane_id":
+            return (self.ctx.lane_id(), INDEX)
+        if name == "warp_size":
+            return (self.ctx.subgroup_size(), INDEX)
+        if name in ("shuffle_down", "shuffle_up", "shuffle_xor", "shuffle_idx"):
+            val, vtag = self._expr(node.args[0])
+            arg1_v, arg1_t = self._expr(node.args[1])
+            # offset/mask/lane: pass as Python int for constant, or MLIR value
+            if _is_ct(arg1_t):
+                arg1_v = int(arg1_v)
+            fn = getattr(self.ctx, name)
+            return (fn(val, arg1_v), F32)
+        if name == "subgroup_reduce_add":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.subgroup_reduce_add(val), F32)
+        if name == "subgroup_reduce_mul":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.subgroup_reduce_mul(val), F32)
+        if name == "subgroup_reduce_max":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.subgroup_reduce_max(val), F32)
+        if name == "subgroup_reduce_min":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.subgroup_reduce_min(val), F32)
+        # --- Block-wide operations ---
+        if name == "all_reduce_add":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.all_reduce_add(val), F32)
+        if name == "all_reduce_mul":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.all_reduce_mul(val), F32)
+        if name == "all_reduce_max":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.all_reduce_max(val), F32)
+        if name == "all_reduce_min":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.all_reduce_min(val), F32)
         raise NotImplementedError(f"Unknown function: {name}")
 
     def _eval_ct(self, node):
