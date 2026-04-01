@@ -1,20 +1,13 @@
 """Puzzle 14 — Prefix Sum: compute inclusive prefix sum (running total).
 
-Uses Hillis-Steele algorithm: stride doubles each step.
-LEGO's compile-time while loop handles this naturally.
+Hillis-Steele algorithm with double-barrier per step to avoid read-write
+hazards (matches the Mojo solution exactly):
+  1. Read smem[tx - offset] into temp variable
+  2. Barrier (ensure all reads complete)
+  3. Write smem[tx] += temp
+  4. Barrier (ensure all writes complete before next step)
 
 output[i] = sum(a[0..i])
-
-Mojo equivalent:
-    shared[i] = a[i]
-    barrier()
-    stride = 1
-    while stride < TPB:
-        if i >= stride:
-            shared[i] += shared[i - stride]
-        barrier()
-        stride *= 2
-    output[i] = shared[i]
 """
 import sys
 import numpy as np
@@ -38,13 +31,20 @@ def prefix_sum(A: Buffer(layout, SIZE), Out: Buffer(layout, SIZE),
     tx = thread_id.x
     smem[tx] = A[tx]
     barrier()
-    # Hillis-Steele: stride doubles each step
-    stride = 1
-    while stride < TPB:
-        if tx >= stride:
-            smem[tx] = smem[tx] + smem[tx - stride]
+    # Hillis-Steele with double-barrier (matches Mojo solution):
+    # read phase → barrier → write phase → barrier
+    offset = 1
+    while offset < TPB:
+        # Read phase: capture neighbor value before anyone writes
+        current_val = 0.0
+        if tx >= offset:
+            current_val = smem[tx - offset]
         barrier()
-        stride = stride * 2
+        # Write phase: safe to write since all reads are done
+        if tx >= offset:
+            smem[tx] = smem[tx] + current_val
+        barrier()
+        offset = offset * 2
     Out[tx] = smem[tx]
 
 

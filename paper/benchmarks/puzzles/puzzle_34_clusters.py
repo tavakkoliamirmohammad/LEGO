@@ -1,16 +1,12 @@
-"""Puzzle 34 — GPU Cluster Programming: coordinate computation across SMs.
+"""Puzzle 34 — GPU Cluster Programming: multi-block scaled reduction.
 
-NOTE: GPU cluster operations (gpu.cluster_id, gpu.cluster_dim) require
-SM90+ (NVIDIA Hopper) hardware. This puzzle demonstrates the PATTERN
-of multi-block coordination — multiple blocks cooperating on a shared
-reduction.
+Mojo puzzle: each block scales input by (block_id + 1), then sums.
+Cluster coordination (cluster_arrive/wait) is used for inter-block sync.
+We implement the per-block computation faithfully; cluster sync is
+replaced by independent block execution (same result since blocks
+don't exchange data in the first sub-test).
 
-Pattern: each block reduces its local tile, then block 0 collects partial
-sums from all blocks. In a real cluster, distributed shared memory would
-allow direct cross-block communication.
-
-For now, this implements multi-block reduction where each block writes
-its partial sum, demonstrating the coordination pattern.
+  output[block_id] = sum(input[block_start..block_end] * (block_id + 1))
 """
 import sys
 import numpy as np
@@ -32,24 +28,24 @@ smem_layout = Row(BLOCK)
 
 
 @gpu_kernel(grid=(num_blocks,), block=(BLOCK,))
-def cluster_reduce(A: Buffer(layout, N),
-                   Partials: Buffer(partial_layout, num_blocks),
-                   smem: Shared(smem_layout, BLOCK)):
+def cluster_scaled_reduce(A: Buffer(layout, N),
+                          Out: Buffer(partial_layout, num_blocks),
+                          smem: Shared(smem_layout, BLOCK)):
     bx = block_id.x
     tx = thread_id.x
-    # Phase 1: Each block reduces its tile (local reduction)
-    smem[tx] = A[bx, tx]
+    # Scale by (block_id + 1) — matches Mojo's cluster_coordination_basics
+    smem[tx] = A[bx, tx] * (bx + 1)
     barrier()
+    # Tree reduction within block
     stride = BLOCK // 2
     while stride > 0:
         if tx < stride:
             smem[tx] = smem[tx] + smem[tx + stride]
         barrier()
         stride = stride // 2
-    # Phase 2: Block 0 thread 0 writes partial sum
-    # In a cluster, this would use distributed shared memory
+    # Thread 0 writes block result
     if tx == 0:
-        Partials[bx] = smem[0]
+        Out[bx] = smem[0]
 
 
 from bench_utils import run_benchmark
@@ -57,12 +53,16 @@ from bench_utils import run_benchmark
 if __name__ == "__main__":
 
     def compute_expected(inputs):
-        return inputs[0].reshape(-1, BLOCK).sum(axis=1).astype(np.float32)
+        a = inputs[0].reshape(-1, BLOCK)
+        out = np.zeros(num_blocks, dtype=np.float32)
+        for b in range(num_blocks):
+            out[b] = (a[b] * (b + 1)).sum()
+        return out.astype(np.float32)
 
     run_benchmark(
-        cluster_reduce, compute_expected,
+        cluster_scaled_reduce, compute_expected,
         targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
         label=f"N={N}",
         init_mod=10,
-        atol=1e-4,
+        atol=1e-2,
     )

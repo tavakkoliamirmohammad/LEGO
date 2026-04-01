@@ -1,18 +1,10 @@
-"""Puzzle 32 — Bank Conflicts: avoid shared memory bank conflicts via padding.
+"""Puzzle 32 — Bank Conflicts: shared memory access pattern analysis.
 
-Shared memory is organized in 32 banks. When multiple threads access the
-same bank simultaneously (but different addresses), a bank conflict occurs.
+Mojo puzzle: (input + 10) * 2 via shared memory with stride-1 access.
+Both the no-conflict and 2-way-conflict versions produce the same result.
+This is a profiling exercise — the puzzle is about NSight Compute analysis.
 
-Fix: pad each row by 1 element so consecutive rows map to different banks.
-
-  Without padding: Row(TILE, TILE)     — column accesses hit same bank
-  With padding:    Row(TILE, TILE + 1) — offset breaks the conflict pattern
-
-LEGO advantage: the padding is expressed in the layout itself. No manual
-stride tricks needed — Row(TILE, TILE+1) naturally offsets each row.
-
-This puzzle demonstrates a matrix transpose where column-major reads
-benefit from padding to avoid bank conflicts.
+We implement the no-conflict version faithfully.
 """
 import sys
 import numpy as np
@@ -24,32 +16,23 @@ if len(sys.argv) != 2:
     sys.exit(1)
 
 N = int(sys.argv[1])
-TILE = 32
-assert N % TILE == 0
-num_tiles = N // TILE
+TPB = 256
+assert N % TPB == 0
+num_blocks = N // TPB
 
-# --- Global layouts ---
-A_layout = OrderBy(Row(N, N)).TileBy([num_tiles, num_tiles], [TILE, TILE])
-
-# --- Shared memory with padding: TILE rows x (TILE+1) cols ---
-# The +1 padding breaks bank conflict patterns on column access.
-smem_layout = Row(TILE, TILE + 1)
-
-C_layout = OrderBy(Row(N, N)).TileBy([num_tiles, num_tiles], [TILE, TILE])
+layout = OrderBy(Row(N)).TileBy([num_blocks], [TPB])
+smem_layout = Row(TPB)
 
 
-@gpu_kernel(grid=(num_tiles, num_tiles), block=(TILE, TILE))
-def transpose_padded(A: Buffer(A_layout, N, N), B: Buffer(C_layout, N, N),
-                     smem: Shared(smem_layout, TILE, TILE + 1)):
-    by = block_id.y
+@gpu_kernel(grid=(num_blocks,), block=(TPB,))
+def no_conflict(A: Buffer(layout, N), Out: Buffer(layout, N),
+                smem: Shared(smem_layout, TPB)):
     bx = block_id.x
-    ty = thread_id.y
     tx = thread_id.x
-    # Load tile into padded shared memory (coalesced global read)
-    smem[ty, tx] = A[by, bx, ty, tx]
+    # Stride-1 access: no bank conflicts
+    smem[tx] = A[bx, tx] + 10.0
     barrier()
-    # Write transposed tile from shared memory (padded layout avoids bank conflicts)
-    B[bx, by, ty, tx] = smem[tx, ty]
+    Out[bx, tx] = smem[tx] * 2.0
 
 
 from bench_utils import run_benchmark
@@ -57,10 +40,10 @@ from bench_utils import run_benchmark
 if __name__ == "__main__":
 
     def compute_expected(inputs):
-        return inputs[0].reshape(N, N).T.ravel().astype(np.float32)
+        return ((inputs[0] + 10.0) * 2.0).astype(np.float32)
 
     run_benchmark(
-        transpose_padded, compute_expected,
+        no_conflict, compute_expected,
         targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
-        label=f"{N}x{N}",
+        label=f"N={N}",
     )

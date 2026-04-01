@@ -417,8 +417,22 @@ class _Compiler:
 
     def _binop_rt(self, lv, lt, rv, rt, op):
         if lt == F32 or rt == F32:
+            # Promote index operand to f32 if needed (e.g., A[i] * (block_id + 1))
+            # index → i32 → f32 (arith.sitofp requires integer, not index)
+            if lt == INDEX:
+                from lego.mlir.ir import IntegerType
+                i32 = IntegerType.get_signless(32)
+                lv = arith_dialect.IndexCastOp(i32, lv).result
+                lv = arith_dialect.SIToFPOp(F32Type.get(), lv).result
+                lt = F32
+            if rt == INDEX:
+                from lego.mlir.ir import IntegerType
+                i32 = IntegerType.get_signless(32)
+                rv = arith_dialect.IndexCastOp(i32, rv).result
+                rv = arith_dialect.SIToFPOp(F32Type.get(), rv).result
+                rt = F32
             m = {ast.Add: self.ctx.addf, ast.Sub: self.ctx.subf,
-                 ast.Mult: self.ctx.mulf}
+                 ast.Mult: self.ctx.mulf, ast.Div: lambda a, b: arith_dialect.DivFOp(a, b).result}
             return (m[op](lv, rv), F32)
         m = {ast.Add: self.ctx.addi,
              ast.Sub: lambda a, b: arith_dialect.SubIOp(a, b).result,
