@@ -36,14 +36,15 @@ def cluster_scaled_reduce(A: Buffer(layout, N),
     # Scale by (block_id + 1) — matches Mojo's cluster_coordination_basics
     smem[tx] = A[bx, tx] * (bx + 1)
     barrier()
-    # Thread 0 sums sequentially (matches Mojo's sequential accumulation)
+    # Tree reduction (portable across all backends)
+    stride = BLOCK // 2
+    while stride > 0:
+        if tx < stride:
+            smem[tx] = smem[tx] + smem[tx + stride]
+        barrier()
+        stride = stride // 2
     if tx == 0:
-        block_sum = smem[0]
-        i = 1
-        while i < BLOCK:
-            block_sum = block_sum + smem[i]
-            i = i + 1
-        Out[bx] = block_sum
+        Out[bx] = smem[0]
 
 
 from bench_utils import run_benchmark
