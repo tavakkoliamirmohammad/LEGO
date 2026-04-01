@@ -12,5 +12,4 @@ add_public_tablegen_target(MLIRLegoOpsIncGen)
 
 set(LLVM_TARGET_DEFINITIONS Passes.td)
 mlir_tablegen(Passes.h.inc -gen-pass-decls)
-# mlir_tablegen(Passes.cpp.inc -gen-pass-defs) # Optional if we need definitions
 add_public_tablegen_target(MLIRLegoPassesIncGen)

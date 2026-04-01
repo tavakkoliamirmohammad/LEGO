@@ -99,6 +99,7 @@ struct LegoToROCDLPipelineOptions
 };
 #endif
 
+
 void registerLegoPipelines();
 void buildLegoLowerPipeline(OpPassManager &pm);
 void buildLegoToLLVMPipeline(OpPassManager &pm);
@@ -116,6 +117,7 @@ void buildLegoToNVVMPipeline(OpPassManager &pm,
 void buildLegoToROCDLPipeline(OpPassManager &pm,
                                const LegoToROCDLPipelineOptions &options);
 #endif
+
 
 // =========================================================================
 // Shared GPU pipeline building blocks.

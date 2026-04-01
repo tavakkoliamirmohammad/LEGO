@@ -13,12 +13,13 @@ option(LEGO_BUILD_TESTS "Build LEGO tests" ON)
 set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;SPIRV;AArch64)")
 
 # --- Python & Venv Support ---
-# Prioritize the local virtual environment
-set(LEGO_VENV_PATH "${CMAKE_SOURCE_DIR}/venv")
-if(EXISTS "${LEGO_VENV_PATH}/bin/python3")
-  set(Python3_EXECUTABLE "${LEGO_VENV_PATH}/bin/python3")
-  set(Python3_ROOT_DIR "${LEGO_VENV_PATH}")
-  message(STATUS "Prioritizing Python from venv: ${Python3_EXECUTABLE}")
+if(NOT EMSCRIPTEN)
+  set(LEGO_VENV_PATH "${CMAKE_SOURCE_DIR}/venv")
+  if(EXISTS "${LEGO_VENV_PATH}/bin/python3")
+    set(Python3_EXECUTABLE "${LEGO_VENV_PATH}/bin/python3")
+    set(Python3_ROOT_DIR "${LEGO_VENV_PATH}")
+    message(STATUS "Prioritizing Python from venv: ${Python3_EXECUTABLE}")
+  endif()
 endif()
 
 # --- Fast Linker Support ---
@@ -58,12 +59,35 @@ endif()
 
 # --- MLIR Configuration ---
 if(LEGO_MONOLITHIC_LLVM)
-  set(LLVM_SUBMODULE_DIR "${CMAKE_SOURCE_DIR}/third_party/llvm-project")
+  set(LLVM_SUBMODULE_DIR "${PROJECT_SOURCE_DIR}/third_party/llvm-project")
   if(NOT EXISTS "${LLVM_SUBMODULE_DIR}")
     message(FATAL_ERROR "llvm-project submodule not found at ${LLVM_SUBMODULE_DIR}")
   endif()
 
   set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
+
+  # --- Emscripten cross-compilation ---
+  # Cross-compiling LLVM/MLIR to WebAssembly requires pre-built native
+  # tablegen tools (they run at build time to generate C++ from .td files).
+  if(EMSCRIPTEN)
+    if(NOT LLVM_NATIVE_TOOL_DIR)
+      message(FATAL_ERROR
+        "LLVM_NATIVE_TOOL_DIR is required for Emscripten cross-compilation.\n"
+        "Point it at the bin/ directory of a native LLVM/MLIR build, e.g.:\n"
+        "  -DLLVM_NATIVE_TOOL_DIR=${CMAKE_SOURCE_DIR}/build/llvm-build/bin")
+    endif()
+    # Only the WebAssembly backend is needed in the browser
+    set(LEGO_LLVM_TARGETS "WebAssembly" CACHE STRING "" FORCE)
+    # Disable features unavailable under Emscripten
+    set(LLVM_ENABLE_THREADS OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_TERMINFO OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_LIBXML2 OFF CACHE BOOL "" FORCE)
+    set(LLVM_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(LLVM_BUILD_UTILS OFF CACHE BOOL "" FORCE)
+  endif()
+
   set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
 
   # LEGO_ENABLE_RUNNERS is auto-detected below; if the user sets it
@@ -75,8 +99,14 @@ if(LEGO_MONOLITHIC_LLVM)
   # Minimal LLVM/MLIR build: disable components LEGO does not need
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
+  set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
+  set(LLVM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_BINDINGS OFF CACHE BOOL "" FORCE)
-  set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "" FORCE)
+  if(NOT EMSCRIPTEN)
+    set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "" FORCE)
+  else()
+    set(MLIR_ENABLE_BINDINGS_PYTHON OFF CACHE BOOL "" FORCE)
+  endif()
   set(LLVM_ENABLE_Z3_SOLVER OFF CACHE BOOL "" FORCE)
   if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
@@ -163,13 +193,19 @@ if(_ROCM_SMI)
   endif()
 endif()
 
-# --- NVPTX detection ---
-set(LEGO_HAS_NVPTX OFF)
-if("${LLVM_TARGETS_TO_BUILD}" MATCHES "NVPTX")
-  set(LEGO_HAS_NVPTX ON)
-  add_definitions(-DLEGO_HAS_NVPTX)
-  message(STATUS "NVPTX backend enabled — NVVM compilation support available")
-endif()
+# --- LLVM target detection helper ---
+macro(detect_llvm_target _target _msg)
+  set(LEGO_HAS_${_target} OFF)
+  if("${LLVM_TARGETS_TO_BUILD}" MATCHES "${_target}")
+    set(LEGO_HAS_${_target} ON)
+    add_definitions(-DLEGO_HAS_${_target})
+    message(STATUS "${_msg}")
+  endif()
+endmacro()
+
+detect_llvm_target(NVPTX  "NVPTX backend enabled — NVVM compilation support available")
+detect_llvm_target(SPIRV  "SPIRV backend enabled — LLVM SPIR-V compilation support available")
+detect_llvm_target(AMDGPU "AMDGPU backend enabled")
 
 # Auto-enable runners when NVPTX target is built and a GPU is present,
 # unless the user explicitly set LEGO_ENABLE_RUNNERS.
@@ -182,33 +218,67 @@ if(NOT DEFINED LEGO_ENABLE_RUNNERS)
   endif()
 endif()
 
-# --- SPIRV detection ---
-set(LEGO_HAS_SPIRV OFF)
-if("${LLVM_TARGETS_TO_BUILD}" MATCHES "SPIRV")
-  set(LEGO_HAS_SPIRV ON)
-  add_definitions(-DLEGO_HAS_SPIRV)
-  message(STATUS "SPIRV backend enabled — LLVM SPIR-V compilation support available")
-endif()
 
-# --- AMDGPU detection ---
-set(LEGO_HAS_AMDGPU OFF)
-if("${LLVM_TARGETS_TO_BUILD}" MATCHES "AMDGPU")
-  set(LEGO_HAS_AMDGPU ON)
-  add_definitions(-DLEGO_HAS_AMDGPU)
-  if(LEGO_HOST_HAS_AMD_GPU)
-    message(STATUS "AMDGPU backend enabled — ROCDL compilation + GPU execution available")
-  else()
-    message(STATUS "AMDGPU backend enabled — ROCDL cross-compilation only (no AMD GPU detected)")
-  endif()
+# For cross-compilation, use the native tablegen from LLVM_NATIVE_TOOL_DIR;
+# for native builds, use the CMake target built by add_subdirectory.
+if(EMSCRIPTEN AND LLVM_NATIVE_TOOL_DIR)
+  set(MLIR_TABLEGEN_EXE "${LLVM_NATIVE_TOOL_DIR}/mlir-tblgen")
+else()
+  set(MLIR_TABLEGEN_EXE mlir-tblgen)
 endif()
-
-set(MLIR_TABLEGEN_EXE mlir-tblgen)
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_BINARY_DIR}/include)
 
 add_subdirectory(include/Lego)
 add_subdirectory(lib/Lego)
+
+if(EMSCRIPTEN)
+  # WASM build: only build the driver, skip lego-opt/Python/tests.
+  # The resulting lego_driver.js + lego_driver.wasm contain the full
+  # LEGO compiler with IR printing at every pipeline stage.
+  add_executable(lego_driver viz/wasm/lego_driver.cpp)
+  target_link_libraries(lego_driver PRIVATE MLIRLego)
+  set_target_properties(lego_driver PROPERTIES SUFFIX ".js")
+  target_link_options(lego_driver PRIVATE
+    "SHELL:-s EXPORTED_FUNCTIONS=['_lego_compile','_lego_free','_malloc','_free']"
+    "SHELL:-s EXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','stringToUTF8','lengthBytesUTF8']"
+    "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+    "SHELL:-s INITIAL_MEMORY=67108864"
+    "SHELL:-s STACK_SIZE=4194304"
+    "SHELL:-s MODULARIZE=1"
+    "SHELL:-s EXPORT_NAME='LEGOCompiler'"
+    "SHELL:-s ENVIRONMENT='web,node'"
+    "SHELL:-s FILESYSTEM=0"
+    "SHELL:-s DISABLE_EXCEPTION_CATCHING=1"
+    -O2
+  )
+  add_custom_command(TARGET lego_driver POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+      $<TARGET_FILE:lego_driver>
+      ${CMAKE_SOURCE_DIR}/viz/wasm/lego_driver.js
+    COMMAND ${CMAKE_COMMAND} -E copy
+      $<TARGET_FILE_DIR:lego_driver>/lego_driver.wasm
+      ${CMAKE_SOURCE_DIR}/viz/wasm/lego_driver.wasm
+    COMMENT "Copying WASM driver to viz/wasm/"
+  )
+
+  # WASM integration tests (Node.js >= 16 required for BigInt + WASM).
+  # Use Emscripten's bundled Node to avoid the ancient system Node.
+  set(NODE_BIN "$ENV{EMSDK_NODE}")
+  if(NODE_BIN)
+    add_custom_target(check-lego-wasm
+      COMMAND ${NODE_BIN}
+        ${CMAKE_SOURCE_DIR}/test/wasm/test_wasm_codegen.mjs
+        $<TARGET_FILE:lego_driver>
+      DEPENDS lego_driver
+      COMMENT "Running WASM codegen integration tests"
+    )
+  endif()
+
+  return()
+endif()
+
 add_subdirectory(tools/lego-opt)
 
 # --- Python Bindings for LEGO Dialect ---
@@ -417,102 +487,61 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     USES_TERMINAL
   )
 
+  # --- Example / benchmark target helper ---
+  # Creates individual check-<prefix>-<name> targets and an umbrella
+  # check-<prefix>-examples target that depends on all of them.
+  macro(add_example_group _prefix _dir _env_vars)
+    add_custom_target(check-${_prefix}-examples
+      COMMENT "Running all ${_prefix} examples"
+    )
+    foreach(_entry ${ARGN})
+      # Each entry is "script.py" or "script.py:arg1:arg2"
+      string(REPLACE ":" ";" _parts "${_entry}")
+      list(GET _parts 0 _script)
+      list(REMOVE_AT _parts 0)
+      string(REPLACE ".py" "" _name "${_script}")
+      add_custom_target(check-${_prefix}-${_name}
+        COMMAND ${CMAKE_COMMAND} -E env
+          "PYTHONPATH=${LEGO_PYTHONPATH}"
+          ${_env_vars}
+          "${Python_EXECUTABLE}" "${_dir}/${_script}" ${_parts}
+        DEPENDS lego-prepare-wheel
+        COMMENT "Running ${_prefix}: ${_script} ${_parts}"
+        USES_TERMINAL
+      )
+      add_dependencies(check-${_prefix}-examples check-${_prefix}-${_name})
+    endforeach()
+  endmacro()
+
   # --- Triton GPU example tests (require NVPTX + GPU) ---
   if(LEGO_HAS_NVPTX)
-    set(_triton_examples
+    add_example_group(triton "${CMAKE_SOURCE_DIR}/python/examples/triton" ""
       vecadd_lego.py
       matmul_lego.py
       softmax_lego.py
       layernorm_lego.py
       grouped_gemm_lego.py
     )
-    foreach(_example ${_triton_examples})
-      string(REPLACE ".py" "" _name ${_example})
-      add_custom_target(check-triton-${_name}
-        COMMAND ${CMAKE_COMMAND} -E env
-          "PYTHONPATH=${LEGO_PYTHONPATH}"
-          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/python/examples/triton/${_example}"
-        DEPENDS lego-prepare-wheel
-        COMMENT "Running Triton example: ${_example}"
-        USES_TERMINAL
-      )
-    endforeach()
-
-    add_custom_target(check-triton-examples
-      COMMENT "Running all Triton GPU examples"
-    )
-    foreach(_example ${_triton_examples})
-      string(REPLACE ".py" "" _name ${_example})
-      add_dependencies(check-triton-examples check-triton-${_name})
-    endforeach()
   endif()
 
-  # --- LEGO transpose GPU examples (require NVPTX + GPU + runners) ---
+  # MLIR_BUILD_DIR is needed by bench_utils.py to locate mlir-runner.
+  get_filename_component(_MLIR_BUILD_DIR "${LLVM_DIR}/../../.." ABSOLUTE)
+
+  # --- LEGO GPU examples (require NVPTX + GPU + runners) ---
   if(LEGO_ENABLE_RUNNERS AND LEGO_HOST_HAS_NVIDIA_GPU)
-    # MLIR_BUILD_DIR is needed by bench_utils.py to locate mlir-runner
-    if(LEGO_MONOLITHIC_LLVM)
-      set(_MLIR_BUILD_DIR "${CMAKE_BINARY_DIR}/llvm-build")
-    else()
-      # Decoupled build — derive from the MLIR we found
-      get_filename_component(_MLIR_BUILD_DIR "${MLIR_DIR}/../../.." ABSOLUTE)
-    endif()
-
-    set(_transpose_examples
-      transpose_naive.py
-      transpose_smem.py
+    add_example_group(transpose "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir"
+      "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
+      transpose_naive.py:1024:1024
+      transpose_smem.py:1024:1024
     )
-    foreach(_example ${_transpose_examples})
-      string(REPLACE ".py" "" _name ${_example})
-      add_custom_target(check-transpose-${_name}
-        COMMAND ${CMAKE_COMMAND} -E env
-          "PYTHONPATH=${LEGO_PYTHONPATH}"
-          "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
-          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_example}" "1024" "1024"
-        DEPENDS lego-prepare-wheel
-        COMMENT "Running transpose example: ${_example} 1024 1024"
-        USES_TERMINAL
-      )
-    endforeach()
 
-    add_custom_target(check-transpose-examples
-      COMMENT "Running all LEGO transpose GPU examples"
+    add_example_group(gpu "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir"
+      "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
+      vecadd.py:1024
+      matmul_naive.py:64
+      matmul_smem.py:64
+      reduce_sum.py:1024
     )
-    foreach(_example ${_transpose_examples})
-      string(REPLACE ".py" "" _name ${_example})
-      add_dependencies(check-transpose-examples check-transpose-${_name})
-    endforeach()
-
-    # --- LEGO GPU kernel benchmarks (vecadd, matmul, reduce) ---
-    # Each takes a single size argument; matmul uses square M=N=K.
-    set(_gpu_benchmarks
-      "vecadd.py;1024"
-      "matmul_naive.py;64"
-      "matmul_smem.py;64"
-      "reduce_sum.py;1024"
-    )
-    foreach(_entry ${_gpu_benchmarks})
-      list(GET _entry 0 _example)
-      list(GET _entry 1 _size)
-      string(REPLACE ".py" "" _name ${_example})
-      add_custom_target(check-gpu-${_name}
-        COMMAND ${CMAKE_COMMAND} -E env
-          "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
-          "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
-          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_example}" "${_size}"
-        DEPENDS LegoPythonModules
-        COMMENT "Running GPU benchmark: ${_example} ${_size}"
-        USES_TERMINAL
-      )
-    endforeach()
-
-    add_custom_target(check-gpu-examples
-      COMMENT "Running all LEGO GPU kernel benchmarks (@gpu_kernel DSL)"
-    )
-    foreach(_entry ${_gpu_benchmarks})
-      list(GET _entry 0 _example)
-      string(REPLACE ".py" "" _name ${_example})
-      add_dependencies(check-gpu-examples check-gpu-${_name})
-    endforeach()
   endif()
 
   # --- Cross-platform SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal via wgpu) ---
@@ -528,6 +557,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     add_custom_target(check-spirv-${_name}
       COMMAND ${CMAKE_COMMAND} -E env
         "PYTHONPATH=${LEGO_PYTHONPATH}:${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir"
+        "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
         "${Python_EXECUTABLE}" -P
           "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_script}" ${ARGN}
       DEPENDS lego-prepare-wheel
@@ -597,3 +627,12 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     add_dependencies(check-lego-all check-spirv-examples)
   endif()
 endif()
+
+# --- WASM Viz Driver ---
+# The WASM driver is built via Emscripten cross-compilation in a separate
+# build directory.  See build_wasm.sh for the automated workflow:
+#
+#   ./build_wasm.sh
+#
+# This produces viz/wasm/lego_driver.js + viz/wasm/lego_driver.wasm
+# containing the full LEGO compiler with IR printing support.

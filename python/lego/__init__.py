@@ -34,7 +34,7 @@ _SPIRV_TARGETS = {"vulkan", "webgpu", "metal", "webgl"}
 
 
 def _all_targets():
-    return {"cpu"} | set(_GPU_TARGETS) | _SPIRV_TARGETS
+    return {"cpu", "wasm"} | set(_GPU_TARGETS) | _SPIRV_TARGETS
 
 
 def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):

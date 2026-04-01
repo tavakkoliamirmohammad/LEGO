@@ -3,27 +3,29 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include_directories(${CMAKE_BINARY_DIR}/include)
 
-# --- Z3 solver (needed by SMT verification passes) ---
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-get_filename_component(PYTHON_BIN_DIR "${Python3_EXECUTABLE}" DIRECTORY)
+# --- Z3 solver (needed by SMT verification passes, skip for Emscripten) ---
+if(NOT EMSCRIPTEN)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  get_filename_component(PYTHON_BIN_DIR "${Python3_EXECUTABLE}" DIRECTORY)
 
-execute_process(
-  COMMAND "${Python3_EXECUTABLE}" -c "import z3"
-  RESULT_VARIABLE Z3_IMPORT_RESULT OUTPUT_QUIET ERROR_QUIET)
-
-if(NOT Z3_IMPORT_RESULT EQUAL 0)
-  message(STATUS "z3-solver not found, installing...")
   execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -m pip install z3-solver
-    RESULT_VARIABLE PIP_RESULT)
-  if(NOT PIP_RESULT EQUAL 0)
-    message(FATAL_ERROR "Failed to install z3-solver")
-  endif()
-endif()
+    COMMAND "${Python3_EXECUTABLE}" -c "import z3"
+    RESULT_VARIABLE Z3_IMPORT_RESULT OUTPUT_QUIET ERROR_QUIET)
 
-find_program(Z3_BIN_PATH NAMES z3 HINTS "${PYTHON_BIN_DIR}" REQUIRED)
-message(STATUS "Using Z3: ${Z3_BIN_PATH}")
-add_definitions(-DLEGO_Z3_EXECUTABLE="${Z3_BIN_PATH}")
+  if(NOT Z3_IMPORT_RESULT EQUAL 0)
+    message(STATUS "z3-solver not found, installing...")
+    execute_process(
+      COMMAND "${Python3_EXECUTABLE}" -m pip install z3-solver
+      RESULT_VARIABLE PIP_RESULT)
+    if(NOT PIP_RESULT EQUAL 0)
+      message(FATAL_ERROR "Failed to install z3-solver")
+    endif()
+  endif()
+
+  find_program(Z3_BIN_PATH NAMES z3 HINTS "${PYTHON_BIN_DIR}" REQUIRED)
+  message(STATUS "Using Z3: ${Z3_BIN_PATH}")
+  add_definitions(-DLEGO_Z3_EXECUTABLE="${Z3_BIN_PATH}")
+endif()
 
 # --- GPU backend sources (conditional on LLVM targets) ---
 set(_GPU_BACKEND_SOURCES
@@ -60,8 +62,28 @@ if(LEGO_HAS_AMDGPU)
   )
 endif()
 
+# LLVM target components (must use LINK_COMPONENTS, not LINK_LIBS)
+set(_LLVM_COMPONENTS)
+if(EMSCRIPTEN)
+  # The WASM driver (lego_driver) translates LLVM dialect -> LLVM IR ->
+  # wasm32 object code, so it needs the WebAssembly codegen backend.
+  list(APPEND _LLVM_COMPONENTS
+    WebAssemblyCodeGen WebAssemblyAsmParser WebAssemblyDesc WebAssemblyInfo
+  )
+endif()
+
+# --- JIT engine (unavailable under Emscripten — requires dlopen/libffi) ---
+if(NOT EMSCRIPTEN)
+  set(_JIT_SOURCES LegoJITEngine.cpp)
+  set(_JIT_LIBS MLIRExecutionEngine)
+else()
+  set(_JIT_SOURCES)
+  set(_JIT_LIBS)
+endif()
+
 # --- Core dialect library ---
 add_mlir_dialect_library(MLIRLego
+  PARTIAL_SOURCES_INTENDED
   # Dialect core
   LegoDialect.cpp
   LegoOps.cpp
@@ -78,8 +100,8 @@ add_mlir_dialect_library(MLIRLego
   LegoVerifyCoalescing.cpp
   LegoVerifyBankConflicts.cpp
   SMTUtils.cpp
-  # JIT
-  LegoJITEngine.cpp
+  # JIT (excluded for Emscripten)
+  ${_JIT_SOURCES}
   # GPU backends (conditional)
   ${_GPU_BACKEND_SOURCES}
 
@@ -103,8 +125,9 @@ add_mlir_dialect_library(MLIRLego
   MLIRSCFToControlFlow
   MLIRControlFlowDialect
   MLIRLLVMDialect
-  # JIT engine
-  MLIRExecutionEngine
+  # JIT engine (excluded for Emscripten)
+  ${_JIT_LIBS}
+  # IR translation (needed by JIT pipeline)
   MLIRTargetLLVMIRExport
   MLIRLLVMToLLVMIRTranslation
   MLIRBuiltinToLLVMIRTranslation
@@ -129,6 +152,9 @@ add_mlir_dialect_library(MLIRLego
   ${_GPU_BACKEND_LIBS}
   # Index to LLVM (needed for GPU host lowering)
   MLIRIndexToLLVM
+
+  LINK_COMPONENTS
+  ${_LLVM_COMPONENTS}
 )
 
 add_subdirectory(CAPI)

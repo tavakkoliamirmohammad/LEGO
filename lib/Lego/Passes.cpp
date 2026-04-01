@@ -169,6 +169,7 @@ void registerLegoPipelines() {
     "(LEGO -> Arith -> GPU outlined -> ROCDL -> HSACO)",
     buildLegoToROCDLPipeline);
 #endif
+
 }
 
 } // namespace lego

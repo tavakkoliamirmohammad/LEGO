@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LEGO Studio</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header>
+    <h1><span>LEGO</span> Studio</h1>
+    <div class="header-actions">
+      <div class="presets">
+        <button class="preset-btn active" data-preset="row-major">Row-Major</button>
+        <button class="preset-btn" data-preset="col-major">Col-Major</button>
+        <button class="preset-btn" data-preset="tiled">Tiled</button>
+        <button class="preset-btn" data-preset="transposed">Transposed</button>
+      </div>
+      <button id="run-btn">Visualize</button>
+      <button id="theme-btn" title="Toggle theme">&#9790;</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <!-- Left: Editor / Builder -->
+    <div id="editor-panel">
+      <div class="panel-header">
+        <div class="panel-tabs">
+          <button class="tab-btn active" data-tab="builder">Builder</button>
+          <button class="tab-btn" data-tab="code">Code</button>
+        </div>
+      </div>
+
+      <!-- Builder mode -->
+      <div id="builder-tab" class="tab-content active">
+        <div class="builder-section">
+          <label>OrderBy</label>
+          <div id="perm-list"></div>
+          <button class="btn-add" id="add-perm-btn">+ Add Permutation</button>
+        </div>
+        <div class="builder-section">
+          <label>Wrap</label>
+          <select id="wrap-type" class="builder-input wrap-select">
+            <option value="group_by">GroupBy</option>
+            <option value="tile_by">TileBy</option>
+          </select>
+          <div id="wrap-config"></div>
+        </div>
+      </div>
+
+      <!-- Code mode -->
+      <div id="code-tab" class="tab-content">
+        <div id="code-editor-wrapper">
+          <div id="line-numbers"></div>
+          <textarea id="code-editor" spellcheck="false" wrap="off">M, N = 8, 8
+L = OrderBy(Row(M, N)).GroupBy([(M, N)])</textarea>
+        </div>
+      </div>
+
+      <div id="error-output"></div>
+      <div id="formula-output"></div>
+    </div>
+
+    <div class="divider divider-v" id="divider-left"></div>
+
+    <!-- Center: Visualization -->
+    <div id="viz-panel">
+      <div id="viz-container">
+        <div class="empty-state">
+          <div class="icon">&#x25A6;</div>
+          <p>Click <strong>Visualize</strong> or press <strong>Ctrl+Enter</strong></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="divider divider-v" id="divider-right"></div>
+
+    <!-- Right: Compiler Output -->
+    <div id="compiler-panel">
+      <div class="compiler-section" id="section-lego">
+        <h3>LEGO Dialect</h3>
+        <pre id="mlir-lego"></pre>
+      </div>
+      <div class="divider divider-h"></div>
+      <div class="compiler-section" id="section-arith">
+        <h3>After lego-lower</h3>
+        <pre id="mlir-arith"></pre>
+      </div>
+      <div class="divider divider-h"></div>
+      <div class="compiler-section" id="section-llvm">
+        <h3>After lego-to-llvm</h3>
+        <pre id="mlir-llvm"></pre>
+      </div>
+    </div>
+  </main>
+
+  <!-- WASM compiler (Emscripten module — must load before main.js) -->
+  <script src="wasm/lego_driver.js"></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

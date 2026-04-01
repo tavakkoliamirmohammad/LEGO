@@ -158,6 +158,11 @@ bool runZ3(const std::string &smtLib) {
 SMTResult runZ3WithModel(const std::string &smtLib) {
   SMTResult result;
 
+#ifdef __EMSCRIPTEN__
+  // Z3 process spawning is not available in WebAssembly.
+  result.isUnknown = true;
+  return result;
+#else
   int out_pipe[2]; int in_pipe[2];
   if (pipe(out_pipe) == -1 || pipe(in_pipe) == -1) {
     result.isUnknown = true;
@@ -276,6 +281,7 @@ SMTResult runZ3WithModel(const std::string &smtLib) {
   }
 
   return result;
+#endif // !__EMSCRIPTEN__
 }
 
 std::string generateGetValueCommands(const SmallVector<std::string> &varNames) {
