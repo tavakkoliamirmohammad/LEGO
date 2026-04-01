@@ -88,6 +88,7 @@ struct SetSPIRVTargetEnvPass
         {spirv::Capability::Shader, spirv::Capability::Int64,
          spirv::Capability::GroupNonUniform,
          spirv::Capability::GroupNonUniformShuffle,
+         spirv::Capability::GroupNonUniformShuffleRelative,
          spirv::Capability::GroupNonUniformArithmetic},
         {spirv::Extension::SPV_KHR_storage_buffer_storage_class}, ctx);
 

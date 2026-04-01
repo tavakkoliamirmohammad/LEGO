@@ -50,8 +50,8 @@ if __name__ == "__main__":
 
     run_benchmark(
         warp_reduce, compute_expected,
-        targets=["cuda", "llvmspirv"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
         label=f"N={N}",
         init_mod=10,
-        atol=1.0,
+        atol=1e-4,
     )

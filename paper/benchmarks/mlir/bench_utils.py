@@ -350,7 +350,16 @@ def _dispatch_wgpu(builder, shader_code, entry_point, metadata, init_mod):
     import wgpu
 
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
-    device = adapter.request_device_sync()
+    # Request subgroup feature if the adapter supports it (needed for shuffle ops).
+    features = []
+    try:
+        supported = adapter.features
+        for feat in ("subgroup", "subgroups", "subgroup-arithmetic"):
+            if feat in supported:
+                features.append(feat)
+    except Exception:
+        pass
+    device = adapter.request_device_sync(required_features=features)
 
     shader = device.create_shader_module(code=shader_code)
     pipeline = device.create_compute_pipeline(

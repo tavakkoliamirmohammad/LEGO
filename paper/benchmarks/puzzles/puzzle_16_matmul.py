@@ -72,5 +72,5 @@ if __name__ == "__main__":
         targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
         label=f"{M}x{N}x{K}",
         init_mod=10,
-        atol=1.0,
+        atol=1e-2,
     )
