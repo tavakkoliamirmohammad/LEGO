@@ -193,13 +193,19 @@ if(_ROCM_SMI)
   endif()
 endif()
 
-# --- NVPTX detection ---
-set(LEGO_HAS_NVPTX OFF)
-if("${LLVM_TARGETS_TO_BUILD}" MATCHES "NVPTX")
-  set(LEGO_HAS_NVPTX ON)
-  add_definitions(-DLEGO_HAS_NVPTX)
-  message(STATUS "NVPTX backend enabled — NVVM compilation support available")
-endif()
+# --- LLVM target detection helper ---
+macro(detect_llvm_target _target _msg)
+  set(LEGO_HAS_${_target} OFF)
+  if("${LLVM_TARGETS_TO_BUILD}" MATCHES "${_target}")
+    set(LEGO_HAS_${_target} ON)
+    add_definitions(-DLEGO_HAS_${_target})
+    message(STATUS "${_msg}")
+  endif()
+endmacro()
+
+detect_llvm_target(NVPTX  "NVPTX backend enabled — NVVM compilation support available")
+detect_llvm_target(SPIRV  "SPIRV backend enabled — LLVM SPIR-V compilation support available")
+detect_llvm_target(AMDGPU "AMDGPU backend enabled")
 
 # Auto-enable runners when NVPTX target is built and a GPU is present,
 # unless the user explicitly set LEGO_ENABLE_RUNNERS.
@@ -209,26 +215,6 @@ if(NOT DEFINED LEGO_ENABLE_RUNNERS)
     message(STATUS "Auto-enabled CUDA runners (NVPTX target + GPU detected)")
   else()
     set(LEGO_ENABLE_RUNNERS OFF)
-  endif()
-endif()
-
-# --- SPIRV detection ---
-set(LEGO_HAS_SPIRV OFF)
-if("${LLVM_TARGETS_TO_BUILD}" MATCHES "SPIRV")
-  set(LEGO_HAS_SPIRV ON)
-  add_definitions(-DLEGO_HAS_SPIRV)
-  message(STATUS "SPIRV backend enabled — LLVM SPIR-V compilation support available")
-endif()
-
-# --- AMDGPU detection ---
-set(LEGO_HAS_AMDGPU OFF)
-if("${LLVM_TARGETS_TO_BUILD}" MATCHES "AMDGPU")
-  set(LEGO_HAS_AMDGPU ON)
-  add_definitions(-DLEGO_HAS_AMDGPU)
-  if(LEGO_HOST_HAS_AMD_GPU)
-    message(STATUS "AMDGPU backend enabled — ROCDL compilation + GPU execution available")
-  else()
-    message(STATUS "AMDGPU backend enabled — ROCDL cross-compilation only (no AMD GPU detected)")
   endif()
 endif()
 
@@ -501,96 +487,61 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     USES_TERMINAL
   )
 
+  # --- Example / benchmark target helper ---
+  # Creates individual check-<prefix>-<name> targets and an umbrella
+  # check-<prefix>-examples target that depends on all of them.
+  macro(add_example_group _prefix _dir _env_vars)
+    add_custom_target(check-${_prefix}-examples
+      COMMENT "Running all ${_prefix} examples"
+    )
+    foreach(_entry ${ARGN})
+      # Each entry is "script.py" or "script.py:arg1:arg2"
+      string(REPLACE ":" ";" _parts "${_entry}")
+      list(GET _parts 0 _script)
+      list(REMOVE_AT _parts 0)
+      string(REPLACE ".py" "" _name "${_script}")
+      add_custom_target(check-${_prefix}-${_name}
+        COMMAND ${CMAKE_COMMAND} -E env
+          "PYTHONPATH=${LEGO_PYTHONPATH}"
+          ${_env_vars}
+          "${Python_EXECUTABLE}" "${_dir}/${_script}" ${_parts}
+        DEPENDS lego-prepare-wheel
+        COMMENT "Running ${_prefix}: ${_script} ${_parts}"
+        USES_TERMINAL
+      )
+      add_dependencies(check-${_prefix}-examples check-${_prefix}-${_name})
+    endforeach()
+  endmacro()
+
   # --- Triton GPU example tests (require NVPTX + GPU) ---
   if(LEGO_HAS_NVPTX)
-    set(_triton_examples
+    add_example_group(triton "${CMAKE_SOURCE_DIR}/python/examples/triton" ""
       vecadd_lego.py
       matmul_lego.py
       softmax_lego.py
       layernorm_lego.py
       grouped_gemm_lego.py
     )
-    foreach(_example ${_triton_examples})
-      string(REPLACE ".py" "" _name ${_example})
-      add_custom_target(check-triton-${_name}
-        COMMAND ${CMAKE_COMMAND} -E env
-          "PYTHONPATH=${LEGO_PYTHONPATH}"
-          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/python/examples/triton/${_example}"
-        DEPENDS lego-prepare-wheel
-        COMMENT "Running Triton example: ${_example}"
-        USES_TERMINAL
-      )
-    endforeach()
-
-    add_custom_target(check-triton-examples
-      COMMENT "Running all Triton GPU examples"
-    )
-    foreach(_example ${_triton_examples})
-      string(REPLACE ".py" "" _name ${_example})
-      add_dependencies(check-triton-examples check-triton-${_name})
-    endforeach()
   endif()
 
   # MLIR_BUILD_DIR is needed by bench_utils.py to locate mlir-runner.
   get_filename_component(_MLIR_BUILD_DIR "${LLVM_DIR}/../../.." ABSOLUTE)
 
-  # --- LEGO transpose GPU examples (require NVPTX + GPU + runners) ---
+  # --- LEGO GPU examples (require NVPTX + GPU + runners) ---
   if(LEGO_ENABLE_RUNNERS AND LEGO_HOST_HAS_NVIDIA_GPU)
-
-    set(_transpose_examples
-      transpose_naive.py
-      transpose_smem.py
+    add_example_group(transpose "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir"
+      "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
+      transpose_naive.py:1024:1024
+      transpose_smem.py:1024:1024
     )
-    foreach(_example ${_transpose_examples})
-      string(REPLACE ".py" "" _name ${_example})
-      add_custom_target(check-transpose-${_name}
-        COMMAND ${CMAKE_COMMAND} -E env
-          "PYTHONPATH=${LEGO_PYTHONPATH}"
-          "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
-          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_example}" "1024" "1024"
-        DEPENDS lego-prepare-wheel
-        COMMENT "Running transpose example: ${_example} 1024 1024"
-        USES_TERMINAL
-      )
-    endforeach()
 
-    add_custom_target(check-transpose-examples
-      COMMENT "Running all LEGO transpose GPU examples"
+    add_example_group(gpu "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir"
+      "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
+      vecadd.py:1024
+      matmul_naive.py:64
+      matmul_smem.py:64
+      reduce_sum.py:1024
     )
-    foreach(_example ${_transpose_examples})
-      string(REPLACE ".py" "" _name ${_example})
-      add_dependencies(check-transpose-examples check-transpose-${_name})
-    endforeach()
-
-    # --- LEGO GPU kernel benchmarks (vecadd, matmul, reduce) ---
-    # Each takes a single size argument; matmul uses square M=N=K.
-    set(_gpu_scripts   vecadd.py       matmul_naive.py matmul_smem.py reduce_sum.py)
-    set(_gpu_sizes     1024            64              64             1024)
-
-    list(LENGTH _gpu_scripts _gpu_count)
-    math(EXPR _gpu_last "${_gpu_count} - 1")
-    foreach(_i RANGE ${_gpu_last})
-      list(GET _gpu_scripts ${_i} _example)
-      list(GET _gpu_sizes   ${_i} _size)
-      string(REPLACE ".py" "" _name ${_example})
-      add_custom_target(check-gpu-${_name}
-        COMMAND ${CMAKE_COMMAND} -E env
-          "PYTHONPATH=${CMAKE_BINARY_DIR}/python_packages/lego:${CMAKE_SOURCE_DIR}/python"
-          "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
-          "${Python_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir/${_example}" "${_size}"
-        DEPENDS lego-prepare-wheel
-        COMMENT "Running GPU benchmark: ${_example} ${_size}"
-        USES_TERMINAL
-      )
-    endforeach()
-
-    add_custom_target(check-gpu-examples
-      COMMENT "Running all LEGO GPU kernel benchmarks (@gpu_kernel DSL)"
-    )
-    foreach(_example ${_gpu_scripts})
-      string(REPLACE ".py" "" _name ${_example})
-      add_dependencies(check-gpu-examples check-gpu-${_name})
-    endforeach()
   endif()
 
   # --- Cross-platform SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal via wgpu) ---
