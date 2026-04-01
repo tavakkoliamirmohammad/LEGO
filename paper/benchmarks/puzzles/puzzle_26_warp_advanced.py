@@ -73,6 +73,49 @@ def warp_prefix(A: Buffer(layout, N), Out: Buffer(layout, N)):
     val = A[bx, tx]
     Out[bx, tx] = warp_prefix_sum(val)
 
+# --- Sub-test 5: warp_partition ---
+# Quicksort-style partition: elements < pivot go left, >= pivot go right.
+# Uses exclusive prefix sum to compute write positions, butterfly xor
+# to get total count.
+PIVOT = 5.0
+
+
+@gpu_kernel(grid=(num_warps,), block=(WARP_SIZE,))
+def warp_partition(A: Buffer(layout, N), Out: Buffer(layout, N)):
+    bx = block_id.x
+    tx = thread_id.x
+    val = A[bx, tx]
+    # Phase 1: predicates — use arithmetic instead of if to avoid scf.if yield issues
+    # is_left = 1.0 if val < PIVOT else 0.0 (computed via comparison + select)
+    # Since DSL doesn't have ternary, use: store predicate in output buffer
+    # then compute prefix sums on it.
+    #
+    # Simplified: compute both prefix sums and pick the right one at the end.
+    # is_left = 1.0 when val < PIVOT, 0.0 otherwise
+    # We compute this as: is_left = max(0, sign(PIVOT - val)) but that's complex.
+    # Instead, use two separate prefix sums on complementary predicates.
+    #
+    # Write predicate to output first, read it back for prefix sum
+    Out[bx, tx] = 0.0  # default: right
+    if val < PIVOT:
+        Out[bx, tx] = 1.0  # left
+    is_left = Out[bx, tx]
+    is_right = 1.0 - is_left
+    # Phase 2: exclusive prefix sums for write positions
+    left_pos = warp_prefix_sum_exclusive(is_left)
+    right_pos = warp_prefix_sum_exclusive(is_right)
+    # Phase 3: total left count via butterfly reduction
+    left_total = is_left
+    mask = 1
+    while mask < WARP_SIZE:
+        left_total = left_total + shuffle_xor(left_total, mask)
+        mask = mask * 2
+    # Phase 4: write position indices to output
+    if val < PIVOT:
+        Out[bx, tx] = left_pos
+    if val >= PIVOT:
+        Out[bx, tx] = left_total + right_pos
+
 
 from bench_utils import run_benchmark
 
@@ -128,4 +171,30 @@ if __name__ == "__main__":
         warp_prefix, compute_expected_prefix,
         targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
         label=f"prefix N={N}", init_mod=10, atol=1e-4,
+    )
+
+    # Sub-test 5: partition — verify partition property (not exact positions)
+    # The kernel writes positions (float indices), we verify the partition
+    # property: all left positions < left_count, all right positions >= left_count
+    def compute_expected_partition(inputs):
+        a = inputs[0].reshape(-1, WARP_SIZE)
+        out = np.zeros_like(a)
+        for w in range(a.shape[0]):
+            left_count = np.sum(a[w] < PIVOT)
+            left_idx = 0
+            right_idx = 0
+            for i in range(WARP_SIZE):
+                if a[w, i] < PIVOT:
+                    out[w, i] = float(left_idx)
+                    left_idx += 1
+                else:
+                    out[w, i] = float(left_count + right_idx)
+                    right_idx += 1
+        return out.ravel().astype(np.float32)
+
+    print("Sub-test 5: warp_partition", file=sys.stderr)
+    run_benchmark(
+        warp_partition, compute_expected_partition,
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        label=f"partition N={N}", init_mod=10, atol=1e-4,
     )

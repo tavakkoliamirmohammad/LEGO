@@ -492,29 +492,51 @@ class KernelContext:
 
     # --- Subgroup MMA operations ---
 
-    def mma_load(self, memref, indices, lead_dim, shape, elem_type, operand):
-        """Load a matrix fragment for MMA.
+    def _reshape_buf_2d(self, buf_index, rows, cols):
+        """Reinterpret a 1D buffer as a 2D memref for MMA ops."""
+        from lego.mlir.ir import MemRefType, DenseI64ArrayAttr
+        flat_memref = self._buf_vals[buf_index]
+        elem_ty = F32Type.get()
+        target_ty = MemRefType.get([rows, cols], elem_ty)
+        # Static offset=0, sizes=[rows,cols], strides=[cols,1]
+        return memref_dialect.ReinterpretCastOp(
+            target_ty, flat_memref,
+            offsets=[], sizes=[], strides=[],
+            static_offsets=DenseI64ArrayAttr.get([0]),
+            static_sizes=DenseI64ArrayAttr.get([rows, cols]),
+            static_strides=DenseI64ArrayAttr.get([cols, 1])).result
 
-        Args:
-            memref: source memref
-            indices: list of index values [row, col]
-            lead_dim: leading dimension (int)
-            shape: tuple (rows, cols) for the MMA tile
-            elem_type: element type (e.g., F16Type, F32Type)
-            operand: "AOp", "BOp", or "COp"
-        """
+    @staticmethod
+    def _mma_type(rows, cols, dtype_str, operand):
+        """Parse !gpu.mma_matrix<RxCxDTYPE, "XOp"> type."""
         from lego.mlir.ir import Type
-        mma_type = gpu_dialect.MMAMatrixType.get(list(shape), elem_type, operand)
-        return gpu_dialect.SubgroupMmaLoadMatrixOp(
-            mma_type, memref, indices, lead_dim).result
+        return Type.parse(f'!gpu.mma_matrix<{rows}x{cols}x{dtype_str}, "{operand}">')
 
-    def mma_store(self, src, dst_memref, indices, lead_dim):
-        """Store a matrix fragment from MMA result."""
-        gpu_dialect.SubgroupMmaStoreMatrixOp(src, dst_memref, indices, lead_dim)
+    def mma_load_a(self, buf_2d, row, col, lead_dim, tile_m, tile_k):
+        """Load A fragment as f16: !gpu.mma_matrix<MxKxf16, "AOp">."""
+        return gpu_dialect.SubgroupMmaLoadMatrixOp(
+            self._mma_type(tile_m, tile_k, "f16", "AOp"),
+            buf_2d, [row, col], lead_dim).result
+
+    def mma_load_b(self, buf_2d, row, col, lead_dim, tile_k, tile_n):
+        """Load B fragment as f16: !gpu.mma_matrix<KxNxf16, "BOp">."""
+        return gpu_dialect.SubgroupMmaLoadMatrixOp(
+            self._mma_type(tile_k, tile_n, "f16", "BOp"),
+            buf_2d, [row, col], lead_dim).result
+
+    def mma_zero_c(self, tile_m, tile_n):
+        """Create zero-initialized f32 accumulator: !gpu.mma_matrix<MxNxf32, "COp">."""
+        zero = arith_dialect.ConstantOp(F32Type.get(), 0.0).result
+        return gpu_dialect.SubgroupMmaConstantMatrixOp(
+            self._mma_type(tile_m, tile_n, "f32", "COp"), zero).result
 
     def mma_compute(self, a_frag, b_frag, c_frag):
         """Compute D = A * B + C using tensor core MMA."""
         return gpu_dialect.SubgroupMmaComputeOp(a_frag, b_frag, c_frag).result
+
+    def mma_store(self, frag, buf_2d, row, col, lead_dim):
+        """Store MMA result fragment to 2D memref."""
+        gpu_dialect.SubgroupMmaStoreMatrixOp(frag, buf_2d, [row, col], lead_dim)
 
     # --- Math operations ---
 

@@ -88,6 +88,7 @@ CT_FLOAT = "ct_float"    # compile-time Python float
 INDEX = "index"          # MLIR index Value
 F32 = "f32"              # MLIR f32 Value
 I1 = "i1"               # MLIR i1 Value
+MMA_FRAG = "mma_frag"   # MLIR !gpu.mma_matrix Value
 
 
 def _is_ct(tag):
@@ -594,6 +595,47 @@ class _Compiler:
         if name == "warp_prefix_sum_exclusive":
             val, vtag = self._expr(node.args[0])
             return (self.ctx.warp_prefix_sum_exclusive(val), F32)
+        # --- MMA operations ---
+        if name == "mma_reshape":
+            # mma_reshape(buf_name, rows, cols) → 2D memref for MMA
+            buf_name = node.args[0].id
+            buf_idx = self.buf_map[buf_name]
+            rows = self._eval_ct(node.args[1])
+            cols = self._eval_ct(node.args[2])
+            return (self.ctx._reshape_buf_2d(buf_idx, rows, cols), "memref_2d")
+        if name == "mma_load_a":
+            buf_2d, _ = self._expr(node.args[0])
+            row = self._idx(self._expr(node.args[1]))
+            col = self._idx(self._expr(node.args[2]))
+            lead_dim = self._eval_ct(node.args[3])
+            tile_m = self._eval_ct(node.args[4])
+            tile_k = self._eval_ct(node.args[5])
+            return (self.ctx.mma_load_a(buf_2d, row, col, lead_dim, tile_m, tile_k), MMA_FRAG)
+        if name == "mma_load_b":
+            buf_2d, _ = self._expr(node.args[0])
+            row = self._idx(self._expr(node.args[1]))
+            col = self._idx(self._expr(node.args[2]))
+            lead_dim = self._eval_ct(node.args[3])
+            tile_k = self._eval_ct(node.args[4])
+            tile_n = self._eval_ct(node.args[5])
+            return (self.ctx.mma_load_b(buf_2d, row, col, lead_dim, tile_k, tile_n), MMA_FRAG)
+        if name == "mma_zero_c":
+            tile_m = self._eval_ct(node.args[0])
+            tile_n = self._eval_ct(node.args[1])
+            return (self.ctx.mma_zero_c(tile_m, tile_n), MMA_FRAG)
+        if name == "mma_compute":
+            a, _ = self._expr(node.args[0])
+            b, _ = self._expr(node.args[1])
+            c, _ = self._expr(node.args[2])
+            return (self.ctx.mma_compute(a, b, c), MMA_FRAG)
+        if name == "mma_store":
+            frag, _ = self._expr(node.args[0])
+            buf_2d, _ = self._expr(node.args[1])
+            row = self._idx(self._expr(node.args[2]))
+            col = self._idx(self._expr(node.args[3]))
+            lead_dim = self._eval_ct(node.args[4])
+            self.ctx.mma_store(frag, buf_2d, row, col, lead_dim)
+            return (None, CT_INT)
         # --- Math operations ---
         if name == "exp":
             val, vtag = self._expr(node.args[0])
