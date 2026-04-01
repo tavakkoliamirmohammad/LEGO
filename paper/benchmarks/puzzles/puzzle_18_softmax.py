@@ -2,12 +2,10 @@
 
 softmax(x)[i] = exp(x[i] - max(x)) / sum(exp(x[j] - max(x)))
 
-Three phases per row:
-  1. Find max (tree reduction)
-  2. Compute exp(x - max) and sum (tree reduction)
-  3. Normalize by sum
-
-Each block handles one row.
+Three phases per row (matches Mojo solution):
+  1. Find max via tree reduction (double-barrier pattern)
+  2. Compute exp(x - max) and sum via tree reduction
+  3. Normalize: output = exp_val / sum
 """
 import sys
 import numpy as np
@@ -33,8 +31,9 @@ def softmax(A: Buffer(A_layout, BATCH, SIZE), Out: Buffer(out_layout, BATCH, SIZ
             smem: Shared(smem_layout, TPB)):
     bx = block_id.x
     tx = thread_id.x
-    # Phase 1: Load and find max via tree reduction
     val = A[bx, tx]
+    # Phase 1: Find max via tree reduction
+    # Use smem for max; write directly to avoid nested-if yield issues
     smem[tx] = val
     barrier()
     stride = TPB // 2
@@ -44,21 +43,22 @@ def softmax(A: Buffer(A_layout, BATCH, SIZE), Out: Buffer(out_layout, BATCH, SIZ
                 smem[tx] = smem[tx + stride]
         barrier()
         stride = stride // 2
-    # max_val is in smem[0], but we need it for all threads
-    # Broadcast: all threads read smem[0] (after barrier, it's safe)
+    # max is in smem[0]; all threads read it
     barrier()
-    # Phase 2: Compute exp(val - max) and store in smem
-    # We re-read max from smem[0] since all threads converged there
-    exp_val = val - smem[0]
-    # Simple exp approximation for verification: use (1 + x/n)^n
-    # For correctness, we need real exp. Since DSL doesn't have exp(),
-    # we compute x - max and let the numpy check use the same values.
-    # Store shifted values as output (demonstrates the pattern)
-    smem[tx] = exp_val
+    # Phase 2: Compute exp(val - max) and store in output + smem
+    Out[bx, tx] = exp(val - smem[0])
+    smem[tx] = Out[bx, tx]
     barrier()
-    # Phase 3: Sum reduction for normalization
-    # (In a real softmax, these would be exp values)
-    Out[bx, tx] = exp_val
+    # Sum reduction (double-barrier)
+    stride = TPB // 2
+    while stride > 0:
+        if tx < stride:
+            smem[tx] = smem[tx] + smem[tx + stride]
+        barrier()
+        stride = stride // 2
+    # Phase 3: Normalize
+    barrier()
+    Out[bx, tx] = Out[bx, tx] / smem[0]
 
 
 from bench_utils import run_benchmark
@@ -68,7 +68,9 @@ if __name__ == "__main__":
     def compute_expected(inputs):
         a = inputs[0].reshape(BATCH, SIZE)
         max_vals = a.max(axis=1, keepdims=True)
-        return (a - max_vals).ravel().astype(np.float32)
+        exp_vals = np.exp(a - max_vals)
+        sum_exp = exp_vals.sum(axis=1, keepdims=True)
+        return (exp_vals / sum_exp).ravel().astype(np.float32)
 
     run_benchmark(
         softmax, compute_expected,

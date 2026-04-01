@@ -43,11 +43,15 @@ def axis_sum(A: Buffer(A_layout, BATCH, SIZE), Out: Buffer(out_layout, BATCH),
     # Load row into shared
     smem[tx] = A[bx, tx]
     barrier()
-    # Tree reduction
+    # Tree reduction with double-barrier (matches Mojo: read → barrier → write → barrier)
     stride = TPB // 2
     while stride > 0:
+        temp_val = 0.0
         if tx < stride:
-            smem[tx] = smem[tx] + smem[tx + stride]
+            temp_val = smem[tx + stride]
+        barrier()
+        if tx < stride:
+            smem[tx] = smem[tx] + temp_val
         barrier()
         stride = stride // 2
     # Thread 0 writes row sum

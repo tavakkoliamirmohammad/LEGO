@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Lego, lego);
+MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Math, math);
 
 /// Register all LEGO passes and pipelines with the global pass registry.
 /// Idempotent — safe to call multiple times.

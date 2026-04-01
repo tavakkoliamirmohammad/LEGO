@@ -579,6 +579,10 @@ class _Compiler:
         if name == "all_reduce_min":
             val, vtag = self._expr(node.args[0])
             return (self.ctx.all_reduce_min(val), F32)
+        # --- Math operations ---
+        if name == "exp":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.exp(val), F32)
         raise NotImplementedError(f"Unknown function: {name}")
 
     def _eval_ct(self, node):

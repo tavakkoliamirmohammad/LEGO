@@ -441,6 +441,15 @@ class KernelContext:
         from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
         return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.MINNUMF).result
 
+    # --- Math operations ---
+
+    def exp(self, val):
+        """Compute e^val (math.exp)."""
+        from lego.mlir.ir import Operation
+        op = Operation.create(
+            "math.exp", results=[val.type], operands=[val])
+        return op.result
+
     # --- Arithmetic helpers ---
 
     def addf(self, a, b):

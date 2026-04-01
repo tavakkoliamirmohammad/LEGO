@@ -385,6 +385,10 @@ void buildLegoToSPIRVPipeline(OpPassManager &pm,
   pm.addPass(std::make_unique<SetSPIRVTargetEnvPass>(
       options.spirvVersion, options.clientAPI));
 
+  // Step 6.5: Convert math ops to SPIR-V inside gpu.module BEFORE the
+  // GPU-to-SPIR-V conversion (spirv.module only allows spirv.* ops).
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertMathToSPIRVPass());
+
   // Step 7: Convert GPU module to SPIR-V module.
   // The upstream pass runs ALL conversion patterns together (GPU + Arith +
   // SCF + MemRef + Func + Index) in a single conversion step.

@@ -86,6 +86,10 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(MemRef, memref, mlir::memref::MemRefDialec
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(GPU, gpu, mlir::gpu::GPUDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(SPIRV, spirv, mlir::spirv::SPIRVDialect)
 
+// Math dialect (needed for math.exp etc. in GPU kernels)
+#include "mlir/Dialect/Math/IR/Math.h"
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Math, math, mlir::math::MathDialect)
+
 void legoRegisterPasses() {
   static bool registered = false;
   if (registered)
