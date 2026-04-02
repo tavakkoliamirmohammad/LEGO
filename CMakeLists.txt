@@ -14,8 +14,8 @@ set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV" CACHE STRING "Semicolon-separated
 
 # --- Python & Venv Support ---
 if(NOT EMSCRIPTEN)
-  set(LEGO_VENV_PATH "${CMAKE_SOURCE_DIR}/venv")
-  if(EXISTS "${LEGO_VENV_PATH}/bin/python3")
+  set(LEGO_VENV_PATH "${CMAKE_SOURCE_DIR}/venv" CACHE PATH "Path to Python venv")
+  if(EXISTS "${LEGO_VENV_PATH}/bin/python3" AND NOT Python3_EXECUTABLE)
     set(Python3_EXECUTABLE "${LEGO_VENV_PATH}/bin/python3")
     set(Python3_ROOT_DIR "${LEGO_VENV_PATH}")
     message(STATUS "Prioritizing Python from venv: ${Python3_EXECUTABLE}")
@@ -102,10 +102,12 @@ if(LEGO_MONOLITHIC_LLVM)
   set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
   set(LLVM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(LLVM_ENABLE_BINDINGS OFF CACHE BOOL "" FORCE)
-  if(NOT EMSCRIPTEN)
-    set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "" FORCE)
-  else()
-    set(MLIR_ENABLE_BINDINGS_PYTHON OFF CACHE BOOL "" FORCE)
+  if(NOT DEFINED MLIR_ENABLE_BINDINGS_PYTHON)
+    if(NOT EMSCRIPTEN)
+      set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "Enable MLIR Python bindings")
+    else()
+      set(MLIR_ENABLE_BINDINGS_PYTHON OFF CACHE BOOL "Enable MLIR Python bindings")
+    endif()
   endif()
   set(LLVM_ENABLE_Z3_SOLVER OFF CACHE BOOL "" FORCE)
   if(NOT CMAKE_BUILD_TYPE)
@@ -442,6 +444,10 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       "${CMAKE_SOURCE_DIR}/README.md" "${LEGO_WHEEL_DIR}/README.md"
     COMMAND ${CMAKE_COMMAND} -E copy
       "${CMAKE_SOURCE_DIR}/python/setup_wheel.py" "${LEGO_WHEEL_DIR}/setup.py"
+    # Remove _mlir type-stub directory — it creates a namespace package that
+    # shadows the _mlir C extension .so at import time.
+    COMMAND ${CMAKE_COMMAND} -E rm -rf
+      "${LEGO_WHEEL_DIR}/lego/mlir/_mlir_libs/_mlir"
     COMMENT "Preparing wheel directory"
   )
 
@@ -513,8 +519,11 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     endforeach()
   endmacro()
 
-  # --- Triton GPU example tests (require NVPTX + GPU) ---
-  if(LEGO_HAS_NVPTX)
+  # --- Triton GPU example tests (require NVPTX + GPU + triton module) ---
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c "import triton"
+    RESULT_VARIABLE _TRITON_RESULT OUTPUT_QUIET ERROR_QUIET)
+  if(LEGO_HAS_NVPTX AND _TRITON_RESULT EQUAL 0)
     add_example_group(triton "${CMAKE_SOURCE_DIR}/python/examples/triton" ""
       vecadd_lego.py
       matmul_lego.py
@@ -544,7 +553,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     )
 
     # --- Mojo GPU Puzzles expressed in LEGO DSL ---
-    add_example_group(puzzle "${CMAKE_SOURCE_DIR}/paper/benchmarks/puzzles"
+    add_example_group(puzzle "${CMAKE_SOURCE_DIR}/python/examples/puzzles"
       "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
       puzzle_01_map.py:256
       puzzle_02_zip.py:256
@@ -650,7 +659,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   add_dependencies(check-lego-all check-lego-imports)
   add_dependencies(check-lego-all check-lego-wheel)
-  if(LEGO_HAS_NVPTX)
+  if(TARGET check-triton-examples)
     add_dependencies(check-lego-all check-triton-examples)
   endif()
   if(TARGET check-transpose-examples)

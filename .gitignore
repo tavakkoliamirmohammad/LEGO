@@ -8,6 +8,8 @@ __pycache__
 *.csv
 build
 build-wasm
+build-ci-test
+.ci-venv
 third_party/**
 .agents
 *.egg-info/

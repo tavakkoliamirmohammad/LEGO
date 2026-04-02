@@ -7,7 +7,10 @@ pyproject.toml handles metadata. This file only provides:
 import os
 from setuptools import setup, find_namespace_packages
 
-packages = find_namespace_packages(include=["lego", "lego.*"])
+packages = find_namespace_packages(
+    include=["lego", "lego.*"],
+    exclude=["lego.mlir._mlir_libs._mlir", "lego.mlir._mlir_libs._mlir.*"],
+)
 
 package_data = {}
 for top in ("lego",):

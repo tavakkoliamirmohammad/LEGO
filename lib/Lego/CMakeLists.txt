@@ -120,6 +120,7 @@ add_mlir_dialect_library(MLIRLego
   MLIRArithToLLVM
   MLIRControlFlowToLLVM
   MLIRFuncToLLVM
+  MLIRMathToLLVM
   MLIRMemRefToLLVM
   MLIRReconcileUnrealizedCasts
   MLIRSCFToControlFlow
