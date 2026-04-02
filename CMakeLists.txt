@@ -455,8 +455,10 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   if(CARGO_EXECUTABLE)
     add_custom_command(
       OUTPUT "${LEGO_NAGA_BIN}"
-      COMMAND "${CARGO_EXECUTABLE}" install naga-cli
+      COMMAND ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C target-feature=+crt-static"
+        "${CARGO_EXECUTABLE}" install naga-cli
         --root "${CMAKE_BINARY_DIR}/naga-install"
+        --target x86_64-unknown-linux-gnu
         --quiet
       COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_BINARY_DIR}/naga-install/bin/naga"
@@ -579,7 +581,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       puzzle_27_block_reduce.py:256
       puzzle_28_async_copy.py:1024
       puzzle_29_pipeline.py:1024
-      puzzle_32_bank_conflicts.py:64
+      puzzle_32_bank_conflicts.py:256
       puzzle_33_tensor_cores.py:64
       puzzle_34_clusters.py:1024
     )
