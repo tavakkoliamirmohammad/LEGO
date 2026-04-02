@@ -35,26 +35,41 @@ def verify_layouts(layouts, N):
     return all_ok
 
 
+_MAX_LLVM_SM = 90  # highest SM arch the bundled LLVM NVPTX backend supports
+
+
 def detect_nvvm_target():
     """Detect GPU compute capability and return (chip, features) for lego-to-nvvm.
 
-    Falls back to sm_80 / +ptx78 which works with CUDA 12+ and most modern GPUs.
+    Auto-detects the GPU via nvidia-smi.  If the detected SM version exceeds
+    what the bundled LLVM backend supports, caps to _MAX_LLVM_SM so the
+    kernel still runs via PTX forward-compatibility.
+    Falls back to sm_80 / +ptx78.
     """
+    chip = "sm_80"
+    ptx = "+ptx78"
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=5)
         if r.returncode == 0 and r.stdout.strip():
-            # e.g. "8.6" → "sm_86"
             cap = r.stdout.strip().split("\n")[0].strip()
-            chip = "sm_" + cap.replace(".", "")
-            # Pick a PTX version that matches the arch generation
-            major = int(cap.split(".")[0])
-            ptx = {7: "+ptx70", 8: "+ptx78", 9: "+ptx80"}.get(major, "+ptx78")
-            return chip, ptx
+            sm_num = int(cap.replace(".", ""))
+            # Cap to the highest SM the bundled LLVM can codegen for
+            if sm_num > _MAX_LLVM_SM:
+                sm_num = _MAX_LLVM_SM
+            chip = f"sm_{sm_num}"
+            # PTX version: use 78 for SM 8x, 80 for SM 9x — both widely supported
+            major = sm_num // 10
+            if major >= 9:
+                ptx = "+ptx80"
+            elif major >= 8:
+                ptx = "+ptx78"
+            else:
+                ptx = "+ptx70"
     except Exception:
         pass
-    return "sm_80", "+ptx78"
+    return chip, ptx
 
 
 def find_mlir_runner():

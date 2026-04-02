@@ -444,10 +444,6 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       "${CMAKE_SOURCE_DIR}/README.md" "${LEGO_WHEEL_DIR}/README.md"
     COMMAND ${CMAKE_COMMAND} -E copy
       "${CMAKE_SOURCE_DIR}/python/setup_wheel.py" "${LEGO_WHEEL_DIR}/setup.py"
-    # Remove _mlir type-stub directory — it creates a namespace package that
-    # shadows the _mlir C extension .so at import time.
-    COMMAND ${CMAKE_COMMAND} -E rm -rf
-      "${LEGO_WHEEL_DIR}/lego/mlir/_mlir_libs/_mlir"
     COMMENT "Preparing wheel directory"
   )
 
