@@ -36,3 +36,8 @@ except (subprocess.CalledProcessError, FileNotFoundError):
 # "gpu" feature: any GPU backend available
 if config.available_features & {'nvidia-gpu', 'amd-gpu', 'wgpu'}:
     config.available_features.add('gpu')
+
+# Each puzzle test uses ~1.7 GB RAM + GPU resources.
+# Limit parallelism to avoid OOM kills when many tests run concurrently.
+lit_config.parallelism_groups['gpu-puzzles'] = 4
+config.parallelism_group = 'gpu-puzzles'
