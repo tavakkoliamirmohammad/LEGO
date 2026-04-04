@@ -171,7 +171,15 @@ if(LEGO_MONOLITHIC_LLVM)
   include_directories(${MLIR_DIR}/include)
   include_directories(${MLIR_BINARY_DIR}/include)
 else()
-  # Decoupled build: Expect MLIR to be found via MLIR_DIR or system install
+  # Decoupled build: use MLIR_DIR from user, or auto-detect from a prior
+  # monolithic build in the same source tree (build/lib/cmake/mlir).
+  if(NOT MLIR_DIR)
+    set(_AUTO_MLIR_DIR "${CMAKE_SOURCE_DIR}/build/lib/cmake/mlir")
+    if(EXISTS "${_AUTO_MLIR_DIR}/MLIRConfig.cmake")
+      set(MLIR_DIR "${_AUTO_MLIR_DIR}" CACHE PATH "Path to MLIRConfig.cmake")
+      message(STATUS "Auto-detected MLIR_DIR from prior monolithic build: ${MLIR_DIR}")
+    endif()
+  endif()
   find_package(MLIR CONFIG REQUIRED)
   find_package(LLVM CONFIG REQUIRED)
   
