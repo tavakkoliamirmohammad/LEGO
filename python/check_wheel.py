@@ -1,7 +1,8 @@
 """Verify wheel: build, install into a temp venv, and test imports."""
 import subprocess, sys, os, tempfile, glob, shutil
 
-wheel_dir = os.path.join(os.path.dirname(__file__), "..", "build", "python_packages", "lego")
+wheel_dir = os.environ.get("PYTHONPATH",
+    os.path.join(os.path.dirname(__file__), "..", "build", "python_packages", "lego"))
 pyproject = os.path.join(wheel_dir, "pyproject.toml")
 if not os.path.exists(pyproject):
     print("ERROR: pyproject.toml not found — run lego-prepare-wheel first", file=sys.stderr)

@@ -29,7 +29,10 @@ from lego.mlir.dialects import scf as scf_dialect
 
 from lego.core import Row
 from lego.backend.compiler import DType
-from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer, _index_const
+from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer, _index_const, _TensorCoreHandle
+
+# Public alias for TensorCore — used inside @gpu_kernel bodies
+TensorCore = _TensorCoreHandle
 
 
 # ============================================================================
@@ -88,6 +91,8 @@ CT_FLOAT = "ct_float"    # compile-time Python float
 INDEX = "index"          # MLIR index Value
 F32 = "f32"              # MLIR f32 Value
 I1 = "i1"               # MLIR i1 Value
+MMA_FRAG = "mma_frag"   # MLIR !gpu.mma_matrix Value
+CT_OBJ = "ct_obj"       # compile-time Python object (TensorCore, etc.)
 
 
 def _is_ct(tag):
@@ -290,17 +295,63 @@ class _Compiler:
             for s in stmts:
                 self._stmt(s)
             return
-        has_else = bool(node.orelse)
-        if_op = scf_dialect.IfOp(cv, has_else=has_else)
-        with InsertionPoint(if_op.then_block):
-            for s in node.body:
-                self._stmt(s)
-            scf_dialect.YieldOp([])
-        if has_else:
-            with InsertionPoint(if_op.else_block):
-                for s in node.orelse:
+
+        # Detect which env variables are modified in then/else bodies.
+        # These must be yielded from scf.if so their updated values
+        # dominate uses after the if.
+        env_before = set(self.env)
+        modified = (self._modified_names(node.body)
+                    | self._modified_names(node.orelse)) & env_before
+        yield_names = sorted(modified)
+
+        if not yield_names:
+            # No local variables modified — simple fire-and-forget if
+            has_else = bool(node.orelse)
+            if_op = scf_dialect.IfOp(cv, has_else=has_else)
+            with InsertionPoint(if_op.then_block):
+                for s in node.body:
                     self._stmt(s)
                 scf_dialect.YieldOp([])
+            if has_else:
+                with InsertionPoint(if_op.else_block):
+                    for s in node.orelse:
+                        self._stmt(s)
+                    scf_dialect.YieldOp([])
+            return
+
+        # Promote init vals to runtime so scf.if can yield them
+        init_vals, init_tags = [], []
+        for n in yield_names:
+            v, t = self.env[n]
+            if _is_ct(t):
+                v, t = _to_runtime(self.ctx, v, t)
+                self.env[n] = (v, t)
+            init_vals.append(v)
+            init_tags.append(t)
+
+        result_types = [v.type for v in init_vals]
+        if_op = scf_dialect.IfOp(cv, result_types, has_else=True)
+
+        # Then block
+        with InsertionPoint(if_op.then_block):
+            # Reset env to use block args (init vals dominate inside region)
+            for n, v, t in zip(yield_names, init_vals, init_tags):
+                self.env[n] = (v, t)
+            for s in node.body:
+                self._stmt(s)
+            scf_dialect.YieldOp([self.env[n][0] for n in yield_names])
+
+        # Else block — execute else body if present, otherwise pass through
+        with InsertionPoint(if_op.else_block):
+            for n, v, t in zip(yield_names, init_vals, init_tags):
+                self.env[n] = (v, t)
+            for s in node.orelse:
+                self._stmt(s)
+            scf_dialect.YieldOp([self.env[n][0] for n in yield_names])
+
+        # After the if: env points to the if-op results
+        for i, n in enumerate(yield_names):
+            self.env[n] = (if_op.results[i], init_tags[i])
 
     # -- while (compile-time unroll) -----------------------------------
 
@@ -346,6 +397,9 @@ class _Compiler:
                 return (int(v), CT_INT)
             if isinstance(v, float):
                 return (v, CT_FLOAT)
+            # Compile-time objects (TensorCore, layouts, etc.)
+            if isinstance(v, _TensorCoreHandle):
+                return (v, CT_OBJ)
             raise TypeError(f"Unsupported type for '{name}': {type(v)}")
         raise NameError(f"Undefined: {name}")
 
@@ -363,15 +417,30 @@ class _Compiler:
     def _binop_ct(lv, lt, rv, rt, op):
         ops = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
                ast.Mult: lambda a, b: a * b, ast.FloorDiv: lambda a, b: a // b,
-               ast.Mod: lambda a, b: a % b, ast.Div: lambda a, b: a / b}
+               ast.Mod: lambda a, b: a % b, ast.Div: lambda a, b: a / b,
+               ast.Pow: lambda a, b: a ** b}
         r = ops[op](lv, rv)
         tag = CT_FLOAT if isinstance(r, float) or lt == CT_FLOAT or rt == CT_FLOAT else CT_INT
         return (r if tag == CT_FLOAT else int(r), tag)
 
     def _binop_rt(self, lv, lt, rv, rt, op):
         if lt == F32 or rt == F32:
+            # Promote index operand to f32 if needed (e.g., A[i] * (block_id + 1))
+            # index → i32 → f32 (arith.sitofp requires integer, not index)
+            if lt == INDEX:
+                from lego.mlir.ir import IntegerType
+                i32 = IntegerType.get_signless(32)
+                lv = arith_dialect.IndexCastOp(i32, lv).result
+                lv = arith_dialect.SIToFPOp(F32Type.get(), lv).result
+                lt = F32
+            if rt == INDEX:
+                from lego.mlir.ir import IntegerType
+                i32 = IntegerType.get_signless(32)
+                rv = arith_dialect.IndexCastOp(i32, rv).result
+                rv = arith_dialect.SIToFPOp(F32Type.get(), rv).result
+                rt = F32
             m = {ast.Add: self.ctx.addf, ast.Sub: self.ctx.subf,
-                 ast.Mult: self.ctx.mulf}
+                 ast.Mult: self.ctx.mulf, ast.Div: lambda a, b: arith_dialect.DivFOp(a, b).result}
             return (m[op](lv, rv), F32)
         m = {ast.Add: self.ctx.addi,
              ast.Sub: lambda a, b: arith_dialect.SubIOp(a, b).result,
@@ -457,6 +526,9 @@ class _Compiler:
     # -- function calls ------------------------------------------------
 
     def _call(self, node):
+        # Handle method calls: obj.method(args) where obj is a compile-time object
+        if isinstance(node.func, ast.Attribute):
+            return self._method_call(node)
         if not isinstance(node.func, ast.Name):
             raise NotImplementedError(f"Call {ast.dump(node.func)}")
         name = node.func.id
@@ -480,7 +552,148 @@ class _Compiler:
             layout = self._eval_ct(node.args[1])
             self.ctx.set_layout(buf_idx, layout)
             return (None, CT_INT)
+        # --- Warp / subgroup operations ---
+        if name == "lane_id":
+            return (self.ctx.lane_id(), INDEX)
+        if name == "warp_size":
+            return (self.ctx.subgroup_size(), INDEX)
+        if name in ("shuffle_down", "shuffle_up", "shuffle_xor", "shuffle_idx"):
+            val, vtag = self._expr(node.args[0])
+            arg1_v, arg1_t = self._expr(node.args[1])
+            # offset/mask/lane: pass as Python int for constant, or MLIR value
+            if _is_ct(arg1_t):
+                arg1_v = int(arg1_v)
+            fn = getattr(self.ctx, name)
+            return (fn(val, arg1_v), F32)
+        if name == "subgroup_reduce_add":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.subgroup_reduce_add(val), F32)
+        if name == "subgroup_reduce_mul":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.subgroup_reduce_mul(val), F32)
+        if name == "subgroup_reduce_max":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.subgroup_reduce_max(val), F32)
+        if name == "subgroup_reduce_min":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.subgroup_reduce_min(val), F32)
+        # --- Block-wide operations ---
+        if name == "all_reduce_add":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.all_reduce_add(val), F32)
+        if name == "all_reduce_mul":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.all_reduce_mul(val), F32)
+        if name == "all_reduce_max":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.all_reduce_max(val), F32)
+        if name == "all_reduce_min":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.all_reduce_min(val), F32)
+        # --- Subgroup broadcast ---
+        if name == "broadcast":
+            val, vtag = self._expr(node.args[0])
+            lane = 0
+            if len(node.args) > 1:
+                lane_v, lane_t = self._expr(node.args[1])
+                lane = int(lane_v) if _is_ct(lane_t) else lane_v
+            return (self.ctx.subgroup_broadcast(val, lane), F32)
+        # --- Warp prefix sum ---
+        if name == "warp_prefix_sum":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.warp_prefix_sum_inclusive(val), F32)
+        if name == "warp_prefix_sum_exclusive":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.warp_prefix_sum_exclusive(val), F32)
+        # --- MMA operations ---
+        if name == "mma_reshape":
+            # mma_reshape(buf_name, rows, cols) → 2D memref for MMA
+            buf_name = node.args[0].id
+            buf_idx = self.buf_map[buf_name]
+            rows = self._eval_ct(node.args[1])
+            cols = self._eval_ct(node.args[2])
+            return (self.ctx._reshape_buf_2d(buf_idx, rows, cols), "memref_2d")
+        if name == "mma_load_a":
+            buf_2d, _ = self._expr(node.args[0])
+            row = self._idx(self._expr(node.args[1]))
+            col = self._idx(self._expr(node.args[2]))
+            lead_dim = self._eval_ct(node.args[3])
+            tile_m = self._eval_ct(node.args[4])
+            tile_k = self._eval_ct(node.args[5])
+            return (self.ctx.mma_load_a(buf_2d, row, col, lead_dim, tile_m, tile_k), MMA_FRAG)
+        if name == "mma_load_b":
+            buf_2d, _ = self._expr(node.args[0])
+            row = self._idx(self._expr(node.args[1]))
+            col = self._idx(self._expr(node.args[2]))
+            lead_dim = self._eval_ct(node.args[3])
+            tile_k = self._eval_ct(node.args[4])
+            tile_n = self._eval_ct(node.args[5])
+            return (self.ctx.mma_load_b(buf_2d, row, col, lead_dim, tile_k, tile_n), MMA_FRAG)
+        if name == "mma_zero_c":
+            tile_m = self._eval_ct(node.args[0])
+            tile_n = self._eval_ct(node.args[1])
+            return (self.ctx.mma_zero_c(tile_m, tile_n), MMA_FRAG)
+        if name == "mma_compute":
+            a, _ = self._expr(node.args[0])
+            b, _ = self._expr(node.args[1])
+            c, _ = self._expr(node.args[2])
+            return (self.ctx.mma_compute(a, b, c), MMA_FRAG)
+        if name == "mma_store":
+            frag, _ = self._expr(node.args[0])
+            buf_2d, _ = self._expr(node.args[1])
+            row = self._idx(self._expr(node.args[2]))
+            col = self._idx(self._expr(node.args[3]))
+            lead_dim = self._eval_ct(node.args[4])
+            self.ctx.mma_store(frag, buf_2d, row, col, lead_dim)
+            return (None, CT_INT)
+        # --- Math operations ---
+        if name == "exp":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.exp(val), F32)
+        if name == "sqrt":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.sqrt(val), F32)
+        if name == "rsqrt":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.rsqrt(val), F32)
         raise NotImplementedError(f"Unknown function: {name}")
+
+    def _method_call(self, node):
+        """Handle obj.method(args) calls — e.g., tc.load_a(buf, row, col, ld)."""
+        obj_name = node.func.value.id
+        method = node.func.attr
+        # Look up object in local env first, then outer scope
+        obj_val, obj_tag = self.env.get(obj_name, (None, None))
+        if obj_val is None and obj_name in self.outer:
+            obj_val = self.outer[obj_name]
+            obj_tag = CT_OBJ if isinstance(obj_val, _TensorCoreHandle) else None
+
+        # If obj is a compile-time object (like TensorCore), call its method
+        if obj_tag == CT_OBJ and hasattr(obj_val, method):
+            # TensorCore methods that return MLIR Values
+            fn = getattr(obj_val, method)
+            if method == "zero":
+                return (fn(), MMA_FRAG)
+            if method in ("load_a", "load_b"):
+                buf_2d, _ = self._expr(node.args[0])
+                row = self._idx(self._expr(node.args[1]))
+                col = self._idx(self._expr(node.args[2]))
+                lead_dim = self._eval_ct(node.args[3])
+                return (fn(buf_2d, row, col, lead_dim), MMA_FRAG)
+            if method == "mma":
+                a, _ = self._expr(node.args[0])
+                b, _ = self._expr(node.args[1])
+                c, _ = self._expr(node.args[2])
+                return (fn(a, b, c), MMA_FRAG)
+            if method == "store":
+                frag, _ = self._expr(node.args[0])
+                buf_2d, _ = self._expr(node.args[1])
+                row = self._idx(self._expr(node.args[2]))
+                col = self._idx(self._expr(node.args[3]))
+                lead_dim = self._eval_ct(node.args[4])
+                fn(frag, buf_2d, row, col, lead_dim)
+                return (None, CT_INT)
+        raise NotImplementedError(f"Method call: {obj_name}.{method}")
 
     def _eval_ct(self, node):
         """Evaluate an AST node as a compile-time Python expression."""

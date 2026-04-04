@@ -10,6 +10,7 @@
 #include "Lego/Passes.h"
 
 #include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Target/LLVM/NVVM/Target.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Target/LLVMIR/Dialect/NVVM/NVVMToLLVMIRTranslation.h"
@@ -22,7 +23,6 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Conversion/Passes.h"
-
 using namespace mlir;
 
 namespace {
@@ -72,10 +72,15 @@ void buildLegoToNVVMPipeline(OpPassManager &pm,
   // Phase 1: shared LEGO lower + GPU outline.
   buildLegoGPUOutlinePipeline(pm);
 
+  // Phase 1.5: Lower gpu.all_reduce and gpu.subgroup_reduce.
+  addGpuAllReduceLoweringPass(pm);
+  addGpuSubgroupReduceLoweringPass(pm);
+
   // Phase 2: NVVM-specific — set target + convert GPU dialect.
   pm.addPass(std::make_unique<SetNVVMTargetPass>(
       options.chip, options.features, options.optLevel));
   pm.addNestedPass<gpu::GPUModuleOp>(createConvertGpuOpsToNVVMOps());
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertMathToLLVMPass());
 
   // Phase 3: shared host LLVM lowering + binary compilation.
   buildGPUToLLVMAndBinaryPipeline(pm, options.format);

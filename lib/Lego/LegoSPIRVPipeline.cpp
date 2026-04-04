@@ -84,7 +84,11 @@ struct SetSPIRVTargetEnvPass
 
     auto triple = spirv::VerCapExtAttr::get(
         version,
-        {spirv::Capability::Shader, spirv::Capability::Int64},
+        {spirv::Capability::Shader, spirv::Capability::Int64,
+         spirv::Capability::GroupNonUniform,
+         spirv::Capability::GroupNonUniformShuffle,
+         spirv::Capability::GroupNonUniformShuffleRelative,
+         spirv::Capability::GroupNonUniformArithmetic},
         {spirv::Extension::SPV_KHR_storage_buffer_storage_class}, ctx);
 
     auto limits = spirv::getDefaultResourceLimits(ctx);
@@ -312,8 +316,16 @@ void buildLegoToSPIRVPipeline(OpPassManager &pm,
   // Step 3: Map memref memory spaces to SPIR-V storage classes BEFORE outlining.
   pm.addPass(createMapMemRefStorageClassPass());
 
+  // Step 3.5: Sink constants back into gpu.launch (CSE may have hoisted them).
+  pm.addPass(createGpuLaunchSinkIndexComputationsPass());
+
   // Step 4: Outline inline gpu.launch into gpu.module + gpu.func.
   pm.addPass(createGpuKernelOutliningPass());
+
+  // Step 4.5: Lower gpu.subgroup_reduce to gpu.shuffle (butterfly pattern).
+  // While GPU-to-SPIR-V can handle subgroup_reduce natively, the shuffle
+  // lowering is more portable across wgpu/Vulkan runtime implementations.
+  addGpuSubgroupReduceLoweringPass(pm);
 
   // Step 5: Lower workgroup attributions to SPIR-V ops (spirv.GlobalVariable
   // + spirv.Load/Store). These ops are legal in the gpu-to-spirv conversion
@@ -325,18 +337,16 @@ void buildLegoToSPIRVPipeline(OpPassManager &pm,
   pm.addPass(std::make_unique<SetSPIRVTargetEnvPass>(
       options.spirvVersion, options.clientAPI));
 
+  // Step 6.5: Convert math ops to SPIR-V inside gpu.module BEFORE the
+  // GPU-to-SPIR-V conversion (spirv.module only allows spirv.* ops).
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertMathToSPIRVPass());
+
   // Step 7: Convert GPU module to SPIR-V module.
+  // The upstream pass runs ALL conversion patterns together (GPU + Arith +
+  // SCF + MemRef + Func + Index) in a single conversion step.
   pm.addPass(createConvertGPUToSPIRVPass(/*mapMemorySpace=*/true));
 
-  // Step 8: Convert remaining dialects inside spirv.module.
-  pm.addNestedPass<spirv::ModuleOp>(createConvertArithToSPIRVPass());
-  pm.addNestedPass<spirv::ModuleOp>(createConvertFuncToSPIRVPass());
-  pm.addNestedPass<spirv::ModuleOp>(createSCFToSPIRV());
-  pm.addNestedPass<spirv::ModuleOp>(createConvertMemRefToSPIRVPass());
-  pm.addNestedPass<spirv::ModuleOp>(createConvertMathToSPIRVPass());
-  pm.addNestedPass<spirv::ModuleOp>(createConvertIndexToSPIRVPass());
-
-  // Step 9: Finalize SPIR-V module.
+  // Step 8: Finalize SPIR-V module.
   pm.addNestedPass<spirv::ModuleOp>(spirv::createSPIRVLowerABIAttributesPass());
   pm.addNestedPass<spirv::ModuleOp>(spirv::createSPIRVUpdateVCEPass());
 

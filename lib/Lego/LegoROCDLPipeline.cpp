@@ -21,8 +21,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
-#include "mlir/Conversion/Passes.h"
-
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 using namespace mlir;
 
 namespace {
@@ -72,10 +71,16 @@ void buildLegoToROCDLPipeline(OpPassManager &pm,
   // Phase 1: shared LEGO lower + GPU outline.
   buildLegoGPUOutlinePipeline(pm);
 
+  // Phase 1.5: Lower gpu.subgroup_reduce → gpu.shuffle butterfly pattern.
+  addGpuSubgroupReduceLoweringPass(pm);
+
   // Phase 2: ROCDL-specific — set target + convert GPU dialect.
   pm.addPass(std::make_unique<SetROCDLTargetPass>(
       options.chip, options.features, options.optLevel));
-  pm.addNestedPass<gpu::GPUModuleOp>(createConvertGpuOpsToROCDLOps());
+  ConvertGpuOpsToROCDLOpsOptions rocdlOpts;
+  rocdlOpts.chipset = std::string(options.chip);
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertGpuOpsToROCDLOps(rocdlOpts));
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertMathToLLVMPass());
 
   // Phase 3: shared host LLVM lowering + binary compilation.
   buildGPUToLLVMAndBinaryPipeline(pm, options.format);

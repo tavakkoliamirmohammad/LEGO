@@ -110,6 +110,8 @@ NB_MODULE(_legoDialects, m) {
         // GPU + SPIR-V dialects (always available, no GPU hardware needed)
         registerAndLoad(mlirGetDialectHandle__gpu__(), ctx);
         registerAndLoad(mlirGetDialectHandle__spirv__(), ctx);
+        // Math dialect (needed for math.exp etc. in GPU kernels)
+        registerAndLoad(mlirGetDialectHandle__math__(), ctx);
       },
       nb::arg("context"),
       "Register and load the LEGO dialect and required standard dialects.");

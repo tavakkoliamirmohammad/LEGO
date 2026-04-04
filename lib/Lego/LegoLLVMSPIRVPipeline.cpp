@@ -11,6 +11,7 @@
 #include "Lego/Passes.h"
 
 #include "mlir/Conversion/GPUToLLVMSPV/GPUToLLVMSPVPass.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
@@ -29,6 +30,7 @@ void buildLegoToLLVMSPIRVPipeline(
   ConvertGpuOpsToLLVMSPVOpsOptions spvOpts;
   spvOpts.use64bitIndex = true;
   pm.addNestedPass<gpu::GPUModuleOp>(createConvertGpuOpsToLLVMSPVOps(spvOpts));
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertMathToLLVMPass());
 
   // Phase 3: shared host-side LLVM lowering.
   buildGPUHostLLVMPipeline(pm);

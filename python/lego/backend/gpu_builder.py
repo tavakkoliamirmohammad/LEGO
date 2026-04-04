@@ -39,7 +39,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from lego.mlir.ir import (
     Context, Location, Module, InsertionPoint,
-    IndexType, MemRefType, FunctionType, StringAttr, IntegerAttr,
+    IndexType, IntegerType, MemRefType, FunctionType, StringAttr, IntegerAttr,
     F32Type,
 )
 from lego.mlir.dialects import func as func_dialect
@@ -352,6 +352,190 @@ class KernelContext:
         """Insert a GPU barrier (thread synchronization)."""
         gpu_dialect.BarrierOp()
 
+    # --- Warp / subgroup operations ---
+
+    def _i32_const(self, value):
+        """Create a constant i32 MLIR Value."""
+        i32 = IntegerType.get_signless(32)
+        return arith_dialect.ConstantOp(i32, IntegerAttr.get(i32, int(value))).result
+
+    def lane_id(self):
+        """Return the lane ID within the subgroup (warp)."""
+        return gpu_dialect.LaneIdOp().result
+
+    def subgroup_size(self):
+        """Return the number of lanes in a subgroup."""
+        return gpu_dialect.SubgroupSizeOp().result
+
+    def shuffle_down(self, val, offset, width=32):
+        """Shuffle value down by offset within subgroup."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        w = self._i32_const(width)
+        off = self._i32_const(offset) if isinstance(offset, int) else \
+            arith_dialect.IndexCastOp(IntegerType.get_signless(32), offset).result
+        return gpu_dialect.ShuffleOp(val, off, w, ShuffleMode.DOWN).shuffleResult
+
+    def shuffle_up(self, val, offset, width=32):
+        """Shuffle value up by offset within subgroup."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        w = self._i32_const(width)
+        off = self._i32_const(offset) if isinstance(offset, int) else \
+            arith_dialect.IndexCastOp(IntegerType.get_signless(32), offset).result
+        return gpu_dialect.ShuffleOp(val, off, w, ShuffleMode.UP).shuffleResult
+
+    def shuffle_xor(self, val, mask, width=32):
+        """Shuffle value with XOR mask within subgroup (butterfly pattern)."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        w = self._i32_const(width)
+        m = self._i32_const(mask) if isinstance(mask, int) else \
+            arith_dialect.IndexCastOp(IntegerType.get_signless(32), mask).result
+        return gpu_dialect.ShuffleOp(val, m, w, ShuffleMode.XOR).shuffleResult
+
+    def shuffle_idx(self, val, lane, width=32):
+        """Shuffle: get value from specific lane (broadcast pattern)."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        w = self._i32_const(width)
+        ln = self._i32_const(lane) if isinstance(lane, int) else \
+            arith_dialect.IndexCastOp(IntegerType.get_signless(32), lane).result
+        return gpu_dialect.ShuffleOp(val, ln, w, ShuffleMode.IDX).shuffleResult
+
+    def subgroup_reduce_add(self, val):
+        """Reduce value across all lanes in subgroup with addition."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.SubgroupReduceOp(val, AllReduceOperation.ADD).result
+
+    def subgroup_reduce_mul(self, val):
+        """Reduce value across all lanes in subgroup with multiplication."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.SubgroupReduceOp(val, AllReduceOperation.MUL).result
+
+    def subgroup_reduce_max(self, val):
+        """Reduce value across all lanes in subgroup with max."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.SubgroupReduceOp(val, AllReduceOperation.MAXNUMF).result
+
+    def subgroup_reduce_min(self, val):
+        """Reduce value across all lanes in subgroup with min."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.SubgroupReduceOp(val, AllReduceOperation.MINNUMF).result
+
+    # --- Block-wide operations ---
+
+    def all_reduce_add(self, val):
+        """Reduce value across all threads in the workgroup with addition."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.ADD).result
+
+    def all_reduce_mul(self, val):
+        """Reduce value across all threads in the workgroup with multiplication."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.MUL).result
+
+    def all_reduce_max(self, val):
+        """Reduce value across all threads in the workgroup with max."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.MAXNUMF).result
+
+    def all_reduce_min(self, val):
+        """Reduce value across all threads in the workgroup with min."""
+        from lego.mlir.dialects._gpu_enum_gen import AllReduceOperation
+        return gpu_dialect.AllReduceOp(val, op=AllReduceOperation.MINNUMF).result
+
+    # --- Subgroup broadcast ---
+
+    def subgroup_broadcast(self, val, lane=0):
+        """Broadcast value from a specific lane to all lanes in subgroup.
+
+        Implemented via shuffle_idx(val, lane) which is universally supported
+        (gpu.subgroup_broadcast lacks NVVM lowering for specific_lane mode).
+        """
+        return self.shuffle_idx(val, lane)
+
+    # --- Warp prefix sum (built from shuffle_up + add) ---
+
+    def warp_prefix_sum_inclusive(self, val, warp_size=32):
+        """Inclusive prefix sum within subgroup via Hillis-Steele shuffle_up.
+
+        Each lane k gets sum(val[0..k]). Built from log2(warp_size)
+        shuffle_up + add steps.
+        """
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        i32 = IntegerType.get_signless(32)
+        result = val
+        offset = 1
+        while offset < warp_size:
+            w = self._i32_const(warp_size)
+            off = self._i32_const(offset)
+            shuffled = gpu_dialect.ShuffleOp(result, off, w, ShuffleMode.UP)
+            neighbor = shuffled.shuffleResult
+            valid = shuffled.valid
+            # Add neighbor only if valid (lane >= offset)
+            added = arith_dialect.AddFOp(result, neighbor).result
+            result = arith_dialect.SelectOp(valid, added, result).result
+            offset *= 2
+        return result
+
+    def warp_prefix_sum_exclusive(self, val, warp_size=32):
+        """Exclusive prefix sum: each lane k gets sum(val[0..k-1]), lane 0 gets 0."""
+        from lego.mlir.dialects._gpu_enum_gen import ShuffleMode
+        # Shift values up by 1 lane, lane 0 gets 0
+        i32 = IntegerType.get_signless(32)
+        w = self._i32_const(warp_size)
+        off = self._i32_const(1)
+        shuffled = gpu_dialect.ShuffleOp(val, off, w, ShuffleMode.UP)
+        shifted = shuffled.shuffleResult
+        valid = shuffled.valid
+        zero = arith_dialect.ConstantOp(F32Type.get(), 0.0).result
+        result = arith_dialect.SelectOp(valid, shifted, zero).result
+        # Now do inclusive prefix sum on the shifted values
+        return self.warp_prefix_sum_inclusive(result, warp_size)
+
+    # --- Subgroup MMA operations ---
+
+    def _reshape_buf_2d(self, buf_index, rows, cols):
+        """Reinterpret a 1D buffer as a 2D memref for MMA ops."""
+        from lego.mlir.ir import MemRefType, DenseI64ArrayAttr
+        flat_memref = self._buf_vals[buf_index]
+        elem_ty = F32Type.get()
+        target_ty = MemRefType.get([rows, cols], elem_ty)
+        return memref_dialect.ReinterpretCastOp(
+            target_ty, flat_memref,
+            offsets=[], sizes=[], strides=[],
+            static_offsets=DenseI64ArrayAttr.get([0]),
+            static_sizes=DenseI64ArrayAttr.get([rows, cols]),
+            static_strides=DenseI64ArrayAttr.get([cols, 1])).result
+
+    def tensor_core(self, tile_m, tile_n, tile_k, a_dtype="f16", c_dtype="f32"):
+        """Create a TensorCore handle for MMA operations.
+
+        Usage::
+
+            tc = tensor_core(16, 16, 16)
+            acc = tc.zero()
+            a = tc.load_a(A2d, row, col, lead_dim)
+            b = tc.load_b(B2d, row, col, lead_dim)
+            acc = tc.mma(a, b, acc)
+            tc.store(acc, C2d, row, col, lead_dim)
+        """
+        return _TensorCoreHandle(tile_m, tile_n, tile_k, a_dtype, c_dtype)
+
+    # --- Math operations ---
+
+    def exp(self, val):
+        """Compute e^val (math.exp)."""
+        from lego.mlir.ir import Operation
+        return Operation.create("math.exp", results=[val.type], operands=[val]).result
+
+    def sqrt(self, val):
+        """Compute sqrt(val) (math.sqrt)."""
+        from lego.mlir.ir import Operation
+        return Operation.create("math.sqrt", results=[val.type], operands=[val]).result
+
+    def rsqrt(self, val):
+        """Compute 1/sqrt(val) (math.rsqrt)."""
+        from lego.mlir.ir import Operation
+        return Operation.create("math.rsqrt", results=[val.type], operands=[val]).result
+
     # --- Arithmetic helpers ---
 
     def addf(self, a, b):
@@ -369,7 +553,6 @@ class KernelContext:
     def muli(self, a, b):
         return arith_dialect.MulIOp(a, b).result
 
-    # Keep old simple API as aliases
     def add(self, a, b):
         return self.addf(a, b)
 
@@ -379,41 +562,24 @@ class KernelContext:
     # --- Constants ---
 
     def const_f32(self, value):
-        """Create a constant f32 MLIR Value."""
         return arith_dialect.ConstantOp(F32Type.get(), float(value)).result
 
     def const_index(self, value):
-        """Create a constant index MLIR Value."""
         return _index_const(int(value))
 
     # --- For-range loop with accumulator ---
 
     def for_range(self, n, body_fn, init_vals=None):
-        """SCF for loop 0..n with optional carried accumulator values.
-
-        Args:
-            n: Python int or MLIR index Value — loop bound.
-            body_fn: If init_vals is None: body_fn(loop_idx) -> None.
-                     If init_vals provided: body_fn(loop_idx, *carry) -> [updated_carry].
-            init_vals: List of initial MLIR Values for iter_args (loop-carried
-                       accumulators).
-
-        Returns:
-            List of final carry values (MLIR Values), or None if no init_vals.
-        """
+        """SCF for loop 0..n with optional carried accumulator values."""
         if isinstance(n, int):
             n = _index_const(n)
-
         if init_vals is None:
             loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1))
             with InsertionPoint(loop.body):
                 body_fn(loop.induction_variable)
                 scf_dialect.YieldOp([])
             return None
-
-        loop = scf_dialect.ForOp(
-            _index_const(0), n, _index_const(1), init_vals
-        )
+        loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1), init_vals)
         with InsertionPoint(loop.body):
             iv = loop.induction_variable
             carry_args = list(loop.inner_iter_args)
@@ -424,7 +590,6 @@ class KernelContext:
     # --- Conditionals ---
 
     def if_(self, cond, then_fn):
-        """Execute then_fn only if cond is true (no results, no else)."""
         if_op = scf_dialect.IfOp(cond, has_else=False)
         with InsertionPoint(if_op.then_block):
             then_fn()
@@ -433,27 +598,61 @@ class KernelContext:
     # --- Comparisons ---
 
     def lt(self, a, b):
-        """Unsigned integer less-than comparison (for index values)."""
-        return arith_dialect.CmpIOp(
-            arith_dialect.CmpIPredicate.ult, a, b
-        ).result
+        return arith_dialect.CmpIOp(arith_dialect.CmpIPredicate.ult, a, b).result
 
     def eq(self, a, b):
-        """Integer equality comparison."""
-        return arith_dialect.CmpIOp(
-            arith_dialect.CmpIPredicate.eq, a, b
-        ).result
+        return arith_dialect.CmpIOp(arith_dialect.CmpIPredicate.eq, a, b).result
 
-    # Legacy flat-index API (for simple element-wise kernels)
     def load_raw(self, buf_index, gid=None):
         if gid is None:
             raise ValueError("load_raw requires a gid argument")
         return self.load_flat(buf_index, gid)
 
-    def store_raw(self, value, buf_index, gid=None):
-        if gid is None:
-            raise ValueError("store_raw requires a gid argument")
-        self.store_flat(value, buf_index, gid)
+
+class _TensorCoreHandle:
+    """Handle for warp-collective MMA operations.
+
+    Wraps gpu.subgroup_mma_* ops with typed fragment management.
+    Created via ``ctx.tensor_core(M, N, K, a_dtype, c_dtype)``.
+    """
+
+    def __init__(self, tile_m, tile_n, tile_k, a_dtype="f16", c_dtype="f32"):
+        self.tile_m = tile_m
+        self.tile_n = tile_n
+        self.tile_k = tile_k
+        self.a_dtype = a_dtype
+        self.c_dtype = c_dtype
+
+    def _mma_type(self, rows, cols, dtype_str, operand):
+        from lego.mlir.ir import Type
+        return Type.parse(f'!gpu.mma_matrix<{rows}x{cols}x{dtype_str}, "{operand}">')
+
+    def load_a(self, buf_2d, row, col, lead_dim):
+        """Load A fragment from 2D memref."""
+        mma_type = self._mma_type(self.tile_m, self.tile_k, self.a_dtype, "AOp")
+        return gpu_dialect.SubgroupMmaLoadMatrixOp(
+            mma_type, buf_2d, [row, col], lead_dim).result
+
+    def load_b(self, buf_2d, row, col, lead_dim):
+        """Load B fragment from 2D memref."""
+        mma_type = self._mma_type(self.tile_k, self.tile_n, self.a_dtype, "BOp")
+        return gpu_dialect.SubgroupMmaLoadMatrixOp(
+            mma_type, buf_2d, [row, col], lead_dim).result
+
+    def zero(self):
+        """Create zero-initialized accumulator fragment."""
+        mma_type = self._mma_type(self.tile_m, self.tile_n, self.c_dtype, "COp")
+        zero = arith_dialect.ConstantOp(F32Type.get(), 0.0).result
+        return gpu_dialect.SubgroupMmaConstantMatrixOp(mma_type, zero).result
+
+    def mma(self, a_frag, b_frag, c_frag):
+        """Compute D = A * B + C (warp-collective MMA)."""
+        return gpu_dialect.SubgroupMmaComputeOp(a_frag, b_frag, c_frag).result
+
+    def store(self, frag, buf_2d, row, col, lead_dim):
+        """Store result fragment to 2D memref."""
+        gpu_dialect.SubgroupMmaStoreMatrixOp(frag, buf_2d, [row, col], lead_dim)
+
 
 
 # ============================================================================

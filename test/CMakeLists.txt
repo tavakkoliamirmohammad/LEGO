@@ -37,8 +37,8 @@ if(TARGET LegoPythonModules)
   list(APPEND LEGO_TEST_DEPENDS LegoPythonModules)
 endif()
 
-# CUDA runner tools (only needed when runners are enabled in monolithic build)
-if(LEGO_ENABLE_RUNNERS AND LEGO_MONOLITHIC_LLVM)
+# CUDA runner tools (only when user explicitly enabled MLIR CUDA runner)
+if(MLIR_ENABLE_CUDA_RUNNER AND LEGO_MONOLITHIC_LLVM)
   list(APPEND LEGO_TEST_DEPENDS mlir-opt mlir_cuda_runtime mlir_c_runner_utils mlir-runner)
 endif()
 
@@ -47,6 +47,26 @@ add_lit_testsuite(check-lego "Running the Lego regression tests"
   DEPENDS
   ${LEGO_TEST_DEPENDS}
   )
+
+# --- Puzzle lit tests (GPU integration tests) ---
+if(TARGET LegoPythonModules AND LEGO_ENABLE_RUNNERS)
+  llvm_canonicalize_cmake_booleans(LEGO_HOST_HAS_NVIDIA_GPU LEGO_HOST_HAS_AMD_GPU)
+  configure_lit_site_cfg(
+    ${CMAKE_CURRENT_SOURCE_DIR}/puzzles/lit.site.cfg.py.in
+    ${CMAKE_CURRENT_BINARY_DIR}/puzzles/lit.site.cfg.py
+    MAIN_CONFIG
+    ${CMAKE_CURRENT_SOURCE_DIR}/puzzles/lit.cfg.py
+  )
+  set(PUZZLE_TEST_DEPENDS lego-prepare-wheel)
+  if(TARGET lego-naga)
+    list(APPEND PUZZLE_TEST_DEPENDS lego-naga)
+  endif()
+  add_lit_testsuite(check-lego-puzzles "Running LEGO puzzle integration tests"
+    ${CMAKE_CURRENT_BINARY_DIR}/puzzles
+    DEPENDS
+    ${PUZZLE_TEST_DEPENDS}
+  )
+endif()
 
 # Python tests (pytest) — runs after wheel directory is prepared
 if(TARGET LegoPythonModules)

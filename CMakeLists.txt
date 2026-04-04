@@ -14,8 +14,8 @@ set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV" CACHE STRING "Semicolon-separated
 
 # --- Python & Venv Support ---
 if(NOT EMSCRIPTEN)
-  set(LEGO_VENV_PATH "${CMAKE_SOURCE_DIR}/venv")
-  if(EXISTS "${LEGO_VENV_PATH}/bin/python3")
+  set(LEGO_VENV_PATH "${CMAKE_SOURCE_DIR}/venv" CACHE PATH "Path to Python venv")
+  if(EXISTS "${LEGO_VENV_PATH}/bin/python3" AND NOT Python3_EXECUTABLE)
     set(Python3_EXECUTABLE "${LEGO_VENV_PATH}/bin/python3")
     set(Python3_ROOT_DIR "${LEGO_VENV_PATH}")
     message(STATUS "Prioritizing Python from venv: ${Python3_EXECUTABLE}")
@@ -57,105 +57,7 @@ if(LEGO_ENABLE_CCACHE)
   endif()
 endif()
 
-# --- MLIR Configuration ---
-if(LEGO_MONOLITHIC_LLVM)
-  set(LLVM_SUBMODULE_DIR "${PROJECT_SOURCE_DIR}/third_party/llvm-project")
-  if(NOT EXISTS "${LLVM_SUBMODULE_DIR}")
-    message(FATAL_ERROR "llvm-project submodule not found at ${LLVM_SUBMODULE_DIR}")
-  endif()
-
-  set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
-
-  # --- Emscripten cross-compilation ---
-  # Cross-compiling LLVM/MLIR to WebAssembly requires pre-built native
-  # tablegen tools (they run at build time to generate C++ from .td files).
-  if(EMSCRIPTEN)
-    if(NOT LLVM_NATIVE_TOOL_DIR)
-      message(FATAL_ERROR
-        "LLVM_NATIVE_TOOL_DIR is required for Emscripten cross-compilation.\n"
-        "Point it at the bin/ directory of a native LLVM/MLIR build, e.g.:\n"
-        "  -DLLVM_NATIVE_TOOL_DIR=${CMAKE_SOURCE_DIR}/build/llvm-build/bin")
-    endif()
-    # Only the WebAssembly backend is needed in the browser
-    set(LEGO_LLVM_TARGETS "WebAssembly" CACHE STRING "" FORCE)
-    # Disable features unavailable under Emscripten
-    set(LLVM_ENABLE_THREADS OFF CACHE BOOL "" FORCE)
-    set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
-    set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
-    set(LLVM_ENABLE_TERMINFO OFF CACHE BOOL "" FORCE)
-    set(LLVM_ENABLE_LIBXML2 OFF CACHE BOOL "" FORCE)
-    set(LLVM_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-    set(LLVM_BUILD_UTILS OFF CACHE BOOL "" FORCE)
-  endif()
-
-  set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
-
-  # LEGO_ENABLE_RUNNERS is auto-detected below; if the user sets it
-  # explicitly we honour that and forward to the MLIR CUDA runner.
-  if(LEGO_ENABLE_RUNNERS)
-    set(MLIR_ENABLE_CUDA_RUNNER ON CACHE BOOL "" FORCE)
-  endif()
-
-  # Minimal LLVM/MLIR build: disable components LEGO does not need
-  set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
-  set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
-  set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
-  set(LLVM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-  set(LLVM_ENABLE_BINDINGS OFF CACHE BOOL "" FORCE)
-  if(NOT EMSCRIPTEN)
-    set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "" FORCE)
-  else()
-    set(MLIR_ENABLE_BINDINGS_PYTHON OFF CACHE BOOL "" FORCE)
-  endif()
-  set(LLVM_ENABLE_Z3_SOLVER OFF CACHE BOOL "" FORCE)
-  if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
-  endif()
-
-  add_subdirectory("${LLVM_SUBMODULE_DIR}/llvm" "llvm-build" EXCLUDE_FROM_ALL)
-
-  set(MLIR_DIR "${LLVM_SUBMODULE_DIR}/mlir")
-  set(MLIR_BINARY_DIR "${CMAKE_BINARY_DIR}/llvm-build/tools/mlir")
-
-  list(APPEND CMAKE_MODULE_PATH "${MLIR_DIR}/cmake/modules")
-  list(APPEND CMAKE_MODULE_PATH "${LLVM_SUBMODULE_DIR}/llvm/cmake/modules")
-  
-  include(TableGen)
-  include(AddLLVM)
-  include(AddMLIR)
-
-  include_directories(${LLVM_SUBMODULE_DIR}/llvm/include)
-  include_directories(${CMAKE_BINARY_DIR}/llvm-build/include)
-  include_directories(${MLIR_DIR}/include)
-  include_directories(${MLIR_BINARY_DIR}/include)
-else()
-  # Decoupled build: Expect MLIR to be found via MLIR_DIR or system install
-  find_package(MLIR CONFIG REQUIRED)
-  find_package(LLVM CONFIG REQUIRED)
-  
-  message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
-  message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-  message(STATUS "MLIR_ENABLE_BINDINGS_PYTHON (from MLIRConfig): ${MLIR_ENABLE_BINDINGS_PYTHON}")
-
-  list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
-  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
-
-  include(TableGen)
-  include(AddLLVM)
-  include(AddMLIR)
-
-  # Ensure TableGen can find MLIR and LLVM headers
-  include_directories(${MLIR_INCLUDE_DIRS})
-  include_directories(${LLVM_INCLUDE_DIRS})
-  list(APPEND MLIR_TABLEGEN_FLAGS -I${MLIR_INCLUDE_DIRS})
-  list(APPEND MLIR_TABLEGEN_FLAGS -I${LLVM_INCLUDE_DIRS})
-endif()
-
-# --- GPU dialect (always available) ---
-add_definitions(-DLEGO_HAS_GPU)
-message(STATUS "GPU + SPIR-V dialect support enabled")
-
-# --- Host GPU detection ---
+# --- Host GPU detection (before MLIR config — needed for CUDA runner toggle) ---
 # Probe for GPUs on the host.  This determines whether to auto-enable
 # GPU execution tests (Triton examples, CUDA runners, ROCm runners).
 
@@ -193,6 +95,116 @@ if(_ROCM_SMI)
   endif()
 endif()
 
+# --- MLIR Configuration ---
+if(LEGO_MONOLITHIC_LLVM)
+  set(LLVM_SUBMODULE_DIR "${PROJECT_SOURCE_DIR}/third_party/llvm-project")
+  if(NOT EXISTS "${LLVM_SUBMODULE_DIR}")
+    message(FATAL_ERROR "llvm-project submodule not found at ${LLVM_SUBMODULE_DIR}")
+  endif()
+
+  set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "" FORCE)
+
+  # --- Emscripten cross-compilation ---
+  # Cross-compiling LLVM/MLIR to WebAssembly requires pre-built native
+  # tablegen tools (they run at build time to generate C++ from .td files).
+  if(EMSCRIPTEN)
+    if(NOT LLVM_NATIVE_TOOL_DIR)
+      message(FATAL_ERROR
+        "LLVM_NATIVE_TOOL_DIR is required for Emscripten cross-compilation.\n"
+        "Point it at the bin/ directory of a native LLVM/MLIR build, e.g.:\n"
+        "  -DLLVM_NATIVE_TOOL_DIR=${CMAKE_SOURCE_DIR}/build/llvm-build/bin")
+    endif()
+    # Only the WebAssembly backend is needed in the browser
+    set(LEGO_LLVM_TARGETS "WebAssembly" CACHE STRING "" FORCE)
+    # Disable features unavailable under Emscripten
+    set(LLVM_ENABLE_THREADS OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_TERMINFO OFF CACHE BOOL "" FORCE)
+    set(LLVM_ENABLE_LIBXML2 OFF CACHE BOOL "" FORCE)
+    set(LLVM_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(LLVM_BUILD_UTILS OFF CACHE BOOL "" FORCE)
+  endif()
+
+  set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
+
+  # Only forward MLIR_ENABLE_CUDA_RUNNER when the user *explicitly* set
+  # LEGO_ENABLE_RUNNERS=ON (before auto-detection).  Auto-detection happens
+  # after add_subdirectory and only controls Python-level GPU tests —
+  # building the full MLIR CUDA runner is expensive and opt-in.
+  if(LEGO_ENABLE_RUNNERS)
+    set(MLIR_ENABLE_CUDA_RUNNER ON CACHE BOOL "" FORCE)
+  endif()
+
+  # Minimal LLVM/MLIR build: disable components LEGO does not need
+  set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
+  set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)
+  set(LLVM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(LLVM_ENABLE_BINDINGS OFF CACHE BOOL "" FORCE)
+  if(NOT DEFINED MLIR_ENABLE_BINDINGS_PYTHON)
+    if(NOT EMSCRIPTEN)
+      set(MLIR_ENABLE_BINDINGS_PYTHON ON CACHE BOOL "Enable MLIR Python bindings")
+    else()
+      set(MLIR_ENABLE_BINDINGS_PYTHON OFF CACHE BOOL "Enable MLIR Python bindings")
+    endif()
+  endif()
+  set(LLVM_ENABLE_Z3_SOLVER OFF CACHE BOOL "" FORCE)
+  if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+  endif()
+
+  add_subdirectory("${LLVM_SUBMODULE_DIR}/llvm" "llvm-build" EXCLUDE_FROM_ALL)
+
+  set(MLIR_DIR "${LLVM_SUBMODULE_DIR}/mlir")
+  set(MLIR_BINARY_DIR "${CMAKE_BINARY_DIR}/llvm-build/tools/mlir")
+
+  list(APPEND CMAKE_MODULE_PATH "${MLIR_DIR}/cmake/modules")
+  list(APPEND CMAKE_MODULE_PATH "${LLVM_SUBMODULE_DIR}/llvm/cmake/modules")
+  
+  include(TableGen)
+  include(AddLLVM)
+  include(AddMLIR)
+
+  include_directories(${LLVM_SUBMODULE_DIR}/llvm/include)
+  include_directories(${CMAKE_BINARY_DIR}/llvm-build/include)
+  include_directories(${MLIR_DIR}/include)
+  include_directories(${MLIR_BINARY_DIR}/include)
+else()
+  # Decoupled build: use MLIR_DIR from user, or auto-detect from a prior
+  # monolithic build in the same source tree (build/lib/cmake/mlir).
+  if(NOT MLIR_DIR)
+    set(_AUTO_MLIR_DIR "${CMAKE_SOURCE_DIR}/build/lib/cmake/mlir")
+    if(EXISTS "${_AUTO_MLIR_DIR}/MLIRConfig.cmake")
+      set(MLIR_DIR "${_AUTO_MLIR_DIR}" CACHE PATH "Path to MLIRConfig.cmake")
+      message(STATUS "Auto-detected MLIR_DIR from prior monolithic build: ${MLIR_DIR}")
+    endif()
+  endif()
+  find_package(MLIR CONFIG REQUIRED)
+  find_package(LLVM CONFIG REQUIRED)
+  
+  message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
+  message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+  message(STATUS "MLIR_ENABLE_BINDINGS_PYTHON (from MLIRConfig): ${MLIR_ENABLE_BINDINGS_PYTHON}")
+
+  list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+
+  include(TableGen)
+  include(AddLLVM)
+  include(AddMLIR)
+
+  # Ensure TableGen can find MLIR and LLVM headers
+  include_directories(${MLIR_INCLUDE_DIRS})
+  include_directories(${LLVM_INCLUDE_DIRS})
+  list(APPEND MLIR_TABLEGEN_FLAGS -I${MLIR_INCLUDE_DIRS})
+  list(APPEND MLIR_TABLEGEN_FLAGS -I${LLVM_INCLUDE_DIRS})
+endif()
+
+# --- GPU dialect (always available) ---
+add_definitions(-DLEGO_HAS_GPU)
+message(STATUS "GPU + SPIR-V dialect support enabled")
+
 # --- LLVM target detection helper ---
 macro(detect_llvm_target _target _msg)
   set(LEGO_HAS_${_target} OFF)
@@ -207,8 +219,8 @@ detect_llvm_target(NVPTX  "NVPTX backend enabled — NVVM compilation support av
 detect_llvm_target(SPIRV  "SPIRV backend enabled — LLVM SPIR-V compilation support available")
 detect_llvm_target(AMDGPU "AMDGPU backend enabled")
 
-# Auto-enable runners when NVPTX target is built and a GPU is present,
-# unless the user explicitly set LEGO_ENABLE_RUNNERS.
+# For decoupled builds, auto-detect LEGO_ENABLE_RUNNERS here
+# (monolithic builds already did this before add_subdirectory).
 if(NOT DEFINED LEGO_ENABLE_RUNNERS)
   if(LEGO_HAS_NVPTX AND LEGO_HOST_HAS_NVIDIA_GPU)
     set(LEGO_ENABLE_RUNNERS ON)
@@ -289,7 +301,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   find_package(nanobind CONFIG QUIET)
   if(NOT nanobind_FOUND)
     execute_process(
-      COMMAND "${Python3_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
+      COMMAND "${Python_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
       OUTPUT_VARIABLE nanobind_DIR OUTPUT_STRIP_TRAILING_WHITESPACE)
     find_package(nanobind CONFIG REQUIRED)
   endif()
@@ -451,17 +463,31 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   find_program(CARGO_EXECUTABLE cargo)
   set(LEGO_NAGA_BIN "${LEGO_WHEEL_DIR}/lego/bin/naga")
   if(CARGO_EXECUTABLE)
+    # On Linux, statically link libc so the binary works across distros
+    # (e.g. built on Ubuntu 22.04 / GLIBC 2.35, run on RHEL 8 / GLIBC 2.28).
+    # macOS always statically links the C runtime, so no special flags needed.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+        set(_NAGA_RUST_TARGET "aarch64-unknown-linux-gnu")
+      else()
+        set(_NAGA_RUST_TARGET "x86_64-unknown-linux-gnu")
+      endif()
+      set(_NAGA_CARGO_CMD ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C target-feature=+crt-static"
+        "${CARGO_EXECUTABLE}" install naga-cli
+        --root "${CMAKE_BINARY_DIR}/naga-install"
+        --target "${_NAGA_RUST_TARGET}"
+        --quiet)
+    else()
+      set(_NAGA_CARGO_CMD "${CARGO_EXECUTABLE}" install naga-cli
+        --root "${CMAKE_BINARY_DIR}/naga-install"
+        --quiet)
+    endif()
     add_custom_command(
       OUTPUT "${LEGO_NAGA_BIN}"
-      COMMAND "${CARGO_EXECUTABLE}" install naga-cli
-        --root "${CMAKE_BINARY_DIR}/naga-install"
-        --quiet
+      COMMAND ${_NAGA_CARGO_CMD}
       COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_BINARY_DIR}/naga-install/bin/naga"
         "${LEGO_NAGA_BIN}"
-      COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_BINARY_DIR}/naga-install/bin/naga"
-        "${CMAKE_SOURCE_DIR}/python/lego/bin/naga"
       COMMENT "Building naga-cli via cargo"
     )
     add_custom_target(lego-naga DEPENDS "${LEGO_NAGA_BIN}")
@@ -513,8 +539,11 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     endforeach()
   endmacro()
 
-  # --- Triton GPU example tests (require NVPTX + GPU) ---
-  if(LEGO_HAS_NVPTX)
+  # --- Triton GPU example tests (require NVPTX + GPU + triton module) ---
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}" -c "import triton"
+    RESULT_VARIABLE _TRITON_RESULT OUTPUT_QUIET ERROR_QUIET)
+  if(LEGO_HAS_NVPTX AND _TRITON_RESULT EQUAL 0)
     add_example_group(triton "${CMAKE_SOURCE_DIR}/python/examples/triton" ""
       vecadd_lego.py
       matmul_lego.py
@@ -525,7 +554,11 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
 
   # MLIR_BUILD_DIR is needed by bench_utils.py to locate mlir-runner.
-  get_filename_component(_MLIR_BUILD_DIR "${LLVM_DIR}/../../.." ABSOLUTE)
+  if(LEGO_MONOLITHIC_LLVM)
+    set(_MLIR_BUILD_DIR "${CMAKE_BINARY_DIR}/llvm-build")
+  else()
+    get_filename_component(_MLIR_BUILD_DIR "${LLVM_DIR}/../../.." ABSOLUTE)
+  endif()
 
   # --- LEGO GPU examples (require NVPTX + GPU + runners) ---
   if(LEGO_ENABLE_RUNNERS AND LEGO_HOST_HAS_NVIDIA_GPU)
@@ -542,12 +575,14 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       matmul_smem.py:64
       reduce_sum.py:1024
     )
+
+    # Mojo GPU Puzzles are now lit tests — see test/puzzles/.
   endif()
 
   # --- Cross-platform SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal via wgpu) ---
   # These run on any machine with wgpu installed — no NVIDIA/AMD GPU required.
   execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -c "import wgpu"
+    COMMAND "${Python_EXECUTABLE}" -c "import wgpu"
     RESULT_VARIABLE _WGPU_RESULT OUTPUT_QUIET ERROR_QUIET)
   if(NOT _WGPU_RESULT EQUAL 0)
     message(STATUS "wgpu not found — SPIR-V GPU benchmarks will not be registered")
@@ -564,6 +599,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       COMMENT "Running SPIR-V GPU benchmark: ${_script} ${ARGN}"
       USES_TERMINAL
     )
+    if(TARGET lego-naga)
+      add_dependencies(check-spirv-${_name} lego-naga)
+    endif()
   endmacro()
 
   add_spirv_benchmark(vecadd           vecadd.py           1024)
@@ -574,14 +612,15 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   add_spirv_benchmark(matmul_smem      matmul_smem.py      64)
 
   add_custom_target(check-spirv-examples
-    DEPENDS
-      check-spirv-vecadd
-      check-spirv-transpose_naive
-      check-spirv-matmul_naive
-      check-spirv-reduce_sum
-      check-spirv-transpose_smem
-      check-spirv-matmul_smem
     COMMENT "Running all SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal)"
+  )
+  add_dependencies(check-spirv-examples
+    check-spirv-vecadd
+    check-spirv-transpose_naive
+    check-spirv-matmul_naive
+    check-spirv-reduce_sum
+    check-spirv-transpose_smem
+    check-spirv-matmul_smem
   )
   endif() # wgpu available
 
@@ -614,7 +653,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   add_dependencies(check-lego-all check-lego-imports)
   add_dependencies(check-lego-all check-lego-wheel)
-  if(LEGO_HAS_NVPTX)
+  if(TARGET check-triton-examples)
     add_dependencies(check-lego-all check-triton-examples)
   endif()
   if(TARGET check-transpose-examples)
@@ -622,6 +661,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   if(TARGET check-gpu-examples)
     add_dependencies(check-lego-all check-gpu-examples)
+  endif()
+  if(TARGET check-lego-puzzles)
+    add_dependencies(check-lego-all check-lego-puzzles)
   endif()
   if(TARGET check-spirv-examples)
     add_dependencies(check-lego-all check-spirv-examples)

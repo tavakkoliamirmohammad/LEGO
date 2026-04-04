@@ -35,26 +35,41 @@ def verify_layouts(layouts, N):
     return all_ok
 
 
+_MAX_LLVM_SM = 90  # highest SM arch the bundled LLVM NVPTX backend supports
+
+
 def detect_nvvm_target():
     """Detect GPU compute capability and return (chip, features) for lego-to-nvvm.
 
-    Falls back to sm_80 / +ptx78 which works with CUDA 12+ and most modern GPUs.
+    Auto-detects the GPU via nvidia-smi.  If the detected SM version exceeds
+    what the bundled LLVM backend supports, caps to _MAX_LLVM_SM so the
+    kernel still runs via PTX forward-compatibility.
+    Falls back to sm_80 / +ptx78.
     """
+    chip = "sm_80"
+    ptx = "+ptx78"
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=5)
         if r.returncode == 0 and r.stdout.strip():
-            # e.g. "8.6" → "sm_86"
             cap = r.stdout.strip().split("\n")[0].strip()
-            chip = "sm_" + cap.replace(".", "")
-            # Pick a PTX version that matches the arch generation
-            major = int(cap.split(".")[0])
-            ptx = {7: "+ptx70", 8: "+ptx78", 9: "+ptx80"}.get(major, "+ptx78")
-            return chip, ptx
+            sm_num = int(cap.replace(".", ""))
+            # Cap to the highest SM the bundled LLVM can codegen for
+            if sm_num > _MAX_LLVM_SM:
+                sm_num = _MAX_LLVM_SM
+            chip = f"sm_{sm_num}"
+            # PTX version: use 78 for SM 8x, 80 for SM 9x — both widely supported
+            major = sm_num // 10
+            if major >= 9:
+                ptx = "+ptx80"
+            elif major >= 8:
+                ptx = "+ptx78"
+            else:
+                ptx = "+ptx70"
     except Exception:
         pass
-    return "sm_80", "+ptx78"
+    return chip, ptx
 
 
 def find_mlir_runner():
@@ -350,7 +365,16 @@ def _dispatch_wgpu(builder, shader_code, entry_point, metadata, init_mod):
     import wgpu
 
     adapter = wgpu.gpu.request_adapter_sync(power_preference="high-performance")
-    device = adapter.request_device_sync()
+    # Request subgroup feature if the adapter supports it (needed for shuffle ops).
+    features = []
+    try:
+        supported = adapter.features
+        for feat in ("subgroup", "subgroups", "subgroup-arithmetic"):
+            if feat in supported:
+                features.append(feat)
+    except Exception:
+        pass
+    device = adapter.request_device_sync(required_features=features)
 
     shader = device.create_shader_module(code=shader_code)
     pipeline = device.create_compute_pipeline(
@@ -526,6 +550,12 @@ def run_gpu_verify(builder, expected, target, label=None, atol=0, rtol=0,
             print(f"  {target_name} execution: SKIP (unknown target)", file=sys.stderr)
             return None
     except Exception as e:
+        err_str = str(e)
+        # Treat missing GPU capabilities (e.g., subgroup) as SKIP, not FAIL.
+        if "missing capability" in err_str or "Capabilities(SUBGROUP)" in err_str:
+            print(f"  {target_name} execution: SKIP (missing GPU capability)",
+                  file=sys.stderr)
+            return None
         print(f"  {target_name} execution: FAIL ({e})", file=sys.stderr)
         return False
 
@@ -580,11 +610,20 @@ def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rto
 
     # Host-side verification
     print("\nVerification:", file=sys.stderr)
-    run_cuda_verify(builder, expected, label=label, atol=atol, rtol=rtol, init_mod=init_mod)
+    failures = []
+    result = run_cuda_verify(builder, expected, label=label, atol=atol, rtol=rtol, init_mod=init_mod)
+    if result is False:
+        failures.append("cuda")
     for t in ("vulkan", "webgpu", "metal"):
         if t in targets:
-            run_gpu_verify(builder, expected, t, label=label, atol=atol, rtol=rtol,
-                           init_mod=init_mod)
+            result = run_gpu_verify(builder, expected, t, label=label, atol=atol, rtol=rtol,
+                                    init_mod=init_mod)
+            if result is False:
+                failures.append(t)
+    if failures:
+        print(f"\nFATAL: verification failed on: {', '.join(failures)}",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 def _fix_metal_buffer_bindings(metal_source):
