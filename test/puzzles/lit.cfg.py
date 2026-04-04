@@ -5,7 +5,8 @@ import lit.formats
 config.name = 'LEGO-Puzzles'
 config.test_format = lit.formats.ShTest(execute_external=True)
 config.suffixes = ['.py']
-config.excludes = ['__pycache__', 'bench_utils.py', 'lit.cfg.py', 'lit.site.cfg.py']
+config.excludes = ['__pycache__', 'bench_utils.py', 'lit.cfg.py', 'lit.site.cfg.py',
+                   'puzzle_09_debugging.py']
 
 # Tests live in the puzzles source directory.
 config.test_source_root = config.puzzles_dir

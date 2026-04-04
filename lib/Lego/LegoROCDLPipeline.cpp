@@ -22,42 +22,9 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-
 using namespace mlir;
 
 namespace {
-
-struct LowerGpuAllReduceROCDLPass
-    : public PassWrapper<LowerGpuAllReduceROCDLPass,
-                          OperationPass<gpu::GPUModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuAllReduceROCDLPass)
-  StringRef getArgument() const override { return "lego-lower-gpu-all-reduce-rocdl"; }
-  StringRef getDescription() const override { return "Lower gpu.all_reduce (ROCDL)"; }
-  void runOnOperation() override {
-    RewritePatternSet patterns(&getContext());
-    populateGpuAllReducePatterns(patterns);
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
-      signalPassFailure();
-  }
-};
-
-struct LowerGpuSubgroupReduceROCDLPass
-    : public PassWrapper<LowerGpuSubgroupReduceROCDLPass,
-                          OperationPass<gpu::GPUModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuSubgroupReduceROCDLPass)
-  StringRef getArgument() const override { return "lego-lower-subgroup-reduce-rocdl"; }
-  StringRef getDescription() const override { return "Lower gpu.subgroup_reduce to shuffle (ROCDL)"; }
-  void runOnOperation() override {
-    RewritePatternSet patterns(&getContext());
-    // AMD wavefront size is 64 (GCN) or 32 (RDNA)
-    populateGpuLowerSubgroupReduceToShufflePatterns(patterns, 32, 32);
-    populateGpuLowerClusteredSubgroupReduceToShufflePatterns(patterns, 32, 32);
-    populateGpuBreakDownSubgroupReducePatterns(patterns, 32);
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
-      signalPassFailure();
-  }
-};
 
 struct SetROCDLTargetPass
     : public PassWrapper<SetROCDLTargetPass, OperationPass<ModuleOp>> {
@@ -105,10 +72,7 @@ void buildLegoToROCDLPipeline(OpPassManager &pm,
   buildLegoGPUOutlinePipeline(pm);
 
   // Phase 1.5: Lower gpu.subgroup_reduce → gpu.shuffle butterfly pattern.
-  // Must run before ROCDL conversion. The ROCDL conversion handles
-  // gpu.shuffle and gpu.all_reduce internally but NOT gpu.subgroup_reduce.
-  pm.addNestedPass<gpu::GPUModuleOp>(
-      std::make_unique<LowerGpuSubgroupReduceROCDLPass>());
+  addGpuSubgroupReduceLoweringPass(pm);
 
   // Phase 2: ROCDL-specific — set target + convert GPU dialect.
   pm.addPass(std::make_unique<SetROCDLTargetPass>(

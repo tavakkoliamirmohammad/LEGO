@@ -5,6 +5,7 @@
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/IR/OperationSupport.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 using namespace mlir;
 using namespace mlir::lego;
@@ -108,6 +109,65 @@ void buildLegoGPUOutlinePipeline(OpPassManager &pm) {
   // for outlining to capture them (especially i32 constants for gpu.shuffle).
   pm.addPass(createGpuLaunchSinkIndexComputationsPass());
   pm.addPass(createGpuKernelOutliningPass());
+}
+
+// ---------------------------------------------------------------------------
+// Shared GPU reduce lowering passes.
+//
+// These are backend-agnostic: they lower gpu.all_reduce and
+// gpu.subgroup_reduce to gpu.shuffle butterfly patterns before any
+// backend-specific conversion (NVVM, ROCDL, SPIR-V).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct LowerGpuAllReducePass
+    : public PassWrapper<LowerGpuAllReducePass,
+                          OperationPass<gpu::GPUModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuAllReducePass)
+  StringRef getArgument() const override { return "lego-lower-gpu-all-reduce"; }
+  StringRef getDescription() const override {
+    return "Lower gpu.all_reduce to shared memory + shuffle tree";
+  }
+  void runOnOperation() override {
+    RewritePatternSet patterns(&getContext());
+    populateGpuAllReducePatterns(patterns);
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+      signalPassFailure();
+  }
+};
+
+struct LowerGpuSubgroupReducePass
+    : public PassWrapper<LowerGpuSubgroupReducePass,
+                          OperationPass<gpu::GPUModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuSubgroupReducePass)
+  StringRef getArgument() const override {
+    return "lego-lower-gpu-subgroup-reduce";
+  }
+  StringRef getDescription() const override {
+    return "Lower gpu.subgroup_reduce to gpu.shuffle butterfly pattern";
+  }
+  void runOnOperation() override {
+    RewritePatternSet patterns(&getContext());
+    // subgroupSize=32, shuffleBitwidth=32 (covers NVIDIA, AMD RDNA, wgpu)
+    populateGpuLowerSubgroupReduceToShufflePatterns(patterns, 32, 32);
+    populateGpuLowerClusteredSubgroupReduceToShufflePatterns(patterns, 32, 32);
+    populateGpuBreakDownSubgroupReducePatterns(patterns, 32);
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+      signalPassFailure();
+  }
+};
+
+} // namespace
+
+void addGpuAllReduceLoweringPass(OpPassManager &pm) {
+  pm.addNestedPass<gpu::GPUModuleOp>(
+      std::make_unique<LowerGpuAllReducePass>());
+}
+
+void addGpuSubgroupReduceLoweringPass(OpPassManager &pm) {
+  pm.addNestedPass<gpu::GPUModuleOp>(
+      std::make_unique<LowerGpuSubgroupReducePass>());
 }
 
 void buildGPUHostLLVMPipeline(OpPassManager &pm) {

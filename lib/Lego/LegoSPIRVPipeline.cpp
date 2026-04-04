@@ -28,7 +28,6 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/SPIRV/Serialization.h"
 #include "mlir/Transforms/Passes.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -296,51 +295,6 @@ struct LowerWorkgroupToSPIRVPass
   }
 };
 
-/// Lowers gpu.all_reduce ops into shared memory + shuffle tree reduction.
-struct LowerGpuAllReduceSPIRVPass
-    : public PassWrapper<LowerGpuAllReduceSPIRVPass,
-                          OperationPass<gpu::GPUModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuAllReduceSPIRVPass)
-
-  StringRef getArgument() const override {
-    return "lego-lower-gpu-all-reduce-spirv";
-  }
-  StringRef getDescription() const override {
-    return "Lower gpu.all_reduce to shared memory + shuffle tree (SPIR-V)";
-  }
-
-  void runOnOperation() override {
-    RewritePatternSet patterns(&getContext());
-    populateGpuAllReducePatterns(patterns);
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
-      signalPassFailure();
-  }
-};
-
-/// Lowers gpu.subgroup_reduce to gpu.shuffle (butterfly pattern).
-struct LowerGpuSubgroupReduceToShufflePass
-    : public PassWrapper<LowerGpuSubgroupReduceToShufflePass,
-                          OperationPass<gpu::GPUModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuSubgroupReduceToShufflePass)
-
-  StringRef getArgument() const override {
-    return "lego-lower-subgroup-reduce-to-shuffle";
-  }
-  StringRef getDescription() const override {
-    return "Lower gpu.subgroup_reduce to gpu.shuffle butterfly pattern";
-  }
-
-  void runOnOperation() override {
-    RewritePatternSet patterns(&getContext());
-    // 32 = subgroup size (NVIDIA), 32 = shuffle bitwidth
-    populateGpuLowerSubgroupReduceToShufflePatterns(patterns, 32, 32);
-    populateGpuLowerClusteredSubgroupReduceToShufflePatterns(patterns, 32, 32);
-    populateGpuBreakDownSubgroupReducePatterns(patterns, 32);
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
-      signalPassFailure();
-  }
-};
-
 } // namespace
 
 // ============================================================================
@@ -371,9 +325,7 @@ void buildLegoToSPIRVPipeline(OpPassManager &pm,
   // Step 4.5: Lower gpu.subgroup_reduce to gpu.shuffle (butterfly pattern).
   // While GPU-to-SPIR-V can handle subgroup_reduce natively, the shuffle
   // lowering is more portable across wgpu/Vulkan runtime implementations.
-  // gpu.all_reduce and gpu.shuffle are handled natively by GPU-to-SPIR-V.
-  pm.addNestedPass<gpu::GPUModuleOp>(
-      std::make_unique<LowerGpuSubgroupReduceToShufflePass>());
+  addGpuSubgroupReduceLoweringPass(pm);
 
   // Step 5: Lower workgroup attributions to SPIR-V ops (spirv.GlobalVariable
   // + spirv.Load/Store). These ops are legal in the gpu-to-spirv conversion

@@ -23,55 +23,9 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Conversion/Passes.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-
 using namespace mlir;
 
 namespace {
-
-/// Lowers gpu.all_reduce ops into shared memory + shuffle tree reduction.
-/// Must run on the outlined gpu.module BEFORE gpu-to-nvvm conversion.
-struct LowerGpuAllReducePass
-    : public PassWrapper<LowerGpuAllReducePass,
-                          OperationPass<gpu::GPUModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuAllReducePass)
-
-  StringRef getArgument() const override { return "lego-lower-gpu-all-reduce"; }
-  StringRef getDescription() const override {
-    return "Lower gpu.all_reduce to shared memory + shuffle tree";
-  }
-
-  void runOnOperation() override {
-    RewritePatternSet patterns(&getContext());
-    populateGpuAllReducePatterns(patterns);
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
-      signalPassFailure();
-  }
-};
-
-/// Lowers gpu.subgroup_reduce to gpu.shuffle (butterfly pattern).
-struct LowerGpuSubgroupReduceToShuffleNVVMPass
-    : public PassWrapper<LowerGpuSubgroupReduceToShuffleNVVMPass,
-                          OperationPass<gpu::GPUModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
-      LowerGpuSubgroupReduceToShuffleNVVMPass)
-
-  StringRef getArgument() const override {
-    return "lego-lower-subgroup-reduce-to-shuffle-nvvm";
-  }
-  StringRef getDescription() const override {
-    return "Lower gpu.subgroup_reduce to gpu.shuffle butterfly pattern (NVVM)";
-  }
-
-  void runOnOperation() override {
-    RewritePatternSet patterns(&getContext());
-    populateGpuLowerSubgroupReduceToShufflePatterns(patterns, 32, 32);
-    populateGpuLowerClusteredSubgroupReduceToShufflePatterns(patterns, 32, 32);
-    populateGpuBreakDownSubgroupReducePatterns(patterns, 32);
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
-      signalPassFailure();
-  }
-};
 
 struct SetNVVMTargetPass
     : public PassWrapper<SetNVVMTargetPass, OperationPass<ModuleOp>> {
@@ -118,13 +72,9 @@ void buildLegoToNVVMPipeline(OpPassManager &pm,
   // Phase 1: shared LEGO lower + GPU outline.
   buildLegoGPUOutlinePipeline(pm);
 
-  // Phase 1.5: Lower gpu.all_reduce → shared memory + shuffle tree, and
-  // gpu.subgroup_reduce → gpu.shuffle butterfly pattern.
-  // Must run AFTER outlining but BEFORE gpu-to-nvvm conversion.
-  pm.addNestedPass<gpu::GPUModuleOp>(
-      std::make_unique<LowerGpuAllReducePass>());
-  pm.addNestedPass<gpu::GPUModuleOp>(
-      std::make_unique<LowerGpuSubgroupReduceToShuffleNVVMPass>());
+  // Phase 1.5: Lower gpu.all_reduce and gpu.subgroup_reduce.
+  addGpuAllReduceLoweringPass(pm);
+  addGpuSubgroupReduceLoweringPass(pm);
 
   // Phase 2: NVVM-specific — set target + convert GPU dialect.
   pm.addPass(std::make_unique<SetNVVMTargetPass>(
