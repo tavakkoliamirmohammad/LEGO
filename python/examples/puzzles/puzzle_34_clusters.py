@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 1024
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 34 — GPU Cluster Programming: multi-block scaled reduction.
 
 Mojo puzzle: each block scales input by (block_id + 1), then sums.

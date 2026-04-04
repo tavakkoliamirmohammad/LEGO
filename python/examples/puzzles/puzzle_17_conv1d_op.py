@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 15 4
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 17 — 1D Convolution Op: package convolution as a reusable kernel.
 
 The Mojo puzzle packages a conv kernel as a MAX Graph custom op.

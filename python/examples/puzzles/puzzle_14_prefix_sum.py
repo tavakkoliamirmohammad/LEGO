@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 16
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 14 — Prefix Sum: compute inclusive prefix sum (running total).
 
 Hillis-Steele algorithm with double-barrier per step to avoid read-write

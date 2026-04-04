@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 1024
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 28 — Async Memory Operations: 1D convolution with shared memory.
 
 Mojo puzzle: 1D convolution of a large vector with a 5-element kernel,

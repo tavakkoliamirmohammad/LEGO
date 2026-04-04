@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 4
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 4 — 2D Map: add 10 to each element of a 2D matrix.
 
 Uses 2D thread indexing (thread_id.x for col, thread_id.y for row).

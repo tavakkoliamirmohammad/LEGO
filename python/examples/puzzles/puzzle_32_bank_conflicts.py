@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 32 — Bank Conflicts: shared memory access pattern analysis.
 
 Mojo puzzle: (input + 10) * 2 via shared memory with stride-1 access.

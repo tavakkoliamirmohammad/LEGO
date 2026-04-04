@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 27 — Block-Wide Patterns: dot product via block-level reduction.
 
 Computes dot product using shared memory tree reduction (matches Mojo's

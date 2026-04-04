@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 64
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 16 — Matrix Multiplication: C = A @ B with tiled shared memory.
 
 Two implementations:

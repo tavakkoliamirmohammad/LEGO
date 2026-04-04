@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 2 — Zip: element-wise addition of two vectors.
 
 LEGO layout: OrderBy(Row(N)).TileBy([N // WG], [WG])

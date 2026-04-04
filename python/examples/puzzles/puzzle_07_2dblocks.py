@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 7 — 2D Blocks: add 10 to matrix using multiple 2D blocks.
 
 LEGO layout: OrderBy(Row(N, N)).TileBy([N // TPB, N // TPB], [TPB, TPB])

@@ -1,5 +1,5 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 4 8
-# REQUIRES: nvidia-gpu
+# REQUIRES: gpu
 """Puzzle 19 — Attention: compute scaled dot-product attention.
 
 attention(Q, K, V) = softmax(Q @ K^T / sqrt(d)) @ V
