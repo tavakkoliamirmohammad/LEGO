@@ -650,6 +650,12 @@ class _Compiler:
         if name == "exp":
             val, vtag = self._expr(node.args[0])
             return (self.ctx.exp(val), F32)
+        if name == "sqrt":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.sqrt(val), F32)
+        if name == "rsqrt":
+            val, vtag = self._expr(node.args[0])
+            return (self.ctx.rsqrt(val), F32)
         raise NotImplementedError(f"Unknown function: {name}")
 
     def _method_call(self, node):

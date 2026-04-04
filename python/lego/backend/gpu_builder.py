@@ -526,6 +526,16 @@ class KernelContext:
         from lego.mlir.ir import Operation
         return Operation.create("math.exp", results=[val.type], operands=[val]).result
 
+    def sqrt(self, val):
+        """Compute sqrt(val) (math.sqrt)."""
+        from lego.mlir.ir import Operation
+        return Operation.create("math.sqrt", results=[val.type], operands=[val]).result
+
+    def rsqrt(self, val):
+        """Compute 1/sqrt(val) (math.rsqrt)."""
+        from lego.mlir.ir import Operation
+        return Operation.create("math.rsqrt", results=[val.type], operands=[val]).result
+
     # --- Arithmetic helpers ---
 
     def addf(self, a, b):
