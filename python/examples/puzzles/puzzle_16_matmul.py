@@ -1,22 +1,24 @@
 # RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 64
 # REQUIRES: gpu
-"""Puzzle 16 — Matrix Multiplication: C = A @ B with tiled shared memory.
+"""Puzzle 16 — Matrix Multiplication: C = A @ B.
 
-Two implementations:
-  1. Naive (global memory only)
-  2. Tiled with shared memory (load tiles → barrier → accumulate → barrier)
+Three implementations matching the Mojo GPU Puzzle:
+  1. naive_matmul: each thread computes one C element via a loop (global memory only)
+  2. smem_matmul: single-block matmul using shared memory
+  3. tiled_matmul: multi-block tiled matmul with shared memory
 
-LEGO layout for tiled version:
-  C: OrderBy(Row(N, N)).TileBy([N//TILE, N//TILE], [TILE, TILE])
-  sA, sB: Row(TILE, TILE) shared memory tiles
+Mojo equivalent (naive):
+    row, col = thread_id.y, thread_id.x
+    if row < size and col < size:
+        for k in range(size): acc += a[row, k] * b[k, col]
+        c[row, col] = acc
 
 Mojo equivalent (tiled):
     for t in range(K // TILE):
         sA[ty, tx] = A[row, t*TILE + tx]
         sB[ty, tx] = B[t*TILE + ty, col]
         barrier()
-        for kk in range(TILE):
-            acc += sA[ty, kk] * sB[kk, tx]
+        for kk in range(TILE): acc += sA[ty, kk] * sB[kk, tx]
         barrier()
     C[row, col] = acc
 """
@@ -34,19 +36,70 @@ else:
     sys.exit(1)
 
 TILE = 16
+# Small size for naive/smem sub-tests (must fit in a single block)
+S = min(M, TILE)
 
-# --- Layouts ---
-A_layout = Row(M, K)
-B_layout = Row(K, N)
-C_layout = OrderBy(Row(M, N)).TileBy([M // TILE, N // TILE], [TILE, TILE])
+# ===================================================================
+# Sub-test 1: naive_matmul — no shared memory, each thread does a full
+# dot product via global memory reads. Single block, small matrix.
+# ===================================================================
+A_layout_naive = Row(S, S)
+B_layout_naive = Row(S, S)
+C_layout_naive = Row(S, S)
+
+
+@gpu_kernel(grid=(1,), block=(S, S))
+def naive_matmul(A: Buffer(A_layout_naive, S, S),
+                 B: Buffer(B_layout_naive, S, S),
+                 C: Buffer(C_layout_naive, S, S)):
+    row = thread_id.y
+    col = thread_id.x
+    acc = 0.0
+    for k in range(S):
+        acc += A[row, k] * B[k, col]
+    C[row, col] = acc
+
+
+# ===================================================================
+# Sub-test 2: smem_matmul — single-block matmul with shared memory.
+# Load A and B tiles into shared memory, barrier, then accumulate.
+# ===================================================================
+smem_layout_s = Row(S, S)
+
+
+@gpu_kernel(grid=(1,), block=(S, S))
+def smem_matmul(A: Buffer(A_layout_naive, S, S),
+                B: Buffer(B_layout_naive, S, S),
+                C: Buffer(C_layout_naive, S, S),
+                sA: Shared(smem_layout_s, S, S),
+                sB: Shared(smem_layout_s, S, S)):
+    row = thread_id.y
+    col = thread_id.x
+    sA[row, col] = A[row, col]
+    sB[row, col] = B[row, col]
+    barrier()
+    acc = 0.0
+    for kk in range(S):
+        acc += sA[row, kk] * sB[kk, col]
+    C[row, col] = acc
+
+
+# ===================================================================
+# Sub-test 3: tiled_matmul — multi-block tiled matmul with shared memory.
+# Each block computes a TILE x TILE tile of C.
+# ===================================================================
+A_layout_tiled = Row(M, K)
+B_layout_tiled = Row(K, N)
 smem_layout = Row(TILE, TILE)
+C_tiled_layout = OrderBy(Row(M, N)).TileBy([M // TILE, N // TILE], [TILE, TILE])
 
 
 @gpu_kernel(grid=(N // TILE, M // TILE), block=(TILE, TILE))
-def matmul(A: Buffer(A_layout, M, K), B: Buffer(B_layout, K, N),
-           C: Buffer(C_layout, M, N),
-           sA: Shared(smem_layout, TILE, TILE),
-           sB: Shared(smem_layout, TILE, TILE)):
+def tiled_matmul(A: Buffer(A_layout_tiled, M, K),
+                 B: Buffer(B_layout_tiled, K, N),
+                 C: Buffer(C_tiled_layout, M, N),
+                 sA: Shared(smem_layout, TILE, TILE),
+                 sB: Shared(smem_layout, TILE, TILE)):
     row = block_id.y * TILE + thread_id.y
     col = block_id.x * TILE + thread_id.x
     acc = 0.0
@@ -64,15 +117,36 @@ from bench_utils import run_benchmark
 
 if __name__ == "__main__":
 
-    def compute_expected(inputs):
+    def compute_expected_small(inputs):
+        a = inputs[0].reshape(S, S)
+        b = inputs[1].reshape(S, S)
+        return (a @ b).ravel().astype(np.float32)
+
+    def compute_expected_tiled(inputs):
         a = inputs[0].reshape(M, K)
         b = inputs[1].reshape(K, N)
         return (a @ b).ravel().astype(np.float32)
 
+    print("Sub-test 1: naive matmul (global memory only)", file=sys.stderr)
     run_benchmark(
-        matmul, compute_expected,
+        naive_matmul, compute_expected_small,
         targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
-        label=f"{M}x{N}x{K}",
-        init_mod=10,
-        atol=1e-2,
+        label=f"naive {S}x{S}",
+        init_mod=10, atol=1e-2,
+    )
+
+    print("Sub-test 2: shared memory matmul (single block)", file=sys.stderr)
+    run_benchmark(
+        smem_matmul, compute_expected_small,
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        label=f"smem {S}x{S}",
+        init_mod=10, atol=1e-2,
+    )
+
+    print("Sub-test 3: tiled matmul (multi-block)", file=sys.stderr)
+    run_benchmark(
+        tiled_matmul, compute_expected_tiled,
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        label=f"tiled {M}x{N}x{K}",
+        init_mod=10, atol=1e-2,
     )
