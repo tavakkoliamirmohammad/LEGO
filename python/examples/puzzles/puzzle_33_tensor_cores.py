@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 64
+# REQUIRES: nvidia-gpu
 """Puzzle 33 — Tensor Core Operations: matrix multiply using MMA intrinsics.
 
 Sub-test 1: Tiled matmul with shared memory (baseline, all backends).

@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
+# REQUIRES: nvidia-gpu
 """Puzzle 1 — Map: add 10 to each element of a vector.
 
 LEGO layout: OrderBy(Row(N)).TileBy([N // WG], [WG])

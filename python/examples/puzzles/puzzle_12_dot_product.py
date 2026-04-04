@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
+# REQUIRES: nvidia-gpu
 """Puzzle 12 — Dot Product: compute dot product via parallel tree reduction.
 
 Each thread multiplies a[i]*b[i], then tree-reduce in shared memory.

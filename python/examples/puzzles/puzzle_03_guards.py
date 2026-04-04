@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 20
+# REQUIRES: nvidia-gpu
 """Puzzle 3 — Guards: add 10 with boundary checking.
 
 Launch more threads than data elements. Threads beyond SIZE must not

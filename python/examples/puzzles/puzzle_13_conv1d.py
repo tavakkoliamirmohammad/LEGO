@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 15 4
+# REQUIRES: nvidia-gpu
 """Puzzle 13 — 1D Convolution: convolve input with a small kernel.
 
 output[i] = sum(a[i+k] * b[k] for k in range(CONV_SIZE)) where valid.

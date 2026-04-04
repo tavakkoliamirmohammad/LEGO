@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 1024
+# REQUIRES: nvidia-gpu
 """Puzzle 6 — Blocks: add 10 using multiple thread blocks.
 
 LEGO layout: OrderBy(Row(N)).TileBy([N // TPB], [TPB])

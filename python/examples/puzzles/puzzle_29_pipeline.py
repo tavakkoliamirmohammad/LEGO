@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 1024
+# REQUIRES: nvidia-gpu
 """Puzzle 29 — GPU Synchronization: multi-stage pipeline + double-buffered stencil.
 
 Sub-test 1 (Mojo 29A): 3-stage image processing pipeline

@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
+# REQUIRES: nvidia-gpu
 """Puzzle 8 — Shared Memory: add 10 using shared memory as intermediate.
 
 Pattern: global → shared → compute → global.

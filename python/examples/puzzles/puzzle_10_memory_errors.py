@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 3
+# REQUIRES: nvidia-gpu
 """Puzzle 10 — Memory Error Detection: guard patterns preventing OOB.
 
 Two sub-tests from the Mojo puzzle:

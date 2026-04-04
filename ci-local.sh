@@ -64,7 +64,9 @@ if ! command -v naga &>/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     export PATH="$HOME/.cargo/bin:$PATH"
   fi
-  cargo install naga-cli
+  # Static-link libc so the binary works across Linux distros (GLIBC compat)
+  RUSTFLAGS="-C target-feature=+crt-static" \
+    cargo install naga-cli --target x86_64-unknown-linux-gnu
 fi
 echo "  naga: $(naga --version 2>/dev/null || echo 'installed')"
 

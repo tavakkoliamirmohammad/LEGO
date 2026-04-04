@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
+# REQUIRES: nvidia-gpu
 """Puzzle 22 — Kernel Fusion: combine forward and backward pass in one kernel.
 
 Demonstrates fusing two operations into a single kernel to avoid

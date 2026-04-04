@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 4 16
+# REQUIRES: nvidia-gpu
 """Puzzle 18 — Softmax: compute softmax along rows of a 2D matrix.
 
 softmax(x)[i] = exp(x[i] - max(x)) / sum(exp(x[j] - max(x)))

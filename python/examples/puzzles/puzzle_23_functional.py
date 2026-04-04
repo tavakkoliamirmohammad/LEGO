@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
+# REQUIRES: nvidia-gpu
 """Puzzle 23 — Functional Patterns: elementwise, tiled, and vectorized ops.
 
 Demonstrates three GPU programming patterns using LEGO layouts:

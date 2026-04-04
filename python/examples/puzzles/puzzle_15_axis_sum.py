@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 4 256
+# REQUIRES: nvidia-gpu
 """Puzzle 15 — Axis Sum: sum each row of a 2D matrix.
 
 Each block handles one row. Tree reduction within the block.

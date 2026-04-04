@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 4 8
+# REQUIRES: nvidia-gpu
 """Puzzle 21 — Embedding: demonstrate coalesced vs non-coalesced memory access.
 
 An embedding lookup: given indices, gather rows from a weight matrix.

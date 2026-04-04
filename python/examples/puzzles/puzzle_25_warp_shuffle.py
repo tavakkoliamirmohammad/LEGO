@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
+# REQUIRES: nvidia-gpu
 """Puzzle 25 — Warp Communication: all 5 Mojo sub-tests.
 
   1. neighbor_difference: output[i] = input[i+1] - input[i]

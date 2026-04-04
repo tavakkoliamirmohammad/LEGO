@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 4
+# REQUIRES: nvidia-gpu
 """Puzzle 5 — Broadcast: add 1D vectors to form a 2D matrix.
 
 output[row, col] = a[col] + b[row]

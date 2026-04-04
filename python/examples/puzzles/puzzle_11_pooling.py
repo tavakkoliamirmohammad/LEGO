@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 8
+# REQUIRES: nvidia-gpu
 """Puzzle 11 — Pooling: compute sliding window sum of last 3 elements.
 
 output[i] = a[i] + a[i-1] + a[i-2]  (clamped at boundaries)

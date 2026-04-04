@@ -57,6 +57,44 @@ if(LEGO_ENABLE_CCACHE)
   endif()
 endif()
 
+# --- Host GPU detection (before MLIR config — needed for CUDA runner toggle) ---
+# Probe for GPUs on the host.  This determines whether to auto-enable
+# GPU execution tests (Triton examples, CUDA runners, ROCm runners).
+
+set(LEGO_HOST_HAS_NVIDIA_GPU OFF)
+find_program(_NVIDIA_SMI nvidia-smi)
+if(_NVIDIA_SMI)
+  execute_process(
+    COMMAND "${_NVIDIA_SMI}" --query-gpu=name --format=csv,noheader
+    RESULT_VARIABLE _NVIDIA_SMI_RESULT
+    OUTPUT_VARIABLE _GPU_NAME OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(_NVIDIA_SMI_RESULT EQUAL 0 AND _GPU_NAME)
+    set(LEGO_HOST_HAS_NVIDIA_GPU ON)
+    message(STATUS "Detected NVIDIA GPU: ${_GPU_NAME}")
+  endif()
+endif()
+
+set(LEGO_HOST_HAS_AMD_GPU OFF)
+find_program(_ROCM_SMI rocm-smi)
+if(_ROCM_SMI)
+  execute_process(
+    COMMAND "${_ROCM_SMI}" --showproductname
+    RESULT_VARIABLE _ROCM_SMI_RESULT
+    OUTPUT_VARIABLE _AMD_GPU_NAME OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(_ROCM_SMI_RESULT EQUAL 0 AND _AMD_GPU_NAME)
+    set(LEGO_HOST_HAS_AMD_GPU ON)
+    # Extract just the first card name from rocm-smi output
+    string(REGEX MATCH "Card series:[ \t]*([^\n]+)" _AMD_MATCH "${_AMD_GPU_NAME}")
+    if(_AMD_MATCH)
+      message(STATUS "Detected AMD GPU: ${CMAKE_MATCH_1}")
+    else()
+      message(STATUS "Detected AMD GPU (via rocm-smi)")
+    endif()
+  endif()
+endif()
+
 # --- MLIR Configuration ---
 if(LEGO_MONOLITHIC_LLVM)
   set(LLVM_SUBMODULE_DIR "${PROJECT_SOURCE_DIR}/third_party/llvm-project")
@@ -90,8 +128,10 @@ if(LEGO_MONOLITHIC_LLVM)
 
   set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
 
-  # LEGO_ENABLE_RUNNERS is auto-detected below; if the user sets it
-  # explicitly we honour that and forward to the MLIR CUDA runner.
+  # Only forward MLIR_ENABLE_CUDA_RUNNER when the user *explicitly* set
+  # LEGO_ENABLE_RUNNERS=ON (before auto-detection).  Auto-detection happens
+  # after add_subdirectory and only controls Python-level GPU tests —
+  # building the full MLIR CUDA runner is expensive and opt-in.
   if(LEGO_ENABLE_RUNNERS)
     set(MLIR_ENABLE_CUDA_RUNNER ON CACHE BOOL "" FORCE)
   endif()
@@ -157,44 +197,6 @@ endif()
 add_definitions(-DLEGO_HAS_GPU)
 message(STATUS "GPU + SPIR-V dialect support enabled")
 
-# --- Host GPU detection ---
-# Probe for GPUs on the host.  This determines whether to auto-enable
-# GPU execution tests (Triton examples, CUDA runners, ROCm runners).
-
-set(LEGO_HOST_HAS_NVIDIA_GPU OFF)
-find_program(_NVIDIA_SMI nvidia-smi)
-if(_NVIDIA_SMI)
-  execute_process(
-    COMMAND "${_NVIDIA_SMI}" --query-gpu=name --format=csv,noheader
-    RESULT_VARIABLE _NVIDIA_SMI_RESULT
-    OUTPUT_VARIABLE _GPU_NAME OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-  if(_NVIDIA_SMI_RESULT EQUAL 0 AND _GPU_NAME)
-    set(LEGO_HOST_HAS_NVIDIA_GPU ON)
-    message(STATUS "Detected NVIDIA GPU: ${_GPU_NAME}")
-  endif()
-endif()
-
-set(LEGO_HOST_HAS_AMD_GPU OFF)
-find_program(_ROCM_SMI rocm-smi)
-if(_ROCM_SMI)
-  execute_process(
-    COMMAND "${_ROCM_SMI}" --showproductname
-    RESULT_VARIABLE _ROCM_SMI_RESULT
-    OUTPUT_VARIABLE _AMD_GPU_NAME OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-  if(_ROCM_SMI_RESULT EQUAL 0 AND _AMD_GPU_NAME)
-    set(LEGO_HOST_HAS_AMD_GPU ON)
-    # Extract just the first card name from rocm-smi output
-    string(REGEX MATCH "Card series:[ \t]*([^\n]+)" _AMD_MATCH "${_AMD_GPU_NAME}")
-    if(_AMD_MATCH)
-      message(STATUS "Detected AMD GPU: ${CMAKE_MATCH_1}")
-    else()
-      message(STATUS "Detected AMD GPU (via rocm-smi)")
-    endif()
-  endif()
-endif()
-
 # --- LLVM target detection helper ---
 macro(detect_llvm_target _target _msg)
   set(LEGO_HAS_${_target} OFF)
@@ -209,8 +211,8 @@ detect_llvm_target(NVPTX  "NVPTX backend enabled — NVVM compilation support av
 detect_llvm_target(SPIRV  "SPIRV backend enabled — LLVM SPIR-V compilation support available")
 detect_llvm_target(AMDGPU "AMDGPU backend enabled")
 
-# Auto-enable runners when NVPTX target is built and a GPU is present,
-# unless the user explicitly set LEGO_ENABLE_RUNNERS.
+# For decoupled builds, auto-detect LEGO_ENABLE_RUNNERS here
+# (monolithic builds already did this before add_subdirectory).
 if(NOT DEFINED LEGO_ENABLE_RUNNERS)
   if(LEGO_HAS_NVPTX AND LEGO_HOST_HAS_NVIDIA_GPU)
     set(LEGO_ENABLE_RUNNERS ON)
@@ -291,7 +293,7 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   find_package(nanobind CONFIG QUIET)
   if(NOT nanobind_FOUND)
     execute_process(
-      COMMAND "${Python3_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
+      COMMAND "${Python_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
       OUTPUT_VARIABLE nanobind_DIR OUTPUT_STRIP_TRAILING_WHITESPACE)
     find_package(nanobind CONFIG REQUIRED)
   endif()
@@ -453,19 +455,31 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   find_program(CARGO_EXECUTABLE cargo)
   set(LEGO_NAGA_BIN "${LEGO_WHEEL_DIR}/lego/bin/naga")
   if(CARGO_EXECUTABLE)
-    add_custom_command(
-      OUTPUT "${LEGO_NAGA_BIN}"
-      COMMAND ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C target-feature=+crt-static"
+    # On Linux, statically link libc so the binary works across distros
+    # (e.g. built on Ubuntu 22.04 / GLIBC 2.35, run on RHEL 8 / GLIBC 2.28).
+    # macOS always statically links the C runtime, so no special flags needed.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+        set(_NAGA_RUST_TARGET "aarch64-unknown-linux-gnu")
+      else()
+        set(_NAGA_RUST_TARGET "x86_64-unknown-linux-gnu")
+      endif()
+      set(_NAGA_CARGO_CMD ${CMAKE_COMMAND} -E env "RUSTFLAGS=-C target-feature=+crt-static"
         "${CARGO_EXECUTABLE}" install naga-cli
         --root "${CMAKE_BINARY_DIR}/naga-install"
-        --target x86_64-unknown-linux-gnu
-        --quiet
+        --target "${_NAGA_RUST_TARGET}"
+        --quiet)
+    else()
+      set(_NAGA_CARGO_CMD "${CARGO_EXECUTABLE}" install naga-cli
+        --root "${CMAKE_BINARY_DIR}/naga-install"
+        --quiet)
+    endif()
+    add_custom_command(
+      OUTPUT "${LEGO_NAGA_BIN}"
+      COMMAND ${_NAGA_CARGO_CMD}
       COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_BINARY_DIR}/naga-install/bin/naga"
         "${LEGO_NAGA_BIN}"
-      COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_BINARY_DIR}/naga-install/bin/naga"
-        "${CMAKE_SOURCE_DIR}/python/lego/bin/naga"
       COMMENT "Building naga-cli via cargo"
     )
     add_custom_target(lego-naga DEPENDS "${LEGO_NAGA_BIN}")
@@ -532,7 +546,11 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
 
   # MLIR_BUILD_DIR is needed by bench_utils.py to locate mlir-runner.
-  get_filename_component(_MLIR_BUILD_DIR "${LLVM_DIR}/../../.." ABSOLUTE)
+  if(LEGO_MONOLITHIC_LLVM)
+    set(_MLIR_BUILD_DIR "${CMAKE_BINARY_DIR}/llvm-build")
+  else()
+    get_filename_component(_MLIR_BUILD_DIR "${LLVM_DIR}/../../.." ABSOLUTE)
+  endif()
 
   # --- LEGO GPU examples (require NVPTX + GPU + runners) ---
   if(LEGO_ENABLE_RUNNERS AND LEGO_HOST_HAS_NVIDIA_GPU)
@@ -550,47 +568,13 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       reduce_sum.py:1024
     )
 
-    # --- Mojo GPU Puzzles expressed in LEGO DSL ---
-    add_example_group(puzzle "${CMAKE_SOURCE_DIR}/python/examples/puzzles"
-      "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
-      puzzle_01_map.py:256
-      puzzle_02_zip.py:256
-      puzzle_03_guards.py:20
-      puzzle_04_2dmap.py:4
-      puzzle_05_broadcast.py:4
-      puzzle_06_blocks.py:1024
-      puzzle_07_2dblocks.py:256
-      puzzle_08_shared_mem.py:256
-      puzzle_09_debugging.py:256
-      puzzle_10_memory_errors.py:3
-      puzzle_11_pooling.py:8
-      puzzle_12_dot_product.py:256
-      puzzle_13_conv1d.py:15:4
-      puzzle_14_prefix_sum.py:16
-      puzzle_15_axis_sum.py:4:256
-      puzzle_16_matmul.py:64
-      puzzle_17_conv1d_op.py:15:4
-      puzzle_18_softmax.py:4:16
-      puzzle_19_attention.py:4:8
-      puzzle_21_embedding.py:4:8
-      puzzle_22_fusion.py:256
-      puzzle_23_functional.py:256
-      puzzle_24_warp_reduce.py:256
-      puzzle_25_warp_shuffle.py:256
-      puzzle_26_warp_advanced.py:256
-      puzzle_27_block_reduce.py:256
-      puzzle_28_async_copy.py:1024
-      puzzle_29_pipeline.py:1024
-      puzzle_32_bank_conflicts.py:256
-      puzzle_33_tensor_cores.py:64
-      puzzle_34_clusters.py:1024
-    )
+    # Mojo GPU Puzzles are now lit tests — see test/puzzles/.
   endif()
 
   # --- Cross-platform SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal via wgpu) ---
   # These run on any machine with wgpu installed — no NVIDIA/AMD GPU required.
   execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -c "import wgpu"
+    COMMAND "${Python_EXECUTABLE}" -c "import wgpu"
     RESULT_VARIABLE _WGPU_RESULT OUTPUT_QUIET ERROR_QUIET)
   if(NOT _WGPU_RESULT EQUAL 0)
     message(STATUS "wgpu not found — SPIR-V GPU benchmarks will not be registered")
@@ -607,6 +591,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       COMMENT "Running SPIR-V GPU benchmark: ${_script} ${ARGN}"
       USES_TERMINAL
     )
+    if(TARGET lego-naga)
+      add_dependencies(check-spirv-${_name} lego-naga)
+    endif()
   endmacro()
 
   add_spirv_benchmark(vecadd           vecadd.py           1024)
@@ -617,14 +604,15 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   add_spirv_benchmark(matmul_smem      matmul_smem.py      64)
 
   add_custom_target(check-spirv-examples
-    DEPENDS
-      check-spirv-vecadd
-      check-spirv-transpose_naive
-      check-spirv-matmul_naive
-      check-spirv-reduce_sum
-      check-spirv-transpose_smem
-      check-spirv-matmul_smem
     COMMENT "Running all SPIR-V GPU benchmarks (Vulkan/WebGPU/Metal)"
+  )
+  add_dependencies(check-spirv-examples
+    check-spirv-vecadd
+    check-spirv-transpose_naive
+    check-spirv-matmul_naive
+    check-spirv-reduce_sum
+    check-spirv-transpose_smem
+    check-spirv-matmul_smem
   )
   endif() # wgpu available
 
@@ -666,8 +654,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   if(TARGET check-gpu-examples)
     add_dependencies(check-lego-all check-gpu-examples)
   endif()
-  if(TARGET check-puzzle-examples)
-    add_dependencies(check-lego-all check-puzzle-examples)
+  if(TARGET check-lego-puzzles)
+    add_dependencies(check-lego-all check-lego-puzzles)
   endif()
   if(TARGET check-spirv-examples)
     add_dependencies(check-lego-all check-spirv-examples)

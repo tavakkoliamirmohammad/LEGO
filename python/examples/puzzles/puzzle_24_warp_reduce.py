@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
+# REQUIRES: nvidia-gpu
 """Puzzle 24 — Warp Fundamentals: dot product using warp-level reduction.
 
 Computes dot product of two vectors using subgroup_reduce_add (warp_sum).

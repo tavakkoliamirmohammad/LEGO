@@ -1,3 +1,5 @@
+# RUN: env PYTHONPATH=%{pythonpath} MLIR_BUILD_DIR=%{mlir_build_dir} %{python} %s 256
+# REQUIRES: nvidia-gpu
 """Puzzle 26 — Advanced Warp Patterns: XOR shuffle, butterfly, prefix sum.
 
 Five sub-tests matching the Mojo puzzle:
