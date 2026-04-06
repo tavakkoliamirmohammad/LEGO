@@ -103,6 +103,10 @@ jobs:
           key: llvm-${{ matrix.os }}
           max-size: 3G
 
+      - name: Configure ccache sloppiness
+        if: runner.os == 'macOS'
+        run: ccache --set-config=sloppiness=clang_index_store,include_file_ctime,include_file_mtime,time_macros,pch_defines,modules
+
       - name: Get nanobind cmake dir
         id: nanobind
         run: |
@@ -231,6 +235,11 @@ jobs:
           key: wasm-emscripten
           max-size: 2G
           ccache-dir: /home/runner/.ccache-wasm
+
+      - name: Configure ccache for Emscripten
+        run: |
+          ccache --set-config=sloppiness=clang_index_store,include_file_ctime,include_file_mtime,time_macros,pch_defines,modules
+          ccache --set-config=compiler_type=clang
 
       - name: Configure WASM build
         run: |
