@@ -10,6 +10,8 @@
 #include "Lego/Passes.h"
 
 #include "mlir/Conversion/GPUToROCDL/GPUToROCDLPass.h"
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMPass.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Target/LLVM/ROCDL/Target.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
@@ -49,6 +51,11 @@ struct SetROCDLTargetPass
     registerGPUDialectTranslation(registry);
     registerLLVMDialectTranslation(registry);
     registerBuiltinDialectTranslation(registry);
+    // Register ConvertToLLVMPatternInterface extensions for all dialects
+    // (memref, arith, cf, func, etc.). Without this, the GPU→ROCDL partial
+    // conversion can't lower memref ops to LLVM, causing gpu.shuffle
+    // legalization to fail when kernels have memref arguments.
+    registerConvertToLLVMDependentDialectLoading(registry);
   }
 
   void runOnOperation() override {
