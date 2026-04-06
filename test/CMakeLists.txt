@@ -50,7 +50,9 @@ add_lit_testsuite(check-lego "Running the Lego regression tests"
 
 # --- Puzzle lit tests (GPU integration tests) ---
 if(TARGET LegoPythonModules AND LEGO_ENABLE_RUNNERS)
-  llvm_canonicalize_cmake_booleans(LEGO_HOST_HAS_NVIDIA_GPU LEGO_HOST_HAS_AMD_GPU)
+  llvm_canonicalize_cmake_booleans(
+    LEGO_HOST_HAS_NVIDIA_GPU LEGO_HOST_HAS_AMD_GPU LEGO_HOST_HAS_METAL
+    LEGO_ENABLE_CUDA_RUNNER LEGO_ENABLE_ROCM_RUNNER LEGO_ENABLE_METAL_RUNNER)
   configure_lit_site_cfg(
     ${CMAKE_CURRENT_SOURCE_DIR}/puzzles/lit.site.cfg.py.in
     ${CMAKE_CURRENT_BINARY_DIR}/puzzles/lit.site.cfg.py

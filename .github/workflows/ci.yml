@@ -133,6 +133,9 @@ jobs:
             -DLEGO_LLVM_TARGETS="${{ contains(matrix.os, 'macos') && 'AArch64;NVPTX;AMDGPU;SPIRV' || 'X86;NVPTX;AMDGPU;SPIRV' }}" \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DLEGO_BUILD_TESTS=ON \
+            -DLEGO_ENABLE_CUDA_RUNNER=OFF \
+            -DLEGO_ENABLE_ROCM_RUNNER=OFF \
+            -DLEGO_ENABLE_METAL_RUNNER=OFF \
             ${{ runner.os == 'Linux' && '-DLLVM_USE_LINKER=lld' || '' }} \
             -Dnanobind_DIR="${{ steps.nanobind.outputs.dir }}" \
             -DLLVM_EXTERNAL_LIT="$(which lit)" \

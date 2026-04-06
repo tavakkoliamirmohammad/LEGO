@@ -208,11 +208,11 @@ def run_transpose_benchmark(builder, layouts, N, targets, extra_verify=None):
 
     if compile_only:
         if compile_failures:
-            print(f"\nCompile-only: {len(compile_failures)} target(s) failed: "
-                  f"{', '.join(compile_failures)}", file=sys.stderr)
-        else:
-            print("\nCompile-only mode: all targets compiled successfully.",
+            print(f"\nFATAL: compilation failed on: {', '.join(compile_failures)}",
                   file=sys.stderr)
+            sys.exit(1)
+        print("\nCompile-only mode: all targets compiled successfully.",
+              file=sys.stderr)
         return
 
     # Host-side verification
@@ -620,11 +620,11 @@ def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rto
 
     if compile_only:
         if compile_failures:
-            print(f"\nCompile-only: {len(compile_failures)} target(s) failed: "
-                  f"{', '.join(compile_failures)}", file=sys.stderr)
-        else:
-            print("\nCompile-only mode: all targets compiled successfully.",
+            print(f"\nFATAL: compilation failed on: {', '.join(compile_failures)}",
                   file=sys.stderr)
+            sys.exit(1)
+        print("\nCompile-only mode: all targets compiled successfully.",
+              file=sys.stderr)
         return
 
     # Compute expected output from deterministic input data
