@@ -208,6 +208,7 @@ jobs:
         with:
           key: wasm-native
           max-size: 2G
+          ccache-dir: /home/runner/.ccache-native
 
       - name: Build native tblgen tools
         run: |
@@ -232,6 +233,7 @@ jobs:
         with:
           key: wasm-emscripten
           max-size: 2G
+          ccache-dir: /home/runner/.ccache-wasm
 
       - name: Configure WASM build
         run: |
