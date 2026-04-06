@@ -190,17 +190,30 @@ def run_transpose_benchmark(builder, layouts, N, targets, extra_verify=None):
     print(module)
 
     # Compile to GPU backends
+    compile_only = os.environ.get("LEGO_COMPILE_ONLY", "").strip() not in ("", "0")
     chip, features = detect_nvvm_target()
+    compile_failures = []
     for target in targets:
         try:
             kwargs = {"name": f"{builder._name}_{target}"}
             if target == "cuda":
                 kwargs["chip"] = chip
                 kwargs["features"] = features
+                kwargs.setdefault("format", "assembly")
             result = builder.compile(target=target, **kwargs)
             print(f"\n--- {target}: {result.kernel_path} ---", file=sys.stderr)
         except Exception as e:
             print(f"\n--- {target}: FAILED ({e}) ---", file=sys.stderr)
+            compile_failures.append(target)
+
+    if compile_only:
+        if compile_failures:
+            print(f"\nCompile-only: {len(compile_failures)} target(s) failed: "
+                  f"{', '.join(compile_failures)}", file=sys.stderr)
+        else:
+            print("\nCompile-only mode: all targets compiled successfully.",
+                  file=sys.stderr)
+        return
 
     # Host-side verification
     print("\nVerification:", file=sys.stderr)
@@ -589,17 +602,30 @@ def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rto
     print(module)
 
     # Compile to GPU backends
+    compile_only = os.environ.get("LEGO_COMPILE_ONLY", "").strip() not in ("", "0")
     chip, features = detect_nvvm_target()
+    compile_failures = []
     for target in targets:
         try:
             kwargs = {"name": f"{builder._name}_{target}"}
             if target == "cuda":
                 kwargs["chip"] = chip
                 kwargs["features"] = features
+                kwargs.setdefault("format", "assembly")
             result = builder.compile(target=target, **kwargs)
             print(f"\n--- {target}: {result.kernel_path} ---", file=sys.stderr)
         except Exception as e:
             print(f"\n--- {target}: FAILED ({e}) ---", file=sys.stderr)
+            compile_failures.append(target)
+
+    if compile_only:
+        if compile_failures:
+            print(f"\nCompile-only: {len(compile_failures)} target(s) failed: "
+                  f"{', '.join(compile_failures)}", file=sys.stderr)
+        else:
+            print("\nCompile-only mode: all targets compiled successfully.",
+                  file=sys.stderr)
+        return
 
     # Compute expected output from deterministic input data
     global_bufs = builder._global_bufs
