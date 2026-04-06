@@ -1,3 +1,4 @@
+#include "mlir/CAPI/IR.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
@@ -28,6 +29,10 @@ int main(int argc, char **argv) {
   registry.insert<mlir::lego::LegoDialect, mlir::smt::SMTDialect>();
   registry.insert<mlir::cf::ControlFlowDialect, mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::gpu::GPUDialect, mlir::spirv::SPIRVDialect>();
+
+  // Register ConvertToLLVMPatternInterface extensions so GPU→ROCDL/NVVM
+  // passes can discover LLVM lowering patterns for memref/arith/cf/etc.
+  legoRegisterConvertToLLVMExtensions(wrap(&registry));
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "LEGO Magic Optimizer Driver", registry));

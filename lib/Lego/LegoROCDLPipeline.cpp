@@ -36,7 +36,7 @@ struct SetROCDLTargetPass
   int optLevel;
 
   SetROCDLTargetPass(StringRef chip = "gfx900", StringRef features = "",
-                     int optLevel = 2)
+                     int optLevel = 3)
       : chip(chip.str()), features(features.str()), optLevel(optLevel) {}
 
   StringRef getArgument() const override { return "lego-set-rocdl-target"; }

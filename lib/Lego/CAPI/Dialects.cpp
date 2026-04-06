@@ -33,6 +33,14 @@
 #include "mlir/Target/LLVMIR/Dialect/GPU/GPUToLLVMIRTranslation.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
+#include "mlir/Conversion/GPUCommon/GPUToLLVM.h"
+#include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
+
 // LEGO dialect
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Lego, lego, mlir::lego::LegoDialect)
 
@@ -131,4 +139,15 @@ void legoRegisterLLVMTranslations(MlirContext context) {
   mlir::registerROCDLDialectTranslation(*unwrap(context));
 #endif
   mlir::registerGPUDialectTranslation(*unwrap(context));
+}
+
+void legoRegisterConvertToLLVMExtensions(MlirDialectRegistry registry) {
+  mlir::DialectRegistry &reg = *unwrap(registry);
+  mlir::arith::registerConvertArithToLLVMInterface(reg);
+  mlir::cf::registerConvertControlFlowToLLVMInterface(reg);
+  mlir::registerConvertFuncToLLVMInterface(reg);
+  mlir::gpu::registerConvertGpuToLLVMInterface(reg);
+  mlir::index::registerConvertIndexToLLVMInterface(reg);
+  mlir::registerConvertMathToLLVMInterface(reg);
+  mlir::registerConvertMemRefToLLVMInterface(reg);
 }
