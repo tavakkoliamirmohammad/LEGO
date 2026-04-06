@@ -51,12 +51,16 @@ jobs:
         run: |
           PYVER="${{ matrix.python }}"
           PYDIR="/opt/python/cp${PYVER//./}-cp${PYVER//./}/bin"
+          PYROOT="/opt/python/cp${PYVER//./}-cp${PYVER//./}"
           if [ ! -d "$PYDIR" ]; then
             echo "Python $PYVER not found — available:"
             ls -d /opt/python/cp* || true
             exit 1
           fi
           echo "$PYDIR" >> $GITHUB_PATH
+          echo "Python_ROOT_DIR=$PYROOT" >> $GITHUB_ENV
+          echo "Python3_ROOT_DIR=$PYROOT" >> $GITHUB_ENV
+          echo "pythonLocation=$PYROOT" >> $GITHUB_ENV
           "$PYDIR/python" --version
 
       - name: Install Python dependencies
