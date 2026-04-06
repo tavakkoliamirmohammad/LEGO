@@ -116,6 +116,11 @@ jobs:
 
       - name: Configure CMake
         run: |
+          # Pass Python hints explicitly for manylinux container
+          PYTHON_CMAKE_HINTS=""
+          if [ -n "${Python_ROOT_DIR:-}" ]; then
+            PYTHON_CMAKE_HINTS="-DPython_ROOT_DIR=$Python_ROOT_DIR -DPython_EXECUTABLE=$(which python)"
+          fi
           cmake -G Ninja -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -126,7 +131,8 @@ jobs:
             -DLEGO_BUILD_TESTS=ON \
             ${{ runner.os == 'Linux' && '-DLLVM_USE_LINKER=lld' || '' }} \
             -Dnanobind_DIR="${{ steps.nanobind.outputs.dir }}" \
-            -DLLVM_EXTERNAL_LIT="$(which lit)"
+            -DLLVM_EXTERNAL_LIT="$(which lit)" \
+            $PYTHON_CMAKE_HINTS
 
       - name: Build all targets
         run: cmake --build build -j$(getconf _NPROCESSORS_ONLN)
