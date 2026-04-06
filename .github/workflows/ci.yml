@@ -202,7 +202,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build lld ccache
+        run: sudo apt-get update && sudo apt-get install -y ninja-build lld ccache clang
 
       - name: Set up ccache (native)
         uses: hendrikmuhs/ccache-action@v1
@@ -215,11 +215,13 @@ jobs:
         run: |
           cmake -G Ninja -B build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLEGO_MONOLITHIC_LLVM=ON \
             -DLEGO_LLVM_TARGETS="X86" \
-            -DLLVM_USE_LINKER=ld \
+            -DLLVM_USE_LINKER=lld \
             -DLEGO_BUILD_TESTS=OFF \
             -DMLIR_ENABLE_BINDINGS_PYTHON=OFF
           cmake --build build --target mlir-tblgen llvm-tblgen llvm-min-tblgen -j$(nproc)
