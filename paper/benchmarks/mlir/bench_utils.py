@@ -8,6 +8,27 @@ import tempfile
 import numpy as np
 
 
+def _backend_available(target: str) -> bool:
+    """Check if the MLIR pipeline for a given target is available."""
+    try:
+        from lego.backend.gpu_builder import _GPU_TARGETS
+        from lego.mlir.ir import Context, Location
+        from lego.mlir.passmanager import PassManager
+        from lego.backend.dialects.lego_dialect import register
+        if target in _GPU_TARGETS:
+            pipeline = f"builtin.module({_GPU_TARGETS[target].pipeline})"
+        else:
+            # SPIR-V targets (vulkan, webgpu, metal, webgl) use lego-to-spirv
+            pipeline = "builtin.module(lego-to-spirv)"
+        ctx = Context()
+        register(ctx)
+        with ctx, Location.unknown():
+            PassManager.parse(pipeline)
+        return True
+    except Exception:
+        return False
+
+
 def verify_layouts(layouts, N):
     """Verify layouts are valid bijective permutations.
 
@@ -207,11 +228,17 @@ def run_transpose_benchmark(builder, layouts, N, targets, extra_verify=None):
             compile_failures.append(target)
 
     if compile_only:
-        if compile_failures:
-            print(f"\nFATAL: compilation failed on: {', '.join(compile_failures)}",
+        # Distinguish missing backends from real compilation errors
+        real_failures = [t for t in compile_failures if _backend_available(t)]
+        skipped = [t for t in compile_failures if not _backend_available(t)]
+        if skipped:
+            print(f"\nSkipped (backend not available): {', '.join(skipped)}",
+                  file=sys.stderr)
+        if real_failures:
+            print(f"\nFATAL: compilation failed on: {', '.join(real_failures)}",
                   file=sys.stderr)
             sys.exit(1)
-        print("\nCompile-only mode: all targets compiled successfully.",
+        print("\nCompile-only mode: all available targets compiled successfully.",
               file=sys.stderr)
         return
 
@@ -619,11 +646,17 @@ def run_benchmark(builder, compute_expected_fn, targets, label=None, atol=0, rto
             compile_failures.append(target)
 
     if compile_only:
-        if compile_failures:
-            print(f"\nFATAL: compilation failed on: {', '.join(compile_failures)}",
+        # Distinguish missing backends from real compilation errors
+        real_failures = [t for t in compile_failures if _backend_available(t)]
+        skipped = [t for t in compile_failures if not _backend_available(t)]
+        if skipped:
+            print(f"\nSkipped (backend not available): {', '.join(skipped)}",
+                  file=sys.stderr)
+        if real_failures:
+            print(f"\nFATAL: compilation failed on: {', '.join(real_failures)}",
                   file=sys.stderr)
             sys.exit(1)
-        print("\nCompile-only mode: all targets compiled successfully.",
+        print("\nCompile-only mode: all available targets compiled successfully.",
               file=sys.stderr)
         return
 
