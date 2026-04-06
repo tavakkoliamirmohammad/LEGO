@@ -336,7 +336,7 @@ jobs:
 
       - name: Verify wheel installs
         run: |
-          pip install --force-reinstall --no-deps --no-index --find-links build/python_packages/lego/dist lego-layout
+          pip install --force-reinstall --find-links build/python_packages/lego/dist lego-layout
           python -P python/check_imports.py
 
       - name: Upload wheel
