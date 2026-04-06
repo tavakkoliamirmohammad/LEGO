@@ -4,6 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/lego-layout)](https://pypi.org/project/lego-layout/)
 [![Python](https://img.shields.io/pypi/pyversions/lego-layout)](https://pypi.org/project/lego-layout/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENCE.md)
+[![LEGO Studio](https://img.shields.io/badge/LEGO_Studio-Live_Demo-blue)](https://tavakkoliamirmohammad.github.io/LEGO/)
 
 LEGO is an algebraic, compiler-agnostic framework for specifying and transforming memory layouts. It provides composable layout primitives that lower through a custom MLIR dialect to generate optimized code for CPU and GPU targets.
 
