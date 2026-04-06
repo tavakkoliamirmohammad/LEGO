@@ -128,7 +128,7 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLEGO_MONOLITHIC_LLVM=ON \
-            -DLEGO_LLVM_TARGETS="${{ contains(matrix.os, 'macos') && 'AArch64;NVPTX;AMDGPU;SPIRV' || 'X86;NVPTX;AMDGPU;SPIRV' }}" \
+            -DLEGO_LLVM_TARGETS="${{ contains(matrix.os, 'macos') && 'AArch64;NVPTX;SPIRV' || 'X86;NVPTX;SPIRV' }}" \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DLEGO_BUILD_TESTS=ON \
             -DLEGO_ENABLE_CUDA_RUNNER=OFF \
