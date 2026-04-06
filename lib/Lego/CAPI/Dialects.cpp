@@ -31,7 +31,6 @@
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
 #endif
 #include "mlir/Target/LLVMIR/Dialect/GPU/GPUToLLVMIRTranslation.h"
-#include "mlir/Conversion/ConvertToLLVM/ToLLVMPass.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 
 // LEGO dialect
@@ -122,23 +121,14 @@ void legoRegisterPasses() {
 }
 
 void legoRegisterLLVMTranslations(MlirContext context) {
-  mlir::MLIRContext *ctx = unwrap(context);
-  mlir::registerBuiltinDialectTranslation(*ctx);
-  mlir::registerLLVMDialectTranslation(*ctx);
+  mlir::registerBuiltinDialectTranslation(*unwrap(context));
+  mlir::registerLLVMDialectTranslation(*unwrap(context));
 
 #ifdef LEGO_HAS_NVPTX
-  mlir::registerNVVMDialectTranslation(*ctx);
+  mlir::registerNVVMDialectTranslation(*unwrap(context));
 #endif
 #ifdef LEGO_HAS_AMDGPU
-  mlir::registerROCDLDialectTranslation(*ctx);
+  mlir::registerROCDLDialectTranslation(*unwrap(context));
 #endif
-  mlir::registerGPUDialectTranslation(*ctx);
-
-  // Register ConvertToLLVMPatternInterface extensions for all dialects
-  // (memref, arith, cf, func, index, etc.). This is needed by the
-  // GPU→ROCDL and GPU→NVVM passes to discover LLVM conversion patterns
-  // for non-GPU ops (e.g. memref.store) inside GPU kernels.
-  mlir::DialectRegistry registry;
-  mlir::registerConvertToLLVMDependentDialectLoading(registry);
-  ctx->appendDialectRegistry(registry);
+  mlir::registerGPUDialectTranslation(*unwrap(context));
 }
