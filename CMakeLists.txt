@@ -297,7 +297,7 @@ add_subdirectory(tools/lego-opt)
 # Requires MLIR_ENABLE_BINDINGS_PYTHON=ON in the LLVM build.
 if(MLIR_ENABLE_BINDINGS_PYTHON)
   # nanobind must be found before AddMLIRPython macros are used
-  find_package(Python REQUIRED COMPONENTS Interpreter Development)
+  find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
   find_package(nanobind CONFIG QUIET)
   if(NOT nanobind_FOUND)
     execute_process(
