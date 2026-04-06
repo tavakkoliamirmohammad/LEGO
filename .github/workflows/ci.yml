@@ -127,6 +127,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            ${{ runner.os == 'Linux' && '-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON -DLLVM_ENABLE_LTO=Thin' || '' }} \
             -DLEGO_MONOLITHIC_LLVM=ON \
             -DLEGO_LLVM_TARGETS="${{ contains(matrix.os, 'macos') && 'AArch64;NVPTX;AMDGPU;SPIRV' || 'X86;NVPTX;AMDGPU;SPIRV' }}" \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
@@ -158,11 +159,11 @@ jobs:
               rm "$link"
             fi
           done
-          # Strip debug symbols from .so/.dylib — shrinks wheel significantly
+          # Strip all symbols from .so/.dylib — shrinks wheel significantly
           if [ "$RUNNER_OS" = "Linux" ]; then
-            find . -name '*.so' -o -name '*.so.*' | xargs strip --strip-unneeded 2>/dev/null || true
+            find . -name '*.so' -o -name '*.so.*' | xargs strip --strip-all 2>/dev/null || true
           else
-            find . -name '*.dylib' -o -name '*.so' | xargs strip -x 2>/dev/null || true
+            find . -name '*.dylib' -o -name '*.so' | xargs strip -u -r 2>/dev/null || true
           fi
 
       - name: Prepare wheel
