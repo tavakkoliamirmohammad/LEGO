@@ -47,18 +47,25 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install nanobind sympy pytest lit numpy
+          python -m pip install nanobind sympy pytest lit numpy
           if [ "$RUNNER_OS" = "Linux" ]; then
-            pip install torch --index-url https://download.pytorch.org/whl/cpu
+            python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           else
-            pip install torch
+            python -m pip install torch
           fi
 
       - name: Install system dependencies (Linux / manylinux container)
         if: runner.os == 'Linux'
         run: |
           dnf install -y lld || true
-          pip install ninja
+          python -m pip install ninja
+
+      - name: Fix script shebangs (container path workaround)
+        if: matrix.container
+        run: |
+          SCRIPTS="$(python -c 'import sysconfig; print(sysconfig.get_path("scripts"))')"
+          [ -d "$SCRIPTS" ] && find "$SCRIPTS" -type f -exec \
+            sed -i '1s|^#!.*python[0-9.]*$|#!/usr/bin/env python3|' {} + 2>/dev/null || true
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
