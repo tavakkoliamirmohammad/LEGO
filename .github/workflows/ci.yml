@@ -219,7 +219,6 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLEGO_MONOLITHIC_LLVM=ON \
             -DLEGO_LLVM_TARGETS="X86" \
-            -DLLVM_USE_LINKER=lld \
             -DLEGO_BUILD_TESTS=OFF \
             -DMLIR_ENABLE_BINDINGS_PYTHON=OFF
           cmake --build build --target mlir-tblgen llvm-tblgen llvm-min-tblgen -j$(nproc)
