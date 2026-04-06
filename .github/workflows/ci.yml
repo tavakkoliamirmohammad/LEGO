@@ -75,7 +75,7 @@ jobs:
       - name: Install system dependencies (Linux / manylinux container)
         if: runner.os == 'Linux'
         run: |
-          dnf install -y lld || true
+          dnf install -y lld glibc-static || true
           python -m pip install ninja
 
       - name: Fix script shebangs (container path workaround)
