@@ -28,12 +28,18 @@ LEGO/
 │   │   ├── backend/         # MLIR compilation, JIT, SymPy lowering, PyTorch autograd
 │   │   └── frontends/       # DSLAdapter ABC + adapters (Triton, cuTile, Numba, JAX, Rust, Fortran, C++, Julia, CUDA C, JS, GLSL, python_mlir)
 │   ├── examples/            # Usage examples (triton, numba_cuda, jax, cutile, python_mlir, symbolic, rust, cxx, fortran, julia, cuda_c, js, glsl)
+│   │   └── puzzles/         # GPU puzzles — multi-backend kernel tests (CUDA, ROCm, Vulkan, WebGPU, Metal)
 │   └── tests/               # Python tests
 │
 ├── include/Lego/           # MLIR dialect headers (ODS definitions, passes)
 ├── lib/Lego/               # MLIR dialect implementation (lowering, verification, simplification)
 ├── tools/lego-opt/         # MLIR optimizer CLI
 ├── test/                   # MLIR lit tests
+│
+├── viz/                    # LEGO Studio (browser-based visualizer)
+│   ├── wasm/               # Emscripten-compiled LEGO compiler (lego_driver.wasm)
+│   ├── js/                 # Frontend JavaScript
+│   └── css/                # Styles
 │
 ├── paper/                  # Paper benchmarks and evaluation scripts
 ├── docs/                   # Architecture and dialect documentation
@@ -102,16 +108,16 @@ lower the dialect all the way to machine code:
   |    CPU     |  |  |   CUDA     |  |    AMD     |  |  (Vulkan)   |
   | X86, ARM   |  |  | PTX/cubin  |  |   HSACO    |  +------+------+
   +------------+  |  +------------+  +-----------+         |
-                  |                                  +-----+-----+
-       +----------+----------+                       |           |
-       | lego-to-llvmspirv   |                  +----+---+  +---+----+
-       +----------+----------+                  |  naga  |  |  naga  |
-                  |                             +----+---+  +---+----+
-       +----------+----------+                       |           |
-       |   LLVM SPIR-V      |                  +----+---+  +---+----+
-       |   (OpenCL)         |                  |  WGSL  |  |  MSL   |
-       +--------------------+                  |(WebGPU)|  |(Metal) |
-                                               +--------+  +--------+
+                  |                              +---------+---------+
+       +----------+----------+                   |         |         |
+       | lego-to-llvmspirv   |              +----+---+ +---+----+ +-+------+
+       +----------+----------+              |  naga  | |  naga  | |  naga  |
+                  |                         +----+---+ +---+----+ +--+-----+
+       +----------+----------+                   |         |         |
+       |   LLVM SPIR-V      |              +----+---+ +---+----+ +--+-----+
+       |   (OpenCL)         |              |  WGSL  | |  MSL   | |  GLSL  |
+       +--------------------+              |(WebGPU)| |(Metal) | |(WebGL) |
+                                           +--------+ +--------+ +--------+
 ```
 
 ### Frontends
@@ -227,15 +233,16 @@ The `lego` MLIR dialect defines layout operations (`gen_p`, `reg_p`, `row`, `col
 - **Strength Reduction** -- convert power-of-2 `muli`/`divui`/`remui` to shift/mask operations
 - **Verification** -- bijectivity, GPU bank conflicts, memory coalescing
 
-Five lowering pipelines target different backends:
+Six lowering pipelines target different backends:
 
 | Pipeline | Target | Output | Shared memory |
 |----------|--------|--------|---------------|
 | `lego-to-llvm` | CPU | LLVM IR (X86, AArch64) | N/A |
 | `lego-to-nvvm` | CUDA | PTX/cubin via NVPTX | Yes |
 | `lego-to-rocdl` | AMD | HSACO via AMDGPU | Yes |
-| `lego-to-spirv` | Vulkan/WebGPU/Metal | SPIR-V binary (Vulkan) | No |
+| `lego-to-spirv` | Vulkan/WebGPU/Metal/WebGL | SPIR-V binary → naga → WGSL/MSL/GLSL | Yes (workgroup) |
 | `lego-to-llvmspirv` | SPIR-V (OpenCL) | LLVM dialect with SPIR-V calling conventions | Yes |
+| WASM (Emscripten) | Browser | `lego_driver.wasm` — full compiler in the browser | N/A |
 
 The NVVM, ROCDL, and LLVM SPIR-V backends share the same three-phase architecture:
 1. `buildLegoGPUOutlinePipeline` -- LEGO lower + GPU kernel outlining
@@ -280,6 +287,15 @@ pip install lego-layout
 
 This installs the core layout algebra and frontends. The MLIR dialect native extensions are included in the wheel when available.
 
+**Platform support:**
+
+| Platform | Wheel tag | GPU backends included |
+|----------|-----------|----------------------|
+| Linux x86_64 | `manylinux_2_28` (glibc 2.28+: RHEL 8+, Ubuntu 20.04+, Debian 11+) | CUDA (PTX), ROCm, Vulkan, WebGPU, Metal, LLVM SPIR-V |
+| macOS ARM64 | `macosx_15_0_arm64` | CUDA (PTX), ROCm, Vulkan, WebGPU, Metal, LLVM SPIR-V |
+
+All GPU backends are cross-compilers — no GPU hardware required at install time. The naga binary is bundled for SPIR-V to WGSL/MSL/GLSL conversion.
+
 ### Development install
 
 #### 1. Clone and set up the environment
@@ -310,10 +326,28 @@ cmake --build build -j$(nproc) --target check-lego
 
 The build system automatically detects and uses fast linkers (`mold`/`lld`) and `ccache`.
 
-To customize LLVM targets (default `X86;NVPTX`):
+To customize LLVM targets (default `X86;NVPTX;AMDGPU;SPIRV`):
 
 ```bash
-cmake -S . -B build -DLEGO_MONOLITHIC_LLVM=ON -DLEGO_LLVM_TARGETS="X86;NVPTX;AArch64"
+cmake -S . -B build -DLEGO_MONOLITHIC_LLVM=ON -DLEGO_LLVM_TARGETS="X86;NVPTX;AMDGPU;SPIRV;AArch64"
+```
+
+## GPU Runners
+
+GPU execution tests are controlled by per-backend flags, auto-detected from hardware:
+
+| Flag | Hardware | What it enables |
+|------|----------|-----------------|
+| `LEGO_ENABLE_CUDA_RUNNER` | NVIDIA GPU (`nvidia-smi`) | CUDA kernel execution via `mlir-runner` |
+| `LEGO_ENABLE_ROCM_RUNNER` | AMD GPU (`rocm-smi`) | ROCm kernel execution |
+| `LEGO_ENABLE_METAL_RUNNER` | macOS Metal GPU | Metal/Vulkan/WebGPU execution via `wgpu` |
+
+If any runner is enabled, SPIR-V execution tests (Vulkan, WebGPU, Metal) also run since SPIR-V works on any GPU backend. To explicitly enable a runner:
+
+```bash
+cmake -S . -B build -DLEGO_ENABLE_METAL_RUNNER=ON   # macOS Metal
+cmake -S . -B build -DLEGO_ENABLE_CUDA_RUNNER=ON     # NVIDIA CUDA
+cmake -S . -B build -DLEGO_ENABLE_ROCM_RUNNER=ON     # AMD ROCm
 ```
 
 ## Testing
@@ -324,6 +358,12 @@ cmake --build build --target check-lego
 
 # Python tests
 cmake --build build --target check-lego-python
+
+# Compile-only puzzle tests (no GPU required — tests all 7 backends)
+cmake --build build --target check-lego-puzzles-compile
+
+# GPU puzzle tests (requires at least one runner enabled)
+cmake --build build --target check-lego-puzzles
 
 # All tests
 cmake --build build --target check-lego-all

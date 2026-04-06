@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
     run_benchmark(
         conv_1d, compute_expected,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"SIZE={SIZE},CONV={CONV_SIZE}",
         init_mod=10,
         atol=1e-4,

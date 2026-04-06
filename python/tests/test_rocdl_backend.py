@@ -51,7 +51,9 @@ class TestROCDLPipeline:
         result = lego.compile(Row(256), shape=(256,), target="rocm")
         assert isinstance(result, lego.CompileResult)
         assert result.target == "rocm"
-        assert "gpu.binary" in result.kernel_source or "rocdl" in result.kernel_source
+        assert "gpu.binary" in result.kernel_source
+        assert "rocdl.target" in result.kernel_source
+        assert "amdgcn" in result.kernel_source
 
     @requires_rocdl
     def test_col_layout_compiles(self):
@@ -59,7 +61,8 @@ class TestROCDLPipeline:
         import lego
         result = lego.compile(Col(16, 16), shape=(16, 16), target="rocm")
         assert result.target == "rocm"
-        assert result.kernel_source
+        assert "gpu.binary" in result.kernel_source
+        assert "rocdl.target" in result.kernel_source
 
     @requires_rocdl
     def test_2d_row_layout_compiles(self):

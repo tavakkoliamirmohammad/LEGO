@@ -96,6 +96,14 @@ NB_MODULE(_legoDialects, m) {
         // Register LEGO passes and pipelines (idempotent)
         legoRegisterPasses();
 
+        // Register ConvertToLLVMPatternInterface extensions BEFORE loading
+        // dialects. This enables GPU→ROCDL/NVVM passes to discover LLVM
+        // conversion patterns for memref/arith/cf/func/index/math.
+        MlirDialectRegistry registry = mlirDialectRegistryCreate();
+        legoRegisterConvertToLLVMExtensions(registry);
+        mlirContextAppendDialectRegistry(ctx, registry);
+        mlirDialectRegistryDestroy(registry);
+
         // Register LLVM IR translations (needed for ExecutionEngine)
         legoRegisterLLVMTranslations(ctx);
 

@@ -25,6 +25,13 @@ MLIR_CAPI_EXPORTED void legoRegisterPasses(void);
 /// Required before using mlir::ExecutionEngine for JIT compilation.
 MLIR_CAPI_EXPORTED void legoRegisterLLVMTranslations(MlirContext context);
 
+/// Register ConvertToLLVMPatternInterface extensions for dialects used in
+/// GPU kernels (arith, cf, func, gpu, index, math, memref).  Must be called
+/// on the dialect registry BEFORE dialects are loaded into the context.
+/// This enables GPU→ROCDL/NVVM passes to discover LLVM conversion patterns.
+MLIR_CAPI_EXPORTED void legoRegisterConvertToLLVMExtensions(
+    MlirDialectRegistry registry);
+
 // --- Type accessors for Python bindings ---
 
 MLIR_CAPI_EXPORTED bool mlirLegoTypeIsALayout(MlirType type);

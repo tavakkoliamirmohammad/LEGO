@@ -10,6 +10,7 @@
 #include "Lego/Passes.h"
 
 #include "mlir/Conversion/GPUToROCDL/GPUToROCDLPass.h"
+#include "mlir/Conversion/Passes.h"
 #include "mlir/Target/LLVM/ROCDL/Target.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/Target/LLVMIR/Dialect/ROCDL/ROCDLToLLVMIRTranslation.h"
@@ -35,7 +36,7 @@ struct SetROCDLTargetPass
   int optLevel;
 
   SetROCDLTargetPass(StringRef chip = "gfx900", StringRef features = "",
-                     int optLevel = 2)
+                     int optLevel = 3)
       : chip(chip.str()), features(features.str()), optLevel(optLevel) {}
 
   StringRef getArgument() const override { return "lego-set-rocdl-target"; }
@@ -72,7 +73,17 @@ void buildLegoToROCDLPipeline(OpPassManager &pm,
   buildLegoGPUOutlinePipeline(pm);
 
   // Phase 1.5: Lower gpu.subgroup_reduce → gpu.shuffle butterfly pattern.
+  // Use subgroupSize=32: the ROCDL GPUShuffleOpLowering (ds_bpermute) handles
+  // all shuffle widths. Using 64 would cause the upstream greedy promotion to
+  // partially convert some shuffles to amdgpu.swizzle_bitmode, leaving the
+  // offset=32 shuffle unconverted (only offset < 32 is promotable).
   addGpuSubgroupReduceLoweringPass(pm);
+
+  // Phase 1.6: Lower scf.if/for inside GPU kernels to cf branches.
+  // The GPU→ROCDL conversion requires all structured control flow to be
+  // lowered first — unlike NVVM, the ROCDL partial conversion doesn't
+  // handle scf ops through the ConvertToLLVMPatternInterface.
+  pm.addNestedPass<gpu::GPUModuleOp>(createSCFToControlFlowPass());
 
   // Phase 2: ROCDL-specific — set target + convert GPU dialect.
   pm.addPass(std::make_unique<SetROCDLTargetPass>(

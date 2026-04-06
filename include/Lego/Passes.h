@@ -54,7 +54,7 @@ struct LegoToNVVMPipelineOptions
   PassOptions::Option<int> optLevel{
       *this, "opt-level",
       llvm::cl::desc("NVVM optimization level (0-3)"),
-      llvm::cl::init(2)};
+      llvm::cl::init(3)};
   PassOptions::Option<std::string> format{
       *this, "format",
       llvm::cl::desc("Output format: fatbin, assembly, or binary"),
@@ -91,7 +91,7 @@ struct LegoToROCDLPipelineOptions
   PassOptions::Option<int> optLevel{
       *this, "opt-level",
       llvm::cl::desc("ROCDL optimization level (0-3)"),
-      llvm::cl::init(2)};
+      llvm::cl::init(3)};
   PassOptions::Option<std::string> format{
       *this, "format",
       llvm::cl::desc("Output format: fatbin, assembly, or binary"),
@@ -139,7 +139,8 @@ void buildLegoGPUOutlinePipeline(OpPassManager &pm);
 /// Phase 1.5 helpers: lower gpu.all_reduce / gpu.subgroup_reduce.
 /// Shared by all GPU backends — call between outlining and backend conversion.
 void addGpuAllReduceLoweringPass(OpPassManager &pm);
-void addGpuSubgroupReduceLoweringPass(OpPassManager &pm);
+void addGpuSubgroupReduceLoweringPass(OpPassManager &pm,
+                                      unsigned subgroupSize = 32);
 
 /// Phase 3a: host-side LLVM lowering only (no binary compilation).
 void buildGPUHostLLVMPipeline(OpPassManager &pm);

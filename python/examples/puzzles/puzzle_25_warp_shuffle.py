@@ -132,7 +132,7 @@ if __name__ == "__main__":
 
     print("Sub-test 1: neighbor_difference", file=sys.stderr)
     run_benchmark(neighbor_difference, compute_expected_diff,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"neighbor N={N}", init_mod=100, atol=1e-4)
 
     def compute_expected_avg(inputs):
@@ -150,7 +150,7 @@ if __name__ == "__main__":
 
     print("Sub-test 2: moving_average_3", file=sys.stderr)
     run_benchmark(moving_average_3, compute_expected_avg,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"avg3 N={N}", init_mod=100, atol=1e-4)
 
     def compute_expected_broadcast(inputs):
@@ -162,7 +162,7 @@ if __name__ == "__main__":
 
     print("Sub-test 3: basic_broadcast", file=sys.stderr)
     run_benchmark(basic_broadcast, compute_expected_broadcast,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"broadcast N={N}", init_mod=10, atol=1e-4)
 
     def compute_expected_conditional(inputs):
@@ -180,7 +180,7 @@ if __name__ == "__main__":
 
     print("Sub-test 4: conditional_broadcast", file=sys.stderr)
     run_benchmark(conditional_broadcast, compute_expected_conditional,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"cond N={N}", init_mod=10, atol=1e-4)
 
     def compute_expected_coord(inputs):
@@ -197,5 +197,5 @@ if __name__ == "__main__":
 
     print("Sub-test 5: broadcast_shuffle_coordination", file=sys.stderr)
     run_benchmark(broadcast_shuffle_coord, compute_expected_coord,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"coord N={N}", init_mod=10, atol=1e-4)

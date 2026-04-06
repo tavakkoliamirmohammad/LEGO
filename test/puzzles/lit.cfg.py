@@ -18,14 +18,19 @@ config.substitutions.append(('%{pythonpath}',
 config.substitutions.append(('%{mlir_build_dir}', config.mlir_build_dir))
 config.substitutions.append(('%{python}', config.python_executable))
 
-# GPU features — puzzles can run on NVIDIA (CUDA), AMD (ROCm), or any
-# machine with wgpu (Vulkan/WebGPU/Metal).
-if config.host_has_nvidia_gpu:
+# Per-backend GPU features — puzzles use REQUIRES: to select which tests run.
+if config.enable_cuda_runner:
     config.available_features.add('nvidia-gpu')
-if config.host_has_amd_gpu:
-    config.available_features.add('amd-gpu')
+    config.available_features.add('cuda')
 
-# wgpu/Vulkan/Metal — probe at lit-time so puzzles can run on any GPU
+if config.enable_rocm_runner:
+    config.available_features.add('amd-gpu')
+    config.available_features.add('rocm')
+
+if config.enable_metal_runner:
+    config.available_features.add('metal')
+
+# wgpu/Vulkan/WebGPU — probe at lit-time (available on any GPU via wgpu)
 try:
     subprocess.run([config.python_executable, '-c', 'import wgpu'],
                    check=True, capture_output=True)
@@ -33,9 +38,14 @@ try:
 except (subprocess.CalledProcessError, FileNotFoundError):
     pass
 
-# "gpu" feature: any GPU backend available
-if config.available_features & {'nvidia-gpu', 'amd-gpu', 'wgpu'}:
+# "gpu" feature: any runner enabled → puzzles with REQUIRES: gpu will run
+if config.enable_cuda_runner or config.enable_rocm_runner or config.enable_metal_runner:
     config.available_features.add('gpu')
+
+# SPIR-V execution: available if any GPU backend is enabled (SPIR-V runs on
+# NVIDIA via Vulkan, AMD via Vulkan, Apple via Metal/MoltenVK)
+if config.available_features & {'gpu', 'wgpu'}:
+    config.available_features.add('spirv')
 
 # Each puzzle test uses ~1.7 GB RAM + GPU resources.
 # Limit parallelism to avoid OOM kills when many tests run concurrently.

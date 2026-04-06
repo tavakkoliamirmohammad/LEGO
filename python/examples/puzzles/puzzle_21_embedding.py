@@ -69,13 +69,13 @@ if __name__ == "__main__":
     print("Sub-test 1: coalesced embedding (1D thread layout)", file=sys.stderr)
     run_benchmark(
         embedding_coalesced, compute_expected,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"coalesced {BATCH}x{DIM}",
     )
 
     print("Sub-test 2: 2D embedding (per-row blocks)", file=sys.stderr)
     run_benchmark(
         embedding_2d, compute_expected,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"2d {BATCH}x{DIM}",
     )

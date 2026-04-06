@@ -50,7 +50,9 @@ add_lit_testsuite(check-lego "Running the Lego regression tests"
 
 # --- Puzzle lit tests (GPU integration tests) ---
 if(TARGET LegoPythonModules AND LEGO_ENABLE_RUNNERS)
-  llvm_canonicalize_cmake_booleans(LEGO_HOST_HAS_NVIDIA_GPU LEGO_HOST_HAS_AMD_GPU)
+  llvm_canonicalize_cmake_booleans(
+    LEGO_HOST_HAS_NVIDIA_GPU LEGO_HOST_HAS_AMD_GPU LEGO_HOST_HAS_METAL
+    LEGO_ENABLE_CUDA_RUNNER LEGO_ENABLE_ROCM_RUNNER LEGO_ENABLE_METAL_RUNNER)
   configure_lit_site_cfg(
     ${CMAKE_CURRENT_SOURCE_DIR}/puzzles/lit.site.cfg.py.in
     ${CMAKE_CURRENT_BINARY_DIR}/puzzles/lit.site.cfg.py
@@ -65,6 +67,29 @@ if(TARGET LegoPythonModules AND LEGO_ENABLE_RUNNERS)
     ${CMAKE_CURRENT_BINARY_DIR}/puzzles
     DEPENDS
     ${PUZZLE_TEST_DEPENDS}
+  )
+endif()
+
+# --- Puzzle compile-only tests (no GPU required) ---
+# Runs puzzles with LEGO_COMPILE_ONLY=1 to test cross-compilation to all
+# GPU backends (CUDA PTX, ROCm, SPIR-V, Vulkan, WebGPU, Metal) without
+# requiring GPU hardware.
+if(TARGET LegoPythonModules)
+  configure_lit_site_cfg(
+    ${CMAKE_CURRENT_SOURCE_DIR}/puzzles-compile/lit.site.cfg.py.in
+    ${CMAKE_CURRENT_BINARY_DIR}/puzzles-compile/lit.site.cfg.py
+    MAIN_CONFIG
+    ${CMAKE_CURRENT_SOURCE_DIR}/puzzles-compile/lit.cfg.py
+  )
+  set(PUZZLE_COMPILE_DEPENDS lego-prepare-wheel)
+  if(TARGET lego-naga)
+    list(APPEND PUZZLE_COMPILE_DEPENDS lego-naga)
+  endif()
+  add_lit_testsuite(check-lego-puzzles-compile
+    "Running LEGO puzzle compilation tests (no GPU)"
+    ${CMAKE_CURRENT_BINARY_DIR}/puzzles-compile
+    DEPENDS
+    ${PUZZLE_COMPILE_DEPENDS}
   )
 endif()
 

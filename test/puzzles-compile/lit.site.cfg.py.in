@@ -1,0 +1,15 @@
+@LIT_SITE_CFG_IN_HEADER@
+
+import sys
+
+config.python_executable = "@Python_EXECUTABLE@"
+config.pythonpath = "@LEGO_PYTHONPATH@"
+config.mlir_build_dir = "@_MLIR_BUILD_DIR@"
+config.puzzles_dir = "@CMAKE_SOURCE_DIR@/python/examples/puzzles"
+config.lego_obj_root = "@LEGO_BINARY_DIR@"
+
+import lit.llvm
+lit.llvm.initialize(lit_config, config)
+
+# Let the main config do the real work.
+lit_config.load_config(config, "@LEGO_SOURCE_DIR@/test/puzzles-compile/lit.cfg.py")

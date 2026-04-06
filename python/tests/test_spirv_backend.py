@@ -85,6 +85,27 @@ requires_ptxas = pytest.mark.skipif(
 )
 
 
+def _has_lego_to_nvvm_pipeline():
+    """Check if the lego-to-nvvm pipeline is available (requires NVPTX target)."""
+    try:
+        from lego.mlir.ir import Context, Location
+        from lego.mlir.passmanager import PassManager
+        from lego.backend.dialects.lego_dialect import register
+        ctx = Context()
+        register(ctx)
+        with ctx, Location.unknown():
+            pm = PassManager.parse("builtin.module(lego-to-nvvm{chip=sm_80 format=assembly})")
+        return True
+    except Exception:
+        return False
+
+
+requires_nvvm = pytest.mark.skipif(
+    not _has_lego_to_nvvm_pipeline(),
+    reason="lego-to-nvvm pipeline not available (NVPTX target not built)",
+)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Tier 1: GPUIRBuilder — MLIR generation
 # ══════════════════════════════════════════════════════════════════════════
@@ -263,7 +284,11 @@ class TestMultiTargetCompile:
         assert result.target == "vulkan"
         assert result.spv_path.endswith(".spv")
         assert os.path.exists(result.spv_path)
-        assert os.path.getsize(result.spv_path) > 0
+        # SPIR-V binary starts with magic number 0x07230203
+        with open(result.spv_path, "rb") as f:
+            magic = struct.unpack("<I", f.read(4))[0]
+        assert magic == 0x07230203, f"Bad SPIR-V magic: {magic:#x}"
+        assert os.path.getsize(result.spv_path) > 40  # header + at least some ops
 
     @requires_spirv
     @requires_naga
@@ -273,6 +298,8 @@ class TestMultiTargetCompile:
         assert result.target == "webgpu"
         assert result.kernel_path.endswith(".wgsl")
         assert "@compute" in result.kernel_source
+        assert "@workgroup_size" in result.kernel_source
+        assert "var<storage" in result.kernel_source
 
     @requires_spirv
     @requires_naga
@@ -281,6 +308,7 @@ class TestMultiTargetCompile:
         result = compile_to_target(Row(256), shape=(256,), target="webgl")
         assert result.target == "webgl"
         assert result.kernel_path.endswith(".comp")
+        assert "#version 310 es" in result.kernel_source
         assert "layout(local_size" in result.kernel_source
         assert "void main()" in result.kernel_source
 
@@ -291,7 +319,8 @@ class TestMultiTargetCompile:
         result = compile_to_target(Row(256), shape=(256,), target="metal")
         assert result.target == "metal"
         assert result.kernel_path.endswith(".metal")
-        assert "kernel void" in result.kernel_source or "metal" in result.kernel_source
+        assert "#include <metal_stdlib>" in result.kernel_source
+        assert "kernel void" in result.kernel_source
 
     @requires_spirv
     @requires_naga
@@ -501,18 +530,42 @@ class TestUnifiedCompile:
         import lego
         result = lego.compile(Row(64), shape=(64,), target="webgpu")
         assert isinstance(result, lego.CompileResult)
+        assert result.target == "webgpu"
         assert "@compute" in result.kernel_source
+        assert "@workgroup_size" in result.kernel_source
 
     @requires_spirv
-    @requires_ptxas
-    def test_compile_cuda_produces_llvm_ir(self):
-        """CUDA target goes through lego-to-llvm, produces LLVM IR."""
+    @requires_naga
+    def test_compile_metal(self):
         import lego
-        result = lego.compile(Row(64), shape=(64,), target="cuda")
+        result = lego.compile(Row(64), shape=(64,), target="metal")
+        assert isinstance(result, lego.CompileResult)
+        assert result.target == "metal"
+        assert "#include <metal_stdlib>" in result.kernel_source
+        assert "kernel void" in result.kernel_source
+
+    @requires_spirv
+    @requires_naga
+    def test_compile_webgl(self):
+        import lego
+        result = lego.compile(Row(64), shape=(64,), target="webgl")
+        assert isinstance(result, lego.CompileResult)
+        assert result.target == "webgl"
+        assert "#version 310 es" in result.kernel_source
+        assert "layout(local_size" in result.kernel_source
+
+    @requires_spirv
+    @requires_nvvm
+    def test_compile_cuda_produces_ptx(self):
+        """CUDA target goes through lego-to-nvvm, produces PTX assembly."""
+        import lego
+        result = lego.compile(Row(64), shape=(64,), target="cuda", format="assembly")
         assert isinstance(result, lego.CompileResult)
         assert result.target == "cuda"
-        # LLVM IR should contain the function
-        assert "llvm." in result.kernel_source or "define" in result.kernel_source
+        # Output contains gpu.binary with embedded PTX and NVVM target info
+        assert "gpu.binary" in result.kernel_source
+        assert "nvvm.target" in result.kernel_source
+        assert "sm_" in result.kernel_source
 
     @requires_spirv
     def test_compile_invalid_target(self):
@@ -535,7 +588,8 @@ class TestLLVMSPIRVPipeline:
         builder = make_permutation_kernel(Row(64), (64,), "f32", 64)
         result = builder.compile(target="llvmspirv")
         assert result.target == "llvmspirv"
-        assert "spir_funccc" in result.kernel_source or "llvm." in result.kernel_source
+        assert "gpu.container_module" in result.kernel_source
+        assert "llvm.func" in result.kernel_source
 
     @requires_llvmspirv
     def test_col_layout_compiles(self):
@@ -544,6 +598,7 @@ class TestLLVMSPIRVPipeline:
         builder = make_permutation_kernel(Col(8, 8), (8, 8), "f32", 64)
         result = builder.compile(target="llvmspirv")
         assert result.target == "llvmspirv"
+        assert "llvm.func" in result.kernel_source
 
     @requires_llvmspirv
     def test_tileby_layout_compiles(self):
@@ -553,6 +608,7 @@ class TestLLVMSPIRVPipeline:
         builder = make_permutation_kernel(layout, (8, 8), "f32", 64)
         result = builder.compile(target="llvmspirv")
         assert result.target == "llvmspirv"
+        assert "llvm.func" in result.kernel_source
 
     @requires_llvmspirv
     def test_transpose_naive_compiles(self):

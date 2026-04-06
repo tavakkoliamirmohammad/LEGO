@@ -51,15 +51,18 @@ endif()
 if(LEGO_ENABLE_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
   if(CCACHE_PROGRAM)
-    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    # Use CACHE FORCE so the launcher propagates into LLVM's subdirectory build.
+    # A normal set() creates a scope-local variable that shadows the cache entry
+    # from -D on the command line, and doesn't persist into add_subdirectory.
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "" FORCE)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "" FORCE)
     message(STATUS "Using ccache: ${CCACHE_PROGRAM}")
   endif()
 endif()
 
-# --- Host GPU detection (before MLIR config — needed for CUDA runner toggle) ---
-# Probe for GPUs on the host.  This determines whether to auto-enable
-# GPU execution tests (Triton examples, CUDA runners, ROCm runners).
+# --- Host GPU detection ---
+# Probe for GPUs on the host. Each backend has its own runner flag that
+# can be auto-detected or explicitly set by the user.
 
 set(LEGO_HOST_HAS_NVIDIA_GPU OFF)
 find_program(_NVIDIA_SMI nvidia-smi)
@@ -85,13 +88,25 @@ if(_ROCM_SMI)
     ERROR_QUIET)
   if(_ROCM_SMI_RESULT EQUAL 0 AND _AMD_GPU_NAME)
     set(LEGO_HOST_HAS_AMD_GPU ON)
-    # Extract just the first card name from rocm-smi output
     string(REGEX MATCH "Card series:[ \t]*([^\n]+)" _AMD_MATCH "${_AMD_GPU_NAME}")
     if(_AMD_MATCH)
       message(STATUS "Detected AMD GPU: ${CMAKE_MATCH_1}")
     else()
       message(STATUS "Detected AMD GPU (via rocm-smi)")
     endif()
+  endif()
+endif()
+
+set(LEGO_HOST_HAS_METAL OFF)
+if(APPLE)
+  # macOS always has Metal on Apple Silicon and recent Intel Macs.
+  execute_process(
+    COMMAND system_profiler SPDisplaysDataType
+    OUTPUT_VARIABLE _METAL_INFO OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(_METAL_INFO MATCHES "Metal")
+    set(LEGO_HOST_HAS_METAL ON)
+    message(STATUS "Detected Metal GPU support")
   endif()
 endif()
 
@@ -128,11 +143,9 @@ if(LEGO_MONOLITHIC_LLVM)
 
   set(LLVM_TARGETS_TO_BUILD "${LEGO_LLVM_TARGETS}" CACHE STRING "" FORCE)
 
-  # Only forward MLIR_ENABLE_CUDA_RUNNER when the user *explicitly* set
-  # LEGO_ENABLE_RUNNERS=ON (before auto-detection).  Auto-detection happens
-  # after add_subdirectory and only controls Python-level GPU tests —
-  # building the full MLIR CUDA runner is expensive and opt-in.
-  if(LEGO_ENABLE_RUNNERS)
+  # Only forward MLIR_ENABLE_CUDA_RUNNER when explicitly enabled.
+  # Building the full MLIR CUDA runner is expensive and opt-in.
+  if(LEGO_ENABLE_CUDA_RUNNER)
     set(MLIR_ENABLE_CUDA_RUNNER ON CACHE BOOL "" FORCE)
   endif()
 
@@ -219,15 +232,56 @@ detect_llvm_target(NVPTX  "NVPTX backend enabled — NVVM compilation support av
 detect_llvm_target(SPIRV  "SPIRV backend enabled — LLVM SPIR-V compilation support available")
 detect_llvm_target(AMDGPU "AMDGPU backend enabled")
 
-# For decoupled builds, auto-detect LEGO_ENABLE_RUNNERS here
-# (monolithic builds already did this before add_subdirectory).
-if(NOT DEFINED LEGO_ENABLE_RUNNERS)
-  if(LEGO_HAS_NVPTX AND LEGO_HOST_HAS_NVIDIA_GPU)
-    set(LEGO_ENABLE_RUNNERS ON)
-    message(STATUS "Auto-enabled CUDA runners (NVPTX target + GPU detected)")
-  else()
-    set(LEGO_ENABLE_RUNNERS OFF)
+# --- Per-backend runner flags ---
+# Each can be explicitly set (-DLEGO_ENABLE_CUDA_RUNNER=ON) or auto-detected.
+# LEGO_ENABLE_RUNNERS=ON is a shortcut that enables all detected backends.
+
+if(LEGO_ENABLE_RUNNERS)
+  # Legacy flag: enable all detected backends
+  if(LEGO_HOST_HAS_NVIDIA_GPU AND LEGO_HAS_NVPTX)
+    set(LEGO_ENABLE_CUDA_RUNNER ON)
   endif()
+  if(LEGO_HOST_HAS_AMD_GPU AND LEGO_HAS_AMDGPU)
+    set(LEGO_ENABLE_ROCM_RUNNER ON)
+  endif()
+  if(LEGO_HOST_HAS_METAL)
+    set(LEGO_ENABLE_METAL_RUNNER ON)
+  endif()
+endif()
+
+# Auto-detect individual runners if not explicitly set
+if(NOT DEFINED LEGO_ENABLE_CUDA_RUNNER)
+  if(LEGO_HAS_NVPTX AND LEGO_HOST_HAS_NVIDIA_GPU)
+    set(LEGO_ENABLE_CUDA_RUNNER ON)
+    message(STATUS "Auto-enabled CUDA runner (NVPTX target + GPU detected)")
+  else()
+    set(LEGO_ENABLE_CUDA_RUNNER OFF)
+  endif()
+endif()
+
+if(NOT DEFINED LEGO_ENABLE_ROCM_RUNNER)
+  if(LEGO_HAS_AMDGPU AND LEGO_HOST_HAS_AMD_GPU)
+    set(LEGO_ENABLE_ROCM_RUNNER ON)
+    message(STATUS "Auto-enabled ROCm runner (AMDGPU target + GPU detected)")
+  else()
+    set(LEGO_ENABLE_ROCM_RUNNER OFF)
+  endif()
+endif()
+
+if(NOT DEFINED LEGO_ENABLE_METAL_RUNNER)
+  if(LEGO_HOST_HAS_METAL)
+    set(LEGO_ENABLE_METAL_RUNNER ON)
+    message(STATUS "Auto-enabled Metal runner (Metal GPU detected)")
+  else()
+    set(LEGO_ENABLE_METAL_RUNNER OFF)
+  endif()
+endif()
+
+# Any runner enabled → enable GPU puzzle tests and SPIR-V execution
+if(LEGO_ENABLE_CUDA_RUNNER OR LEGO_ENABLE_ROCM_RUNNER OR LEGO_ENABLE_METAL_RUNNER)
+  set(LEGO_ENABLE_RUNNERS ON)
+else()
+  set(LEGO_ENABLE_RUNNERS OFF)
 endif()
 
 
@@ -297,7 +351,7 @@ add_subdirectory(tools/lego-opt)
 # Requires MLIR_ENABLE_BINDINGS_PYTHON=ON in the LLVM build.
 if(MLIR_ENABLE_BINDINGS_PYTHON)
   # nanobind must be found before AddMLIRPython macros are used
-  find_package(Python REQUIRED COMPONENTS Interpreter Development)
+  find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
   find_package(nanobind CONFIG QUIET)
   if(NOT nanobind_FOUND)
     execute_process(
@@ -560,8 +614,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     get_filename_component(_MLIR_BUILD_DIR "${LLVM_DIR}/../../.." ABSOLUTE)
   endif()
 
-  # --- LEGO GPU examples (require NVPTX + GPU + runners) ---
-  if(LEGO_ENABLE_RUNNERS AND LEGO_HOST_HAS_NVIDIA_GPU)
+  # --- LEGO GPU examples (require CUDA runner for NVVM execution) ---
+  if(LEGO_ENABLE_CUDA_RUNNER)
     add_example_group(transpose "${CMAKE_SOURCE_DIR}/paper/benchmarks/mlir"
       "MLIR_BUILD_DIR=${_MLIR_BUILD_DIR}"
       transpose_naive.py:1024:1024
@@ -664,6 +718,9 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   endif()
   if(TARGET check-lego-puzzles)
     add_dependencies(check-lego-all check-lego-puzzles)
+  endif()
+  if(TARGET check-lego-puzzles-compile)
+    add_dependencies(check-lego-all check-lego-puzzles-compile)
   endif()
   if(TARGET check-spirv-examples)
     add_dependencies(check-lego-all check-spirv-examples)
