@@ -119,7 +119,16 @@ jobs:
           # Pass Python hints explicitly for manylinux container
           PYTHON_CMAKE_HINTS=""
           if [ -n "${Python_ROOT_DIR:-}" ]; then
-            PYTHON_CMAKE_HINTS="-DPython_ROOT_DIR=$Python_ROOT_DIR -DPython_EXECUTABLE=$(which python)"
+            PYVER="${{ matrix.python }}"
+            echo "=== Python layout ==="
+            ls "$Python_ROOT_DIR/bin/python"* 2>/dev/null || true
+            ls "$Python_ROOT_DIR/include/" 2>/dev/null || true
+            ls "$Python_ROOT_DIR/lib/libpython"* 2>/dev/null || true
+            PYTHON_CMAKE_HINTS="-DPython_ROOT_DIR=$Python_ROOT_DIR"
+            PYTHON_CMAKE_HINTS="$PYTHON_CMAKE_HINTS -DPython_EXECUTABLE=$Python_ROOT_DIR/bin/python"
+            PYTHON_CMAKE_HINTS="$PYTHON_CMAKE_HINTS -DPython_INCLUDE_DIR=$Python_ROOT_DIR/include/python${PYVER}"
+            PYTHON_CMAKE_HINTS="$PYTHON_CMAKE_HINTS -DPython_LIBRARY=$Python_ROOT_DIR/lib/libpython${PYVER}.so"
+            PYTHON_CMAKE_HINTS="$PYTHON_CMAKE_HINTS -DPython_FIND_STRATEGY=LOCATION"
           fi
           cmake -G Ninja -B build \
             -DCMAKE_BUILD_TYPE=Release \
