@@ -51,8 +51,11 @@ endif()
 if(LEGO_ENABLE_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
   if(CCACHE_PROGRAM)
-    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    # Use CACHE FORCE so the launcher propagates into LLVM's subdirectory build.
+    # A normal set() creates a scope-local variable that shadows the cache entry
+    # from -D on the command line, and doesn't persist into add_subdirectory.
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "" FORCE)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "" FORCE)
     message(STATUS "Using ccache: ${CCACHE_PROGRAM}")
   endif()
 endif()
