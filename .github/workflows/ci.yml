@@ -252,6 +252,10 @@ jobs:
           ls -lh viz/wasm/lego_driver.js viz/wasm/lego_driver.wasm
           echo "WASM size: $(du -h viz/wasm/lego_driver.wasm | cut -f1)"
 
+      - name: Run WASM codegen tests
+        run: |
+          $EMSDK_NODE test/wasm/test_wasm_codegen.mjs viz/wasm/lego_driver.js
+
       - name: Upload viz site
         uses: actions/upload-artifact@v4
         with:

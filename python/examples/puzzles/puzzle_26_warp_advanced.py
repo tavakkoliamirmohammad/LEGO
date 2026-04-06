@@ -135,7 +135,7 @@ if __name__ == "__main__":
     print("Sub-test 1: pair_swap", file=sys.stderr)
     run_benchmark(
         pair_swap, compute_expected_swap,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"swap N={N}",
     )
 
@@ -147,7 +147,7 @@ if __name__ == "__main__":
     print("Sub-test 2: butterfly_max", file=sys.stderr)
     run_benchmark(
         butterfly_max, compute_expected_max,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"max N={N}", atol=1e-4,
     )
 
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     print("Sub-test 3: butterfly_sum", file=sys.stderr)
     run_benchmark(
         butterfly_sum, compute_expected_sum,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"sum N={N}", init_mod=10, atol=1e-4,
     )
 
@@ -171,7 +171,7 @@ if __name__ == "__main__":
     print("Sub-test 4: warp_prefix_sum", file=sys.stderr)
     run_benchmark(
         warp_prefix, compute_expected_prefix,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"prefix N={N}", init_mod=10, atol=1e-4,
     )
 
@@ -197,6 +197,6 @@ if __name__ == "__main__":
     print("Sub-test 5: warp_partition", file=sys.stderr)
     run_benchmark(
         warp_partition, compute_expected_partition,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"partition N={N}", init_mod=10, atol=1e-4,
     )

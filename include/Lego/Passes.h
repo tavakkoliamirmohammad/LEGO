@@ -139,7 +139,8 @@ void buildLegoGPUOutlinePipeline(OpPassManager &pm);
 /// Phase 1.5 helpers: lower gpu.all_reduce / gpu.subgroup_reduce.
 /// Shared by all GPU backends — call between outlining and backend conversion.
 void addGpuAllReduceLoweringPass(OpPassManager &pm);
-void addGpuSubgroupReduceLoweringPass(OpPassManager &pm);
+void addGpuSubgroupReduceLoweringPass(OpPassManager &pm,
+                                      unsigned subgroupSize = 32);
 
 /// Phase 3a: host-side LLVM lowering only (no binary compilation).
 void buildGPUHostLLVMPipeline(OpPassManager &pm);

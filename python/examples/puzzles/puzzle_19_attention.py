@@ -116,7 +116,7 @@ if __name__ == "__main__":
     print("Sub-test 1: attention_scores (Q @ K^T / sqrt(d))", file=sys.stderr)
     run_benchmark(
         attention_scores, compute_expected_scores,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"scores SEQ={SEQ},DIM={DIM}",
         init_mod=10, atol=1e-2,
     )
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     print("Sub-test 2: softmax (row-wise)", file=sys.stderr)
     run_benchmark(
         softmax, compute_expected_softmax,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"softmax SEQ={SEQ}",
         init_mod=10, atol=1e-4,
     )
@@ -146,7 +146,7 @@ if __name__ == "__main__":
     print("Sub-test 3: weighted_sum (weights @ V)", file=sys.stderr)
     run_benchmark(
         weighted_sum, compute_expected_weighted,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"weighted SEQ={SEQ},DIM={DIM}",
         init_mod=10, atol=1e-2,
     )

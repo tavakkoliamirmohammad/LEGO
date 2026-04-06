@@ -138,7 +138,7 @@ if __name__ == "__main__":
     print("Sub-test 1: layernorm (standalone)", file=sys.stderr)
     run_benchmark(
         layernorm, compute_expected_ln,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"layernorm N={N}",
         init_mod=10, atol=1e-3,
     )
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     print("Sub-test 2: linear (standalone)", file=sys.stderr)
     run_benchmark(
         linear, compute_expected_linear,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"linear N={N}",
         init_mod=10, atol=1e-4,
     )
@@ -171,7 +171,7 @@ if __name__ == "__main__":
     print("Sub-test 3: fused layernorm+linear", file=sys.stderr)
     run_benchmark(
         fused_layernorm_linear, compute_expected_fused,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"fused N={N}",
         init_mod=10, atol=1e-3,
     )

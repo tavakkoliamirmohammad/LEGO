@@ -80,7 +80,7 @@ if __name__ == "__main__":
     print("Sub-test 1: add_10_2d (guarded +10)", file=sys.stderr)
     run_benchmark(
         add_10_2d, compute_expected_add10,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"add10 SIZE={SIZE}",
     )
 
@@ -97,7 +97,7 @@ if __name__ == "__main__":
     print("Sub-test 2: shared_memory_race_fix (sum+broadcast)", file=sys.stderr)
     run_benchmark(
         shared_memory_race_fix, compute_expected_race,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"race SIZE={SIZE}",
         atol=1e-4,
     )

@@ -110,7 +110,7 @@ if __name__ == "__main__":
     print("Sub-test 1: tiled matmul (baseline)", file=sys.stderr)
     run_benchmark(
         matmul_tiled, compute_expected,
-        targets=["cuda", "llvmspirv", "vulkan", "webgpu", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
         label=f"{M}x{N}x{K}",
         init_mod=10,
         atol=1e-2,

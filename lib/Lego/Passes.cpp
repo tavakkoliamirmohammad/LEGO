@@ -141,6 +141,11 @@ struct LowerGpuSubgroupReducePass
     : public PassWrapper<LowerGpuSubgroupReducePass,
                           OperationPass<gpu::GPUModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerGpuSubgroupReducePass)
+
+  unsigned subgroupSize;
+  LowerGpuSubgroupReducePass(unsigned subgroupSize = 32)
+      : subgroupSize(subgroupSize) {}
+
   StringRef getArgument() const override {
     return "lego-lower-gpu-subgroup-reduce";
   }
@@ -149,10 +154,10 @@ struct LowerGpuSubgroupReducePass
   }
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
-    // subgroupSize=32, shuffleBitwidth=32 (covers NVIDIA, AMD RDNA, wgpu)
-    populateGpuLowerSubgroupReduceToShufflePatterns(patterns, 32, 32);
-    populateGpuLowerClusteredSubgroupReduceToShufflePatterns(patterns, 32, 32);
-    populateGpuBreakDownSubgroupReducePatterns(patterns, 32);
+    populateGpuLowerSubgroupReduceToShufflePatterns(patterns, subgroupSize, 32);
+    populateGpuLowerClusteredSubgroupReduceToShufflePatterns(patterns,
+                                                              subgroupSize, 32);
+    populateGpuBreakDownSubgroupReducePatterns(patterns, subgroupSize);
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
   }
@@ -165,9 +170,10 @@ void addGpuAllReduceLoweringPass(OpPassManager &pm) {
       std::make_unique<LowerGpuAllReducePass>());
 }
 
-void addGpuSubgroupReduceLoweringPass(OpPassManager &pm) {
+void addGpuSubgroupReduceLoweringPass(OpPassManager &pm,
+                                      unsigned subgroupSize) {
   pm.addNestedPass<gpu::GPUModuleOp>(
-      std::make_unique<LowerGpuSubgroupReducePass>());
+      std::make_unique<LowerGpuSubgroupReducePass>(subgroupSize));
 }
 
 void buildGPUHostLLVMPipeline(OpPassManager &pm) {
