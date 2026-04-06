@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   # ── Cleanup old artifacts ──
@@ -16,14 +17,23 @@ jobs:
           age: '1 day'
 
   # ── Stage 1: Build & Test ──
+  # max-parallel: 2 ensures one job per OS at a time, so py3.12 warms
+  # ccache before py3.13/3.14 start on the same runner OS.
   build:
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        os: [ubuntu-22.04, macos-15]
-        python: ["3.12", "3.13", "3.14"]
+        include:
+          - { os: ubuntu-22.04, python: "3.12", container: "quay.io/pypa/manylinux_2_28_x86_64" }
+          - { os: macos-15,     python: "3.12" }
+          - { os: ubuntu-22.04, python: "3.13", container: "quay.io/pypa/manylinux_2_28_x86_64" }
+          - { os: macos-15,     python: "3.13" }
+          - { os: ubuntu-22.04, python: "3.14", container: "quay.io/pypa/manylinux_2_28_x86_64" }
+          - { os: macos-15,     python: "3.14" }
 
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,11 +54,11 @@ jobs:
             pip install torch
           fi
 
-      - name: Install system dependencies (Linux)
+      - name: Install system dependencies (Linux / manylinux container)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build lld ccache
+          dnf install -y lld || true
+          pip install ninja
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -72,7 +82,7 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1
         with:
           key: llvm-${{ matrix.os }}
-          max-size: 2G
+          max-size: 3G
 
       - name: Get nanobind cmake dir
         id: nanobind
@@ -86,7 +96,7 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLEGO_MONOLITHIC_LLVM=ON \
-            -DLEGO_LLVM_TARGETS="${{ contains(matrix.os, 'macos') && 'AArch64' || 'X86;NVPTX' }}" \
+            -DLEGO_LLVM_TARGETS="${{ contains(matrix.os, 'macos') && 'AArch64;NVPTX;AMDGPU;SPIRV' || 'X86;NVPTX;AMDGPU;SPIRV' }}" \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
             -DLEGO_BUILD_TESTS=ON \
             ${{ runner.os == 'Linux' && '-DLLVM_USE_LINKER=lld' || '' }} \
@@ -281,7 +291,7 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             pip install auditwheel
             for whl in dist/*.whl; do
-              auditwheel repair "$whl" --plat manylinux_2_35_x86_64 -w dist/
+              auditwheel repair "$whl" --plat manylinux_2_28_x86_64 -w dist/
               rm "$whl"
             done
           fi
