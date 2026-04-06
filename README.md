@@ -332,6 +332,24 @@ To customize LLVM targets (default `X86;NVPTX;AMDGPU;SPIRV`):
 cmake -S . -B build -DLEGO_MONOLITHIC_LLVM=ON -DLEGO_LLVM_TARGETS="X86;NVPTX;AMDGPU;SPIRV;AArch64"
 ```
 
+## GPU Runners
+
+GPU execution tests are controlled by per-backend flags, auto-detected from hardware:
+
+| Flag | Hardware | What it enables |
+|------|----------|-----------------|
+| `LEGO_ENABLE_CUDA_RUNNER` | NVIDIA GPU (`nvidia-smi`) | CUDA kernel execution via `mlir-runner` |
+| `LEGO_ENABLE_ROCM_RUNNER` | AMD GPU (`rocm-smi`) | ROCm kernel execution |
+| `LEGO_ENABLE_METAL_RUNNER` | macOS Metal GPU | Metal/Vulkan/WebGPU execution via `wgpu` |
+
+If any runner is enabled, SPIR-V execution tests (Vulkan, WebGPU, Metal) also run since SPIR-V works on any GPU backend. To explicitly enable a runner:
+
+```bash
+cmake -S . -B build -DLEGO_ENABLE_METAL_RUNNER=ON   # macOS Metal
+cmake -S . -B build -DLEGO_ENABLE_CUDA_RUNNER=ON     # NVIDIA CUDA
+cmake -S . -B build -DLEGO_ENABLE_ROCM_RUNNER=ON     # AMD ROCm
+```
+
 ## Testing
 
 ```bash
@@ -340,6 +358,12 @@ cmake --build build --target check-lego
 
 # Python tests
 cmake --build build --target check-lego-python
+
+# Compile-only puzzle tests (no GPU required — tests all 7 backends)
+cmake --build build --target check-lego-puzzles-compile
+
+# GPU puzzle tests (requires at least one runner enabled)
+cmake --build build --target check-lego-puzzles
 
 # All tests
 cmake --build build --target check-lego-all
