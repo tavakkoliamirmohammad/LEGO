@@ -128,7 +128,7 @@ if __name__ == "__main__":
     # support in the DSL. The kernel structure and MMA DSL API are correct.
     print("Sub-test 2: tensor core MMA (compile-only)", file=sys.stderr)
     try:
-        result = matmul_mma.compile(target="cuda")
+        result = matmul_mma.compile(target="cuda", format="assembly")
         print(f"  MMA CUDA compilation: PASS — {result.kernel_path}",
               file=sys.stderr)
     except Exception as e:
