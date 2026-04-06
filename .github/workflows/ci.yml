@@ -269,7 +269,7 @@ jobs:
   # ── Deploy LEGO Studio to GitHub Pages ──
   deploy-pages:
     needs: wasm-viz
-    if: github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       pages: write
