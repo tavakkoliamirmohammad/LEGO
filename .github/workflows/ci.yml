@@ -269,7 +269,7 @@ jobs:
   # ── Deploy LEGO Studio to GitHub Pages ──
   deploy-pages:
     needs: wasm-viz
-    if: github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -336,7 +336,7 @@ jobs:
 
       - name: Verify wheel installs
         run: |
-          pip install --force-reinstall --no-deps --no-index --find-links build/python_packages/lego/dist lego-layout
+          pip install --force-reinstall --find-links build/python_packages/lego/dist lego-layout
           python -P python/check_imports.py
 
       - name: Upload wheel
