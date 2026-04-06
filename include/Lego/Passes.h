@@ -54,7 +54,7 @@ struct LegoToNVVMPipelineOptions
   PassOptions::Option<int> optLevel{
       *this, "opt-level",
       llvm::cl::desc("NVVM optimization level (0-3)"),
-      llvm::cl::init(2)};
+      llvm::cl::init(3)};
   PassOptions::Option<std::string> format{
       *this, "format",
       llvm::cl::desc("Output format: fatbin, assembly, or binary"),
@@ -91,7 +91,7 @@ struct LegoToROCDLPipelineOptions
   PassOptions::Option<int> optLevel{
       *this, "opt-level",
       llvm::cl::desc("ROCDL optimization level (0-3)"),
-      llvm::cl::init(2)};
+      llvm::cl::init(3)};
   PassOptions::Option<std::string> format{
       *this, "format",
       llvm::cl::desc("Output format: fatbin, assembly, or binary"),

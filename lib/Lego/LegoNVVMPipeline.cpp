@@ -36,7 +36,7 @@ struct SetNVVMTargetPass
   int optLevel;
 
   SetNVVMTargetPass(StringRef chip = "sm_70", StringRef features = "+ptx60",
-                    int optLevel = 2)
+                    int optLevel = 3)
       : chip(chip.str()), features(features.str()), optLevel(optLevel) {}
 
   StringRef getArgument() const override { return "lego-set-nvvm-target"; }
