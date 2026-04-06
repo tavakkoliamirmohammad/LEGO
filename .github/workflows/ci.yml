@@ -69,7 +69,7 @@ jobs:
       - name: Install system dependencies (Linux / manylinux container)
         if: runner.os == 'Linux'
         run: |
-          dnf install -y lld glibc-static || true
+          dnf install -y lld clang glibc-static || true
           python -m pip install ninja
 
       - name: Fix script shebangs (container path workaround)
@@ -127,8 +127,9 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            ${{ runner.os == 'Linux' && '-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++' || '' }} \
             -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
-            -DLLVM_ENABLE_LTO=Full \
+            -DLLVM_ENABLE_LTO=Thin \
             -DLEGO_MONOLITHIC_LLVM=ON \
             -DLEGO_LLVM_TARGETS="${{ contains(matrix.os, 'macos') && 'AArch64;NVPTX;AMDGPU;SPIRV' || 'X86;NVPTX;AMDGPU;SPIRV' }}" \
             -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
