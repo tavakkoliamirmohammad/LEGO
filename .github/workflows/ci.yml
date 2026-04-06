@@ -41,9 +41,23 @@ jobs:
           fetch-depth: 1              # shallow clone — saves ~minutes
 
       - uses: actions/setup-python@v5
+        if: ${{ !matrix.container }}
         with:
           python-version: ${{ matrix.python }}
           allow-prereleases: true
+
+      - name: Set up Python (manylinux container)
+        if: matrix.container
+        run: |
+          PYVER="${{ matrix.python }}"
+          PYDIR="/opt/python/cp${PYVER//./}-cp${PYVER//./}/bin"
+          if [ ! -d "$PYDIR" ]; then
+            echo "Python $PYVER not found — available:"
+            ls -d /opt/python/cp* || true
+            exit 1
+          fi
+          echo "$PYDIR" >> $GITHUB_PATH
+          "$PYDIR/python" --version
 
       - name: Install Python dependencies
         run: |
