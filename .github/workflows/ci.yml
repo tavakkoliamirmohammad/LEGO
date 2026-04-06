@@ -17,20 +17,14 @@ jobs:
           age: '1 day'
 
   # ── Stage 1: Build & Test ──
-  # max-parallel: 2 ensures one job per OS at a time, so py3.12 warms
-  # ccache before py3.13/3.14 start on the same runner OS.
   build:
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
+        os: [ubuntu-22.04, macos-15]
+        python: ["3.12", "3.13", "3.14"]
         include:
-          - { os: ubuntu-22.04, python: "3.12", container: "quay.io/pypa/manylinux_2_28_x86_64" }
-          - { os: macos-15,     python: "3.12" }
-          - { os: ubuntu-22.04, python: "3.13", container: "quay.io/pypa/manylinux_2_28_x86_64" }
-          - { os: macos-15,     python: "3.13" }
-          - { os: ubuntu-22.04, python: "3.14", container: "quay.io/pypa/manylinux_2_28_x86_64" }
-          - { os: macos-15,     python: "3.14" }
+          - { os: ubuntu-22.04, container: "quay.io/pypa/manylinux_2_28_x86_64" }
 
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container || '' }}
