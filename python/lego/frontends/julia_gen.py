@@ -1,27 +1,10 @@
 """Julia source code generation adapter for the LEGO rewriter."""
 
-import ast
-
 from lego.julia_printer import LEGOJuliaCodePrinter
-from lego.frontends._adapter import DSLAdapter
-from lego.rewriter import rewrite
+from lego.frontends._adapter import SourceGenAdapter, source_generate
 
-
-class JuliaAdapter(DSLAdapter):
-    """Adapter that emits Julia source code from LEGO layout expressions."""
-
-    def unwrap(self, fn):
-        return fn, fn, []
-
-    def find_runtime_vars(self, func_def):
-        return set()
-
-    def get_code_printer(self):
-        return LEGOJuliaCodePrinter()
-
-    def compile_and_wrap(self, new_source, tree, original_fn, wrappers,
-                         return_source=False):
-        return new_source
+# Kept for backwards compatibility (direct adapter use).
+JuliaAdapter = lambda: SourceGenAdapter(LEGOJuliaCodePrinter())
 
 
 def generate(fn, **kwargs):
@@ -31,4 +14,4 @@ def generate(fn, **kwargs):
 
         julia_code = lego.julia_gen.generate(index_kernel)
     """
-    return rewrite(fn, JuliaAdapter(), return_source=True, **kwargs)
+    return source_generate(fn, LEGOJuliaCodePrinter(), **kwargs)
