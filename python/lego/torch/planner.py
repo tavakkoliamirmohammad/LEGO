@@ -10,8 +10,27 @@ on a suboptimal layout.
 Used by the ``torch.compile(backend="lego")`` path.
 """
 
+import numpy as np
 import torch
 from .tensor import _TIER1, _TIER2, _TIER4
+
+
+def layout_cost(layout):
+    """Symbolic rearrangement cost for a layout.
+
+    Returns 0 for identity (row-major), positive for non-identity.
+    Cost = number of elements that change position under the layout's
+    permutation table.
+    """
+    from lego.backend.compiler import LayoutCompiler
+    try:
+        base = layout._base if hasattr(layout, "_base") else layout
+        compiler = LayoutCompiler(base._layout, base._shape, "i64")
+        fwd, _ = compiler.get_permutation_table()
+        identity = np.arange(len(fwd))
+        return int(np.sum(fwd != identity))
+    except Exception:
+        return 0
 
 
 def plan_layouts(gm, layout_map):
@@ -22,22 +41,21 @@ def plan_layouts(gm, layout_map):
     gm : torch.fx.GraphModule
         The traced FX graph.
     layout_map : dict[str, layout]
-        Map from node-name → LEGO layout for annotated inputs.
+        Map from node-name -> LEGO layout for annotated inputs.
     """
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
 
-        # Collect input layouts
         input_layouts = []
         for arg in _flat_args(node.args):
             if hasattr(arg, "name") and arg.name in layout_map:
-                input_layouts.append(layout_map[arg.name])
+                input_layouts.append((arg, layout_map[arg.name]))
 
         if not input_layouts:
             continue
 
-        layout = input_layouts[0]
+        _, layout = input_layouts[0]
         func = node.target
 
         # Tier 1 (pointwise) / Tier 2 (transform): propagate
@@ -45,13 +63,13 @@ def plan_layouts(gm, layout_map):
             layout_map[node.name] = layout
             continue
 
-        # Tier 4 (LEGO kernel): future — check layout compatibility,
-        # insert rearrange if producer layout != consumer preference.
+        # Tier 4 (LEGO kernel): propagate; future — check consumer
+        # preference and insert rearrangement if cost justifies it.
         if func in _TIER4:
             layout_map[node.name] = layout
             continue
 
-        # Tier 3: layout is dropped at this node — don't propagate.
+        # Tier 3: layout drops at this node — don't propagate.
 
     gm.recompile()
 

@@ -196,7 +196,10 @@ def _dispatch_tier1(func, args, kwargs):
     layout = lt._layout
     phys = lt._is_physical
     result = func(*_unwrap_args(args), **{k: _unwrap(v) for k, v in kwargs.items()})
-    if isinstance(result, torch.Tensor):
+    # Only propagate layout when output shape matches input (pointwise).
+    # Dim-reductions change shape, so layout doesn't propagate, but
+    # the computation is still correct on the physical data.
+    if isinstance(result, torch.Tensor) and result.shape == lt.shape:
         return LegoTensor(result, layout, phys)
     return result
 
@@ -230,9 +233,27 @@ def _dispatch_tier3(func, args, kwargs):
     return func(*_unwrap_args(args), **{k: _unwrap(v) for k, v in kwargs.items()})
 
 
+_TIER4_MAP: dict = {}
+
+
 def _dispatch_tier4(func, args, kwargs):
-    """Tier 4 stub — runs standard op until Phase 1 registers LEGO kernels."""
-    return func(*_unwrap_args(args), **{k: _unwrap(v) for k, v in kwargs.items()})
+    """Tier 4: redirect to lego::* op if registered, else standard op."""
+    if not _TIER4_MAP:
+        _populate_tier4_map()
+    lego_op = _TIER4_MAP.get(func)
+    raw_args = _unwrap_args(args)
+    raw_kwargs = {k: _unwrap(v) for k, v in kwargs.items()}
+    if lego_op is not None:
+        return lego_op(*raw_args, **raw_kwargs)
+    return func(*raw_args, **raw_kwargs)
+
+
+def _populate_tier4_map():
+    import lego.torch.ops  # noqa: F401 — ensures lego::mm/bmm are registered
+    aten = torch.ops.aten
+    _TIER4_MAP[aten.mm.default] = torch.ops.lego.mm
+    _TIER4_MAP[aten.bmm.default] = torch.ops.lego.bmm
+    _TIER4_MAP[aten.addmm.default] = None  # no lego:: equivalent yet
 
 
 # ============================================================================
@@ -269,6 +290,11 @@ def _populate():
         aten._to_copy.default,
         aten.dropout.default,
         aten.native_dropout.default,
+        # Dim-reductions: correct on physical data; layout won't propagate
+        # because output shape changes (handled by shape check in _dispatch_tier1).
+        aten.sum.dim_IntList,
+        aten.mean.dim,
+        aten.prod.dim_int,
     ])
 
     _TIER2.update([

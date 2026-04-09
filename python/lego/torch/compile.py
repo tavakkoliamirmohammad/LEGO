@@ -14,12 +14,34 @@ import torch
 from torch._dynamo import register_backend
 
 
+# ============================================================================
+# Path B: Register lego::* ops as inductor-compilable fallback kernels.
+# ============================================================================
+
+def _register_lego_lowerings():
+    try:
+        from torch._inductor.lowering import make_fallback
+        import lego.torch.ops  # noqa: F401
+        make_fallback(torch.ops.lego.mm)
+        make_fallback(torch.ops.lego.bmm)
+    except (ImportError, AttributeError):
+        pass  # inductor internals changed — degrade gracefully
+
+
+_register_lego_lowerings()
+
+
+# ============================================================================
+# Backend
+# ============================================================================
+
 @register_backend
 def lego(gm, example_inputs):
     """LEGO torch.compile backend."""
     from torch._inductor.compile_fx import compile_fx
     from .tensor import LegoTensor
     from .planner import plan_layouts
+    from .fusion import materialize_layouts
 
     # 1. Extract layout metadata from LegoTensor inputs
     layout_map = {}
@@ -32,15 +54,20 @@ def lego(gm, example_inputs):
     if layout_map:
         plan_layouts(gm, layout_map)
 
-    # 3. Unwrap LegoTensors so inductor sees plain tensors
-    unwrapped = [inp._data if isinstance(inp, LegoTensor) else inp for inp in example_inputs]
+    # 3. Materialize virtual layouts → physical order for inductor (Path C)
+    unwrapped = materialize_layouts(example_inputs, layout_map, placeholders)
 
     # 4. Compile with inductor
     compiled_fn = compile_fx(gm, unwrapped)
 
-    # 5. Wrapper: unwrap LegoTensor inputs at call time
+    # 5. Wrapper: unwrap and materialize LegoTensor inputs at call time
     def wrapper(*args):
-        plain = [a._data if isinstance(a, LegoTensor) else a for a in args]
+        plain = []
+        for a in args:
+            if isinstance(a, LegoTensor):
+                plain.append(a._data)
+            else:
+                plain.append(a)
         return compiled_fn(*plain)
 
     return wrapper

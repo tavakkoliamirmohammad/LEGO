@@ -30,7 +30,8 @@ def make_index_function(layout):
     """
     from lego.backend.compiler import LayoutCompiler
 
-    compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
+    base = layout._base if hasattr(layout, "_base") else layout
+    compiler = LayoutCompiler(base._layout, base._shape, "i64")
     fwd, inv = compiler.get_permutation_table()
     return np.ascontiguousarray(fwd), np.ascontiguousarray(inv)
 
@@ -44,3 +45,32 @@ def make_index_tensor(layout, device="cpu"):
         torch.from_numpy(fwd).to(device),
         torch.from_numpy(inv).to(device),
     )
+
+
+def materialize_layouts(example_inputs, layout_map, placeholders):
+    """Convert virtually-annotated inputs to physical order for inductor.
+
+    For inputs with a non-identity virtual layout, applies the permutation
+    table so inductor generates code accessing data in LEGO order.
+
+    Returns a new list of (unwrapped, possibly rearranged) inputs.
+    """
+    import torch
+    from .tensor import LegoTensor
+
+    result = []
+    for inp in example_inputs:
+        if isinstance(inp, LegoTensor) and not inp._is_physical:
+            layout = inp.lego_layout
+            try:
+                fwd, _ = make_index_function(layout)
+                fwd_t = torch.from_numpy(fwd).to(inp.device)
+                rearranged = inp._data.reshape(-1)[fwd_t].reshape(inp.shape)
+                result.append(rearranged)
+            except Exception:
+                result.append(inp._data)
+        elif isinstance(inp, LegoTensor):
+            result.append(inp._data)
+        else:
+            result.append(inp)
+    return result

@@ -219,7 +219,8 @@ class TestTier3:
 # ============================================================================
 
 class TestTier4:
-    def test_mm_correctness(self):
+    def test_mm_dispatches_to_lego_op(self):
+        """mm on annotated tensors routes through lego::mm."""
         layout = ColMajor((4, 4))
         a = annotate(torch.randn(4, 4), layout)
         b = annotate(torch.randn(4, 4), layout)
@@ -227,13 +228,13 @@ class TestTier4:
         expected = torch.mm(a._data, b._data)
         torch.testing.assert_close(c, expected)
 
-    def test_mm_returns_plain_tensor(self):
-        """Until Phase 1, mm returns plain tensor (no layout propagation)."""
+    def test_bmm_dispatches_to_lego_op(self):
         layout = ColMajor((4, 4))
-        a = annotate(torch.randn(4, 4), layout)
-        b = annotate(torch.randn(4, 4), layout)
-        c = torch.mm(a, b)
-        assert not isinstance(c, LegoTensor)
+        a = annotate(torch.randn(2, 4, 4), layout)
+        b = annotate(torch.randn(2, 4, 4), layout)
+        c = torch.bmm(a, b)
+        expected = torch.bmm(a._data, b._data)
+        torch.testing.assert_close(c, expected)
 
 
 # ============================================================================
@@ -322,3 +323,51 @@ class TestEndToEnd:
         y = model(x)
         assert isinstance(y, LegoTensor)
         assert y.shape == (8, 4)
+
+
+# ============================================================================
+# Tier 2 expansion
+# ============================================================================
+
+class TestTier2Expansion:
+    def test_contiguous_preserves_layout(self):
+        """contiguous() on contiguous data preserves layout (Tier 1 clone)."""
+        layout = ColMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+        # On contiguous data, .contiguous() dispatches as clone (Tier 1)
+        y = x.clone()
+        assert isinstance(y, LegoTensor)
+        assert y.lego_layout is layout
+
+    def test_contiguous_after_transpose(self):
+        """contiguous() after transpose preserves (transposed) layout via clone."""
+        layout = ColMajor((4, 8))
+        x = annotate(torch.randn(4, 8), layout)
+        y = x.t()
+        # .contiguous() on non-contiguous dispatches as aten.clone (Tier 1)
+        z = y.contiguous()
+        assert isinstance(z, LegoTensor)
+        assert z.shape == (8, 4)
+
+
+# ============================================================================
+# Dim-reductions
+# ============================================================================
+
+class TestDimReductions:
+    def test_sum_dim(self):
+        """sum(x, dim=k) on annotated tensor is correct."""
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4)
+        ax = annotate(x, layout)
+        result = torch.sum(ax, dim=1)
+        expected = torch.sum(x, dim=1)
+        torch.testing.assert_close(result, expected)
+
+    def test_mean_dim(self):
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4)
+        ax = annotate(x, layout)
+        result = torch.mean(ax, dim=0)
+        expected = torch.mean(x, dim=0)
+        torch.testing.assert_close(result, expected)

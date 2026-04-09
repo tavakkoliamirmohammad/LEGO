@@ -102,3 +102,30 @@ class TestLegoBMM:
             b = torch.randn(2, 8, 3)
             c = torch.ops.lego.bmm(a, b)
             assert c.shape == (2, 4, 3)
+
+
+class TestTorchOp:
+    def test_register_custom_op(self):
+        """@lego.torch_op registers a callable custom op."""
+        from lego.torch import torch_op
+
+        @torch_op("lego::test_add")
+        def test_add(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            return a + b
+
+        result = torch.ops.lego.test_add(torch.ones(2), torch.ones(2))
+        torch.testing.assert_close(result, torch.full((2,), 2.0))
+
+    def test_torch_op_fake_tensor(self):
+        """Custom op works with FakeTensorMode via shape inference."""
+        from lego.torch import torch_op
+
+        @torch_op("lego::test_scale")
+        def test_scale(x: torch.Tensor) -> torch.Tensor:
+            return x * 2.0
+
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        with FakeTensorMode():
+            x = torch.randn(3, 4)
+            y = torch.ops.lego.test_scale(x)
+            assert y.shape == (3, 4)

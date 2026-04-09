@@ -19,6 +19,7 @@ import torch
 import numpy as np
 from .tensor import LegoTensor, _warned_ops  # noqa: F401
 from . import ops as _ops  # noqa: F401  — registers lego::mm, lego::bmm
+from .ops import torch_op  # noqa: F401
 
 
 # ============================================================================
