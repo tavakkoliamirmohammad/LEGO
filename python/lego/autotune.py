@@ -16,11 +16,19 @@ import os
 import time
 import numpy as np
 
-try:
-    import torch
-    _HAS_TORCH = True
-except ImportError:
-    _HAS_TORCH = False
+class _LazyTorchFlag:
+    _val = None
+    def __bool__(self):
+        if self._val is None:
+            try:
+                import torch
+                globals()['torch'] = torch
+                type(self)._val = True
+            except ImportError:
+                type(self)._val = False
+        return self._val
+
+_HAS_TORCH = _LazyTorchFlag()
 
 
 _CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "lego")

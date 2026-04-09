@@ -223,7 +223,7 @@ private:
       // 0-dimensional layout: flat_input can only be 0
       Value eqZero = smt::EqOp::create(b, genP.getLoc(), flatInput, zero);
       smt::AssertOp::create(b, genP.getLoc(), eqZero);
-    } else if (!dims.empty()) {
+    } else {
       SmallVector<Value> dimValues;
       for (Value d : dims) {
         Value dimVal = builder.getOrCreate(d);

@@ -6,11 +6,9 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SMT/IR/SMTOps.h"
-#include "mlir/Target/SMTLIB/ExportSMTLIB.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/AsmState.h"
 
 using namespace mlir;
@@ -32,7 +30,6 @@ struct LegoVerifyCoalescingPassImpl
     getContext().getOrLoadDialect<smt::SMTDialect>();
     ModuleOp module = getOperation();
 
-    // Find all lego.apply operations
     SmallVector<ApplyOp> applyOps;
     module.walk([&](ApplyOp apply) { applyOps.push_back(apply); });
 
@@ -42,38 +39,25 @@ struct LegoVerifyCoalescingPassImpl
     unsigned nextId = 0;
 
     for (auto apply : applyOps) {
-      // Check if this apply is used in a memory access pattern
-      // For simplicity, we verify coalescing for all applies
-      // In practice, you'd annotate which applies correspond to global memory
       if (failed(verifyCoalescing(apply, state, nextId))) {
-        // Don't signal pass failure - just emit warnings
-        // This is because coalescing is a performance property, not correctness
+        // Performance property — emit warnings, don't signal pass failure.
       }
     }
   }
 
 private:
-  // Verify that a warp of WARP_SIZE threads produces coalesced accesses
   LogicalResult verifyCoalescing(ApplyOp apply, AsmState &state, unsigned &nextId) {
+    int WARP_SIZE = warpSize.getValue();
     SMTSolverContext smtCtx(apply.getLoc(), state, nextId);
     OpBuilder &b = *smtCtx.b;
-    SMTBuilder &builder = *smtCtx.builder;
 
-    // Model: For a 1D thread layout, threadIdx maps to layout indices
-    // We'll verify the simple case: threadIdx → (threadIdx, 0) for 2D layouts
-    // Or threadIdx → threadIdx for 1D layouts
 
-    size_t numIndices = apply.getIndices().size();
-
-    // Warp size
-    int WARP_SIZE = warpSize.getValue();
-
-    // Create symbolic variables for the base thread ID
-    std::string baseThreadVarName = "base_thread";
-    Value baseThread = smt::DeclareFunOp::create(
-        b, apply.getLoc(),
-        Type(b.getType<smt::IntType>()),
-        b.getStringAttr(baseThreadVarName));
+    Value baseThread;
+    SmallVector<Value> addresses;
+    if (failed(computeWarpAddresses(apply, apply.getLayout(),
+                                    apply.getIndices(), smtCtx, state,
+                                    nextId, WARP_SIZE, baseThread, addresses)))
+      return success();
 
     // Constrain base_thread >= 0 (thread IDs are non-negative)
     Value zero = smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(0));
@@ -81,71 +65,7 @@ private:
         b, apply.getLoc(), smt::IntPredicate::ge, baseThread, zero);
     smt::AssertOp::create(b, apply.getLoc(), baseGeZero);
 
-    // Get the layout and check it's a gen_p
-    GenPOp genP = dyn_cast_or_null<GenPOp>(apply.getLayout().getDefiningOp());
-    if (!genP || genP.getBody().empty()) {
-      // Cannot verify non-gen_p layouts yet
-      return success();
-    }
-
-    // Compute addresses for all 32 threads
-    SmallVector<Value> addresses;
-    SmallVector<std::string> addrVarNames;
-
-    for (int t = 0; t < WARP_SIZE; ++t) {
-      // We'll create a fresh builder context for each thread
-      DenseMap<Value, Value> threadValMap;
-
-      // Map the base thread parameter to (baseThread + t)
-      Value tConst = smt::IntConstantOp::create(
-          b, apply.getLoc(), b.getI64IntegerAttr(t));
-      Value threadId = smt::IntAddOp::create(
-          b, apply.getLoc(), ValueRange{baseThread, tConst});
-
-      // Map function arguments to thread-specific values
-      auto parentFunc = apply->getParentOfType<func::FuncOp>();
-      if (parentFunc) {
-        bool found = false;
-        
-        // Find the argument with the `lego.thread_id` attribute
-        for (BlockArgument arg : parentFunc.getArguments()) {
-          if (parentFunc.getArgAttr(arg.getArgNumber(), "lego.thread_id")) {
-            threadValMap[arg] = threadId;
-            found = true;
-            break;
-          }
-        }
-        
-        if (!found) {
-          apply.emitWarning("Could not find a block argument with 'lego.thread_id' attribute in parent function. Verification might not be accurate.");
-        }
-      }
-
-      // Build index values for this thread using a helper
-      SMTBuilder threadBuilder(b, state, nextId);
-      threadBuilder.valMap = threadValMap;
-
-      SmallVector<Value> concreteIndices;
-      for (Value idx : apply.getIndices()) {
-        Value smtIdx = threadBuilder.getOrCreate(idx);
-        concreteIndices.push_back(smtIdx);
-      }
-
-      // Compute flat index using the layout's apply region
-      SmallVector<Value> flatResults;
-      threadBuilder.buildRegion(genP.getBody(), concreteIndices, flatResults);
-      if (flatResults.size() != 1) {
-        return success();
-      }
-
-      addresses.push_back(flatResults[0]);
-      addrVarNames.push_back("addr_" + std::to_string(t));
-    }
-
-    // Verify property: addresses are sequential (unit stride)
-    // For i in [0, WARP_SIZE-1]: addr[i+1] - addr[i] = 1
-    // If NOT true, assert the negation and check SAT
-
+    // Verify: addresses are sequential (unit stride).
     SmallVector<Value> nonSequential;
     for (int t = 0; t < WARP_SIZE - 1; ++t) {
       Value diff = smt::IntSubOp::create(
@@ -157,7 +77,7 @@ private:
       nonSequential.push_back(notUnitStride);
     }
 
-    // Declare named variables for addresses (BEFORE exporting!)
+    // Named variables for counter-example readability.
     for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
       Value namedAddr = smt::DeclareFunOp::create(
           b, apply.getLoc(),
@@ -172,22 +92,18 @@ private:
 
     SmallVector<std::string> allVars;
     allVars.push_back("base_thread");
-    // Only request get-value for threads with declared named variables (0-7)
-    for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
+    for (int t = 0; t < 8 && t < WARP_SIZE; ++t)
         allVars.push_back("addr_" + std::to_string(t));
-    }
 
     // Coalescing formulas span WARP_SIZE threads — allow more time.
     SMTResult result = smtCtx.checkSatisfiability(allVars, /*timeoutMs=*/120000);
 
     if (result.isSat) {
       std::string warnMsg = "Layout may produce non-coalesced memory accesses (unit stride not guaranteed)";
-      if (result.model.count(baseThreadVarName)) {
+      if (result.model.count("base_thread")) {
         warnMsg += "\n  Counter-example starting at thread: " +
-                   std::to_string(result.model[baseThreadVarName]);
+                   std::to_string(result.model["base_thread"]);
       }
-
-      // Show sample of addresses to illustrate the problem
       warnMsg += "\n  Sample addresses (first 8 threads):";
       for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
         std::string addrVar = "addr_" + std::to_string(t);
@@ -197,11 +113,9 @@ private:
         }
       }
       warnMsg += "\n  (For coalescing, addresses should be consecutive: 0, 1, 2, 3, ...)";
-
       apply.emitWarning(warnMsg);
       return failure();
     } else if (result.isUnsat) {
-      // Coalescing property verified!
       return success();
     } else {
       apply.emitWarning("Coalescing check returned unknown");

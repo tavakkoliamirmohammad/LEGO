@@ -1,5 +1,7 @@
 #include "Lego/SMTUtils.h"
+#include "Lego/LegoOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SMT/IR/SMTOps.h"
 #include "mlir/Target/SMTLIB/ExportSMTLIB.h"
 #include <sys/wait.h>
@@ -15,6 +17,22 @@ namespace lego {
 
 std::string SMTBuilder::getSSAName(Value v) {
   return "v" + std::to_string(nextId++);
+}
+
+Value SMTBuilder::buildTruncDiv(Value a, Value b, Location loc) {
+  // C-semantics signed division (truncation toward zero):
+  //   trunc_div(a, b) = sign(a)*sign(b) * (|a| div |b|)
+  Value zero = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(0));
+  Value aGeZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::ge, a, zero);
+  Value bGtZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::gt, b, zero);
+  Value absA = smt::IteOp::create(builder, loc, aGeZero, a,
+               smt::IntSubOp::create(builder, loc, zero, a));
+  Value absB = smt::IteOp::create(builder, loc, bGtZero, b,
+               smt::IntSubOp::create(builder, loc, zero, b));
+  Value posQuot = smt::IntDivOp::create(builder, loc, absA, absB);
+  Value negQuot = smt::IntSubOp::create(builder, loc, zero, posQuot);
+  Value sameSign = smt::EqOp::create(builder, loc, aGeZero, bGtZero);
+  return smt::IteOp::create(builder, loc, sameSign, posQuot, negQuot);
 }
 
 Value SMTBuilder::getOrCreate(Value v) {
@@ -55,47 +73,14 @@ Value SMTBuilder::getOrCreate(Value v) {
     // so Euclidean div matches unsigned semantics when operands >= 0.
     valMap[v] = smt::IntDivOp::create(builder, loc, valMap[divOp.getLhs()], valMap[divOp.getRhs()]);
   } else if (auto divSIOp = dyn_cast<arith::DivSIOp>(defOp)) {
-    // Signed division truncates toward zero (C semantics), but SMT-LIB div
-    // is Euclidean (rounds toward negative infinity). Must handle all four
-    // sign combinations of (a, b):
-    //   trunc_div(a, b) = sign(a)*sign(b) * (|a| div |b|)
-    // Encoded as:
-    //   absA = ite(a >= 0, a, -a),  absB = ite(b > 0, b, -b)
-    //   posQuot = absA div absB
-    //   result = ite((a >= 0) == (b > 0), posQuot, -posQuot)
-    Value a = valMap[divSIOp.getLhs()];
-    Value bVal = valMap[divSIOp.getRhs()];
-    Value zero = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(0));
-    Value aGeZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::ge, a, zero);
-    Value bGtZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::gt, bVal, zero);
-    Value negA = smt::IntSubOp::create(builder, loc, zero, a);
-    Value negB = smt::IntSubOp::create(builder, loc, zero, bVal);
-    Value absA = smt::IteOp::create(builder, loc, aGeZero, a, negA);
-    Value absB = smt::IteOp::create(builder, loc, bGtZero, bVal, negB);
-    Value posQuot = smt::IntDivOp::create(builder, loc, absA, absB);
-    Value negQuot = smt::IntSubOp::create(builder, loc, zero, posQuot);
-    // Same sign => positive result, different sign => negative result
-    Value sameSign = smt::EqOp::create(builder, loc, aGeZero, bGtZero);
-    valMap[v] = smt::IteOp::create(builder, loc, sameSign, posQuot, negQuot);
+    valMap[v] = buildTruncDiv(valMap[divSIOp.getLhs()], valMap[divSIOp.getRhs()], loc);
   } else if (auto remOp = dyn_cast<arith::RemUIOp>(defOp)) {
-    // Unsigned remainder: Euclidean mod matches when operands >= 0.
     valMap[v] = smt::IntModOp::create(builder, loc, valMap[remOp.getLhs()], valMap[remOp.getRhs()]);
   } else if (auto remSIOp = dyn_cast<arith::RemSIOp>(defOp)) {
     // Signed remainder (C semantics): a - trunc_div(a, b) * b
-    // trunc_div uses absolute values, same as DivSIOp above.
     Value a = valMap[remSIOp.getLhs()];
     Value bVal = valMap[remSIOp.getRhs()];
-    Value zero = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(0));
-    Value aGeZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::ge, a, zero);
-    Value bGtZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::gt, bVal, zero);
-    Value negA = smt::IntSubOp::create(builder, loc, zero, a);
-    Value negB = smt::IntSubOp::create(builder, loc, zero, bVal);
-    Value absA = smt::IteOp::create(builder, loc, aGeZero, a, negA);
-    Value absB = smt::IteOp::create(builder, loc, bGtZero, bVal, negB);
-    Value posQuot = smt::IntDivOp::create(builder, loc, absA, absB);
-    Value negQuot = smt::IntSubOp::create(builder, loc, zero, posQuot);
-    Value sameSign = smt::EqOp::create(builder, loc, aGeZero, bGtZero);
-    Value truncDiv = smt::IteOp::create(builder, loc, sameSign, posQuot, negQuot);
+    Value truncDiv = buildTruncDiv(a, bVal, loc);
     Value prod = smt::IntMulOp::create(builder, loc, ValueRange{truncDiv, bVal});
     valMap[v] = smt::IntSubOp::create(builder, loc, a, prod);
   } else if (auto cmpOp = dyn_cast<arith::CmpIOp>(defOp)) {
@@ -359,22 +344,17 @@ SMTResult runZ3WithModel(const std::string &smtLib, unsigned timeoutMs) {
   // Check if Z3 exited abnormally (crash, missing binary, signal)
   if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
     if (output.empty()) {
-      // Z3 likely crashed or was not found — treat as unknown with note
       result.isUnknown = true;
       return result;
     }
-    // Non-zero exit but has output — Z3 may have printed sat/unsat before error,
-    // fall through to normal parsing.
   }
 
-  // Parse the result — match on line boundaries to avoid false matches
-  // from variable names containing "sat" or "unsat".
+  // Parse the result — match on line boundaries to avoid false matches.
   bool foundUnsat = false;
   bool foundSat = false;
   std::istringstream lines(output);
   std::string line;
   while (std::getline(lines, line)) {
-    // Trim whitespace
     size_t start = line.find_first_not_of(" \t\r\n");
     if (start == std::string::npos) continue;
     std::string trimmed = line.substr(start);
@@ -444,7 +424,6 @@ SMTResult runZ3WithModel(const std::string &smtLib, unsigned timeoutMs) {
             if (errno == 0 && endPtr != valueStr.c_str() && !varName.empty()) {
               if (isNegative) value = -value;
               result.model[varName] = value;
-              // fprintf(stderr, "  Parsed: %s = %lld\n", varName.c_str(), value);
             }
           }
 
@@ -470,6 +449,65 @@ std::string generateGetValueCommands(const SmallVector<std::string> &varNames) {
   }
   commands += "))\n";
   return commands;
+}
+
+LogicalResult computeWarpAddresses(
+    Operation *apply, Value layout, ValueRange indices,
+    SMTSolverContext &smtCtx, AsmState &state, unsigned &nextId,
+    int warpSize, Value &baseThread, SmallVectorImpl<Value> &addresses) {
+  OpBuilder &b = *smtCtx.b;
+  Location loc = apply->getLoc();
+
+  // Layout must be a GenPOp with a non-empty body.
+  auto genP = dyn_cast_or_null<GenPOp>(layout.getDefiningOp());
+  if (!genP || genP.getBody().empty())
+    return failure();
+
+  // Symbolic base_thread variable.
+  baseThread = smt::DeclareFunOp::create(
+      b, loc, Type(b.getType<smt::IntType>()),
+      b.getStringAttr("base_thread"));
+
+  // Find the lego.thread_id argument in the enclosing func.
+  auto parentFunc = apply->getParentOfType<func::FuncOp>();
+  std::optional<BlockArgument> threadArg;
+  if (parentFunc) {
+    for (BlockArgument arg : parentFunc.getArguments()) {
+      if (parentFunc.getArgAttr(arg.getArgNumber(), "lego.thread_id")) {
+        threadArg = arg;
+        break;
+      }
+    }
+    if (!threadArg)
+      apply->emitWarning("Could not find a block argument with "
+                         "'lego.thread_id' attribute in parent function. "
+                         "Verification might not be accurate.");
+  }
+
+  addresses.clear();
+  for (int t = 0; t < warpSize; ++t) {
+    Value tConst = smt::IntConstantOp::create(b, loc, b.getI64IntegerAttr(t));
+    Value threadId = smt::IntAddOp::create(b, loc, ValueRange{baseThread, tConst});
+
+    DenseMap<Value, Value> threadValMap;
+    if (threadArg)
+      threadValMap[*threadArg] = threadId;
+
+    SMTBuilder threadBuilder(b, state, nextId);
+    threadBuilder.valMap = threadValMap;
+
+    SmallVector<Value> concreteIndices;
+    for (Value idx : indices)
+      concreteIndices.push_back(threadBuilder.getOrCreate(idx));
+
+    SmallVector<Value> flatResults;
+    threadBuilder.buildRegion(genP.getBody(), concreteIndices, flatResults);
+    if (flatResults.size() != 1)
+      return failure();
+
+    addresses.push_back(flatResults[0]);
+  }
+  return success();
 }
 
 } // namespace lego

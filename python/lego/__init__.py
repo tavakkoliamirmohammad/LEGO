@@ -13,7 +13,12 @@ from .frontends.python_mlir import (
     Batched, BatchedLayout, LegoArray,
     row, col, reg_p, order_by, tile_by, group_by, gen_p,
 )
-from .backend.torch_tensor import LegoTensor, as_lego_tensor
+# LegoTensor / as_lego_tensor require torch. Import conditionally to
+# avoid pulling torch (~4s) for non-torch workflows.
+import sys as _sys2
+if 'torch' in _sys2.modules:
+    from .backend.torch_tensor import LegoTensor, as_lego_tensor
+del _sys2
 from .frontends import rust_gen, fortran_gen, cxx_gen
 from .frontends import julia_gen, cuda_c_gen, js_gen, glsl_gen
 from .autotune import autotune
@@ -70,8 +75,12 @@ def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
     )
 
 
-# Register torch.compile "lego" backend (if torch available)
-try:
-    from .backend import fx_backend as _fx_backend  # noqa: F401
-except ImportError:
-    pass
+# Register torch.compile "lego" backend — only if torch is already
+# loaded, to avoid a ~4s import penalty for non-torch workflows.
+import sys as _sys
+if 'torch' in _sys.modules:
+    try:
+        from .backend import fx_backend as _fx_backend  # noqa: F401
+    except ImportError:
+        pass
+del _sys

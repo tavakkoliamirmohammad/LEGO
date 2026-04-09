@@ -34,3 +34,35 @@ class DSLAdapter(ABC):
     def get_rewriter_options(self) -> dict:
         """Return DSL-specific options for the rewriter. Default: empty."""
         return {}
+
+
+class SourceGenAdapter(DSLAdapter):
+    """Concrete adapter for source-to-source code generation.
+
+    All source-gen frontends (C++, CUDA C, Fortran, GLSL, JS, Julia, Rust)
+    share identical behaviour: no decorator unwrapping, no runtime vars,
+    and compile_and_wrap just returns the source text.  Only the code
+    printer differs.
+    """
+
+    def __init__(self, printer):
+        self._printer = printer
+
+    def unwrap(self, fn):
+        return fn, fn, []
+
+    def find_runtime_vars(self, func_def):
+        return set()
+
+    def get_code_printer(self):
+        return self._printer
+
+    def compile_and_wrap(self, new_source, tree, original_fn, wrappers,
+                         return_source=False):
+        return new_source
+
+
+def source_generate(fn, printer, **kwargs):
+    """Generate source code from a function with LEGO layout expressions."""
+    from lego.rewriter import rewrite
+    return rewrite(fn, SourceGenAdapter(printer), return_source=True, **kwargs)

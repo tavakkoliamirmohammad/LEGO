@@ -46,11 +46,21 @@ def _check_layout_invertible(layout):
         for obj in layout.objects:
             _check_layout_invertible(obj)
 
-try:
-    import torch
-    _HAS_TORCH = True
-except ImportError:
-    _HAS_TORCH = False
+class _LazyTorchCheck:
+    """Defer ``import torch`` until the first isinstance check."""
+    _result = None
+    def __bool__(self):
+        if self._result is None:
+            try:
+                import torch
+                # Inject into the enclosing module so ``torch.Tensor`` works.
+                globals()['torch'] = torch
+                type(self)._result = True
+            except ImportError:
+                type(self)._result = False
+        return self._result
+
+_HAS_TORCH = _LazyTorchCheck()
 
 
 # ============================================================================

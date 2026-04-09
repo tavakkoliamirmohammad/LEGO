@@ -37,7 +37,6 @@ static ParseResult parseGenPRegion(OpAsmParser &parser, Region &region) {
 }
 
 #include "Lego/LegoUtils.h"
-#include <numeric>
 
 static ParseResult parseNestedTileDims(OpAsmParser &parser,
                                        SmallVectorImpl<OpAsmParser::UnresolvedOperand> &tile_dims,
@@ -102,7 +101,6 @@ static void printNestedTileDims(OpAsmPrinter &printer, Operation *op,
 
 #define GET_OP_CLASSES
 #include "Lego/LegoOps.cpp.inc"
-#include <numeric>
 
 // ============================================================================
 // RegPOp Verification
@@ -149,7 +147,6 @@ LogicalResult TileByOp::verify() {
       return emitOpError("input must be an OrderBy layout");
   }
 
-  auto tileShapeOpt = getTileShape();
   auto tileShapeAttr = getTileShape();
   auto tileShape = extractI64Array(tileShapeAttr);
   
@@ -220,30 +217,20 @@ LogicalResult TileByOp::verify() {
 }
 
 // ============================================================================
-// RowOp Verification
+// RowOp / ColOp Verification (shared)
 // ============================================================================
 
-LogicalResult RowOp::verify() {
-    for (Value v : getDims()) {
+static LogicalResult verifyPositiveDims(Operation *op, ValueRange dims) {
+    for (Value v : dims) {
         APInt d;
         if (matchPattern(v, m_ConstantInt(&d)) && d.getSExtValue() <= 0)
-            return emitOpError("Dimension " + std::to_string(d.getSExtValue()) + " must be strictly positive");
+            return op->emitOpError("Dimension " + std::to_string(d.getSExtValue()) + " must be strictly positive");
     }
     return success();
 }
 
-// ============================================================================
-// ColOp Verification
-// ============================================================================
-
-LogicalResult ColOp::verify() {
-    for (Value v : getDims()) {
-        APInt d;
-        if (matchPattern(v, m_ConstantInt(&d)) && d.getSExtValue() <= 0)
-            return emitOpError("Dimension " + std::to_string(d.getSExtValue()) + " must be strictly positive");
-    }
-    return success();
-}
+LogicalResult RowOp::verify() { return verifyPositiveDims(*this, getDims()); }
+LogicalResult ColOp::verify() { return verifyPositiveDims(*this, getDims()); }
 
 // ============================================================================
 // CastViewOp Verification
