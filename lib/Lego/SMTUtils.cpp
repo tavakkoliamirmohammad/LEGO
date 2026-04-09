@@ -202,9 +202,6 @@ SMTResult runZ3WithModel(const std::string &smtLib) {
 
   result.rawOutput = output;
 
-  // Debug: Print raw Z3 output (temporary)
-  // fprintf(stderr, "=== Z3 RAW OUTPUT ===\n%s\n=== END Z3 OUTPUT ===\n", output.c_str());
-
   // Parse the result
   if (output.find("unsat") != std::string::npos) {
     result.isUnsat = true;
@@ -268,7 +265,6 @@ SMTResult runZ3WithModel(const std::string &smtLib) {
             if (errno == 0 && endPtr != valueStr.c_str() && !varName.empty()) {
               if (isNegative) value = -value;
               result.model[varName] = value;
-              // fprintf(stderr, "  Parsed: %s = %lld\n", varName.c_str(), value);
             }
           }
 

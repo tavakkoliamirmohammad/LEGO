@@ -28,22 +28,19 @@ struct FixedPointSimplificationPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
 
-    for (;;) {
-      // Fingerprint the IR before.
-      OperationFingerPrint before(module);
+    // Build the sub-pipeline once, outside the loop.
+    PassManager subPM(module.getContext());
+    subPM.addPass(createLegoArithSimplificationPass());
+    subPM.addPass(arith::createIntRangeOptimizationsPass());
+    subPM.addPass(createCanonicalizerPass());
+    subPM.addPass(createCSEPass());
 
-      // Run the sub-pipeline.
-      PassManager subPM(module.getContext());
-      subPM.addPass(createLegoArithSimplificationPass());
-      subPM.addPass(arith::createIntRangeOptimizationsPass());
-      subPM.addPass(createCanonicalizerPass());
-      subPM.addPass(createCSEPass());
+    for (;;) {
+      OperationFingerPrint before(module);
       if (failed(subPM.run(module))) {
         signalPassFailure();
         return;
       }
-
-      // Check if anything changed.
       OperationFingerPrint after(module);
       if (before == after)
         break;

@@ -41,6 +41,17 @@
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 
+// Standard dialects used by the LEGO compiler
+#include "mlir-c/Dialect/Arith.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir-c/Dialect/SCF.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir-c/Dialect/MemRef.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+
 // LEGO dialect
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Lego, lego, mlir::lego::LegoDialect)
 
@@ -76,26 +87,11 @@ MlirType mlirLegoViewTypeGetElementType(MlirType type) {
       mlir::cast<mlir::lego::ViewType>(unwrap(type)).getElementType());
 }
 
-// Standard dialects used by the LEGO compiler
-#include "mlir-c/Dialect/Arith.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir-c/Dialect/SCF.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir-c/Dialect/MemRef.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
-
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Arith, arith, mlir::arith::ArithDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(SCF, scf, mlir::scf::SCFDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(MemRef, memref, mlir::memref::MemRefDialect)
-
-// GPU + SPIR-V dialects (needed for lego-to-spirv pipeline, no GPU hardware)
-#include "mlir/Dialect/GPU/IR/GPUDialect.h"
-#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(GPU, gpu, mlir::gpu::GPUDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(SPIRV, spirv, mlir::spirv::SPIRVDialect)
-
-// Math dialect (needed for math.exp etc. in GPU kernels)
-#include "mlir/Dialect/Math/IR/Math.h"
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Math, math, mlir::math::MathDialect)
 
 void legoRegisterPasses() {

@@ -107,6 +107,8 @@ def _extract_launch_metadata(module):
             for block in region.blocks:
                 for child in block:
                     _find_launch(child)
+                    if launch_op is not None:
+                        return
 
     _find_launch(module.operation)
 

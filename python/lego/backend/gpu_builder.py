@@ -112,8 +112,8 @@ class GPUTarget:
     """
     name: str
     pipeline: str
-    default_chip: str
-    default_format: str
+    default_chip: Optional[str] = None
+    default_format: str = "assembly"
     default_features: Optional[str] = None
     tmp_prefix: str = "lego_gpu_"
 
@@ -122,9 +122,15 @@ class GPUTarget:
                         features: Optional[str] = None,
                         opt_level: Optional[int] = None) -> str:
         """Build the ``builtin.module(...)`` pipeline string."""
-        chip = chip or self.default_chip
+        if chip is None and self.default_chip is None and self.name == "cuda":
+            detected_chip, detected_features = _get_cuda_target()
+            chip = detected_chip
+            if features is None:
+                features = detected_features
+        else:
+            chip = chip or self.default_chip
+            features = features or self.default_features
         fmt = format or self.default_format
-        features = features or self.default_features
         opts = f"chip={chip} format={fmt}"
         if features is not None:
             opts += f" features={features}"
@@ -162,14 +168,21 @@ def _detect_cuda_target():
     return "sm_80", "+ptx78"
 
 
-_cuda_chip, _cuda_features = _detect_cuda_target()
+_cuda_target_cache = None
+
+def _get_cuda_target():
+    """Lazily detect CUDA target on first use."""
+    global _cuda_target_cache
+    if _cuda_target_cache is None:
+        _cuda_target_cache = _detect_cuda_target()
+    return _cuda_target_cache
 
 GPUTarget(
     name="cuda",
     pipeline="lego-to-nvvm",
-    default_chip=_cuda_chip,
+    default_chip=None,
     default_format="fatbin",
-    default_features=_cuda_features,
+    default_features=None,
     tmp_prefix="lego_cuda_",
 ).register()
 
