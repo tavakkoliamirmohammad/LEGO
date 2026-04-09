@@ -72,6 +72,10 @@ void buildLegoLowerPipeline(OpPassManager &pm) {
   pm.addPass(createLegoMaterializeAssumeBoundsPass(/*cleanup=*/true));
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+  // Verify memory access properties marked by lego.check ops.
+  // Runs here so Z3 gets simplified arith (after canonicalize+CSE)
+  // but before strength reduction (div/rem encodes better than shift/mask).
+  pm.addPass(createLegoVerifyPass());
   // Strength-reduce power-of-2 divui/remui to shift/mask.
   // Runs after algebraic simplification to avoid interfering with
   // div/rem pattern matchers in the fixed-point loop.
