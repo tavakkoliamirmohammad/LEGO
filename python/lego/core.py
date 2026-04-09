@@ -250,11 +250,10 @@ class OrderBy(LayoutBlock):
         self.perms = perms
         self.chain = [self]
 
-    def OrderBy(self, *perms: LayoutBlock):
+    def then(self, *perms: LayoutBlock):
         new_o = OrderBy(*perms)
         new_o.chain = self.chain + [new_o]
-        self.chain.append(new_o)
-        return self
+        return new_o
 
     def GroupBy(self, group_dims: List[Tuple[Symbol, ...]], user_constraints=[]) -> 'GroupBy':
         return GroupBy(group_dims, self.chain, user_constraints)
