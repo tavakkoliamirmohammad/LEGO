@@ -1,7 +1,7 @@
 """
 SymPy lowering pipeline: SymPy layout expressions → MLIR LEGO dialect → arith → SymPy.
 """
-from lego.core import *
+from lego.core import Row, Col, RegP, GenP, OrderBy, GroupBy, TileByLayout
 import sys
 import threading
 import sympy as sp
