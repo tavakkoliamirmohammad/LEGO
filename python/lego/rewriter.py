@@ -16,7 +16,7 @@ import textwrap
 
 import sympy as sp
 
-from lego.core import LayoutBlock, TileByLayout
+from lego.core import LayoutBlock
 from lego.backend._ops import _LEGO_DEBUG
 from lego.frontends._adapter import DSLAdapter
 
@@ -120,51 +120,15 @@ def _extract_subscript_indices(subscript_node, eval_env):
     return indices
 
 
-def _try_block_ptr_pattern(stmt, eval_env, printer):
+def _try_block_ptr_pattern(stmt, eval_env, printer, adapter):
     """Detect ``var = ptr + L[subscripts]`` and generate make_block_ptr.
+
+    Delegates to *adapter.try_block_ptr_pattern()* for DSL-specific
+    block-ptr metadata extraction.
 
     Returns ``(target_name, code_str, ptr_name, BlockPtrInfo)`` or ``None``.
     """
-    from lego.frontends.triton_jit import extract_block_ptr_metadata
-
-    if not (isinstance(stmt.value, ast.BinOp) and isinstance(stmt.value.op, ast.Add)):
-        return None
-
-    left, right = stmt.value.left, stmt.value.right
-
-    # Try both orderings: ptr + L[...] and L[...] + ptr
-    ptr_node, subscript_node = None, None
-    if isinstance(right, ast.Subscript):
-        ptr_node, subscript_node = left, right
-    elif isinstance(left, ast.Subscript):
-        ptr_node, subscript_node = right, left
-    else:
-        return None
-
-    # The subscript target must be a known TileByLayout
-    if not isinstance(subscript_node.value, ast.Name):
-        return None
-    layout_name = subscript_node.value.id
-    layout = eval_env.get(layout_name)
-    if not isinstance(layout, TileByLayout):
-        return None
-
-    # Extract pointer variable name
-    ptr_name = ast.unparse(ptr_node)
-
-    # Extract and evaluate subscript indices
-    indices = _extract_subscript_indices(subscript_node, eval_env)
-    if indices is None:
-        return None
-
-    # Get structured block_ptr metadata (returns None for incompatible layouts)
-    info = extract_block_ptr_metadata(layout, indices)
-    if info is None:
-        return None
-
-    target_name = stmt.targets[0].id
-    code = _format_make_block_ptr(ptr_name, info, printer)
-    return (target_name, code, ptr_name, info)
+    return adapter.try_block_ptr_pattern(stmt, eval_env, printer)
 
 
 def _extract_loop_start(for_stmt, eval_env):
@@ -334,7 +298,8 @@ class LEGOASTTransformer(ast.NodeTransformer):
 # ---------------------------------------------------------------------------
 
 def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
-                   compile_time_names, opts=None, block_ptr_vars=None):
+                   compile_time_names, opts=None, block_ptr_vars=None,
+                   adapter=None):
     if opts is None:
         opts = {}
     if block_ptr_vars is None:
@@ -361,7 +326,8 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
                 loop_bpv = {}
                 stmt.body = _process_stmts(
                     stmt.body, lego_code, eval_env, printer,
-                    runtime_vars, compile_time_names, opts, loop_bpv)
+                    runtime_vars, compile_time_names, opts, loop_bpv,
+                    adapter)
                 hoisted, stmt.body = _transform_block_ptr_loop(
                     stmt, loop_bpv, eval_env, printer)
                 new_body.extend(hoisted)
@@ -370,7 +336,7 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
                 stmt.body = _process_stmts(stmt.body, lego_code, eval_env,
                                            printer, runtime_vars,
                                            compile_time_names, opts,
-                                           block_ptr_vars)
+                                           block_ptr_vars, adapter)
             new_body.append(stmt)
             continue
 
@@ -380,7 +346,7 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
             stmt.body = _process_stmts(stmt.body, lego_code, eval_env,
                                        printer, runtime_vars,
                                        compile_time_names, opts,
-                                       block_ptr_vars)
+                                       block_ptr_vars, adapter)
             new_body.append(stmt)
             continue
 
@@ -390,11 +356,11 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
             stmt.body = _process_stmts(stmt.body, lego_code, eval_env,
                                        printer, runtime_vars,
                                        compile_time_names, opts,
-                                       block_ptr_vars)
+                                       block_ptr_vars, adapter)
             stmt.orelse = _process_stmts(stmt.orelse, lego_code, eval_env,
                                          printer, runtime_vars,
                                          compile_time_names, opts,
-                                         block_ptr_vars)
+                                         block_ptr_vars, adapter)
             new_body.append(stmt)
             continue
 
@@ -415,7 +381,7 @@ def _process_stmts(stmts, lego_code, eval_env, printer, runtime_vars,
             #     variables (used in tl.load/tl.store) are runtime vars.
             if use_block_ptr and len(stmt.targets) == 1 \
                     and isinstance(stmt.targets[0], ast.Name):
-                bp = _try_block_ptr_pattern(stmt, eval_env, printer)
+                bp = _try_block_ptr_pattern(stmt, eval_env, printer, adapter)
                 if bp is not None:
                     target_name, code, ptr_name, info = bp
                     new_stmt = ast.parse(f"{target_name} = {code}").body[0]
@@ -537,6 +503,7 @@ def rewrite(fn, adapter: DSLAdapter, **kwargs):
     func_def.body = _process_stmts(
         func_def.body, lego_code, eval_env, printer,
         runtime_vars, compile_time_names, opts, block_ptr_vars,
+        adapter,
     )
 
     # Post-process: rewrite tl.load/tl.store for block_ptr variables

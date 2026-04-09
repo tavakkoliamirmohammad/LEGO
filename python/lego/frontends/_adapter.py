@@ -35,6 +35,10 @@ class DSLAdapter(ABC):
         """Return DSL-specific options for the rewriter. Default: empty."""
         return {}
 
+    def try_block_ptr_pattern(self, stmt, eval_env, printer):
+        """Try to match a block-ptr pattern in the AST. Default: no match."""
+        return None
+
 
 class SourceGenAdapter(DSLAdapter):
     """Concrete adapter for source-to-source code generation.

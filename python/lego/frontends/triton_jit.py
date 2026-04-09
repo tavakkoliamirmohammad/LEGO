@@ -250,6 +250,56 @@ class TritonAdapter(DSLAdapter):
     def get_code_printer(self):
         return TritonCodePrinter()
 
+    def try_block_ptr_pattern(self, stmt, eval_env, printer):
+        """Detect ``var = ptr + L[subscripts]`` and generate make_block_ptr.
+
+        Returns ``(target_name, code_str, ptr_name, BlockPtrInfo)`` or ``None``.
+        """
+        from lego.rewriter import (
+            _extract_subscript_indices, _format_make_block_ptr,
+        )
+        from lego.core import TileByLayout
+
+        if not (isinstance(stmt.value, ast.BinOp)
+                and isinstance(stmt.value.op, ast.Add)):
+            return None
+
+        left, right = stmt.value.left, stmt.value.right
+
+        # Try both orderings: ptr + L[...] and L[...] + ptr
+        ptr_node, subscript_node = None, None
+        if isinstance(right, ast.Subscript):
+            ptr_node, subscript_node = left, right
+        elif isinstance(left, ast.Subscript):
+            ptr_node, subscript_node = right, left
+        else:
+            return None
+
+        # The subscript target must be a known TileByLayout
+        if not isinstance(subscript_node.value, ast.Name):
+            return None
+        layout_name = subscript_node.value.id
+        layout = eval_env.get(layout_name)
+        if not isinstance(layout, TileByLayout):
+            return None
+
+        # Extract pointer variable name
+        ptr_name = ast.unparse(ptr_node)
+
+        # Extract and evaluate subscript indices
+        indices = _extract_subscript_indices(subscript_node, eval_env)
+        if indices is None:
+            return None
+
+        # Get structured block_ptr metadata (returns None for incompatible layouts)
+        info = extract_block_ptr_metadata(layout, indices)
+        if info is None:
+            return None
+
+        target_name = stmt.targets[0].id
+        code = _format_make_block_ptr(ptr_name, info, printer)
+        return (target_name, code, ptr_name, info)
+
     def compile_and_wrap(self, new_source, tree, original_fn, wrappers,
                          return_source=False):
         result = write_and_exec_temp_file(
