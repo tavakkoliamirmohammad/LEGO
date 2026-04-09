@@ -31,9 +31,28 @@ class DSLAdapter(ABC):
                          return_source: bool) -> Any:
         """Compile transformed source, re-apply DSL decorators, return result."""
 
-    def get_rewriter_options(self) -> dict:
-        """Return DSL-specific options for the rewriter. Default: empty."""
-        return {}
+    def transform_assignment(self, stmt, eval_env, printer):
+        """Optionally transform an assignment before normal processing.
+
+        Called for every ``ast.Assign`` with a single ``ast.Name`` target.
+        Return an ``(ast_node, eval_updates)`` pair to replace the statement,
+        or ``None`` to let the rewriter handle it normally.
+        ``eval_updates`` is a dict merged into *eval_env*.
+        """
+        return None
+
+    def transform_for_loop(self, for_stmt, body, eval_env, printer):
+        """Optionally transform a for-loop after its body has been processed.
+
+        Return ``(hoisted_stmts, new_body)`` or ``None`` for no transformation.
+        """
+        return None
+
+    def post_process_body(self, func_def):
+        """Final pass over the function body after all statements are processed.
+
+        Modify *func_def* in place. Default: no-op.
+        """
 
 
 class SourceGenAdapter(DSLAdapter):

@@ -1,4 +1,6 @@
 import ast
+import contextlib
+import io
 import os
 import sys
 from dataclasses import dataclass
@@ -202,6 +204,181 @@ class TritonCodePrinter(LEGOPythonCodePrinter):
 
 
 # ---------------------------------------------------------------------------
+# Block-ptr code generation helpers (Triton-specific)
+# ---------------------------------------------------------------------------
+
+def _format_tuple(items, printer):
+    """Format a sequence of SymPy expressions / ints as a Python tuple string."""
+    parts = []
+    for item in items:
+        if isinstance(item, (sp.Expr, sp.Symbol)):
+            parts.append(printer.doprint(item))
+        else:
+            parts.append(str(item))
+    if len(parts) == 1:
+        return f"({parts[0]},)"
+    return f"({', '.join(parts)})"
+
+
+def _format_make_block_ptr(ptr_name, info, printer):
+    """Generate tl.make_block_ptr(...) code string from BlockPtrInfo."""
+    return (
+        f"tl.make_block_ptr(base={ptr_name}, "
+        f"shape={_format_tuple(info.shape, printer)}, "
+        f"strides={_format_tuple(info.strides, printer)}, "
+        f"offsets={_format_tuple(info.offsets, printer)}, "
+        f"block_shape={_format_tuple(info.block_shape, printer)}, "
+        f"order={_format_tuple(info.order, printer)})"
+    )
+
+
+def _extract_subscript_indices(subscript_node, eval_env):
+    """Extract subscript indices from an AST Subscript node.
+
+    Returns a list of SymPy expressions and ``slice`` objects, or ``None``
+    if parsing fails.
+    """
+    slice_node = subscript_node.slice
+    elements = slice_node.elts if isinstance(slice_node, ast.Tuple) else [slice_node]
+
+    indices = []
+    for elt in elements:
+        if isinstance(elt, ast.Slice):
+            indices.append(slice(None))
+        else:
+            try:
+                code = ast.unparse(elt)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    val = eval(code, eval_env)  # noqa: S307
+                indices.append(val)
+            except Exception:
+                return None
+    return indices
+
+
+def _extract_loop_start(for_stmt, eval_env):
+    """Return the start value of a ``for x in range(start, ...)`` loop."""
+    if not isinstance(for_stmt.iter, ast.Call):
+        return sp.Integer(0)
+    call = for_stmt.iter
+    is_range = isinstance(call.func, ast.Name) and call.func.id == 'range'
+    if is_range and len(call.args) >= 2:
+        try:
+            code = ast.unparse(call.args[0])
+            with contextlib.redirect_stdout(io.StringIO()):
+                return eval(code, eval_env)  # noqa: S307
+        except Exception:
+            pass
+    return sp.Integer(0)
+
+
+def _transform_block_ptr_loop(for_stmt, block_ptr_vars, eval_env, printer):
+    """Hoist block_ptr creation before loop and insert ``tl.advance`` at end.
+
+    Returns ``(hoisted_stmts, new_loop_body)`` or ``None``.
+    """
+    loop_var = for_stmt.target.id if isinstance(for_stmt.target, ast.Name) else None
+    if not loop_var or not block_ptr_vars:
+        return None
+
+    loop_var_sym = eval_env.get(loop_var)
+    loop_start = _extract_loop_start(for_stmt, eval_env)
+
+    hoisted = []
+    new_body = []
+    advance_stmts = []
+
+    for stmt in for_stmt.body:
+        var_name = None
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)):
+            var_name = stmt.targets[0].id
+
+        if var_name and var_name in block_ptr_vars:
+            ptr_name, info = block_ptr_vars[var_name]
+
+            has_loop_dep = any(
+                isinstance(o, sp.Expr) and loop_var_sym in o.free_symbols
+                for o in info.offsets
+            )
+
+            if has_loop_dep:
+                initial_offsets = tuple(
+                    sp.simplify(o.subs(loop_var_sym, loop_start))
+                    if isinstance(o, sp.Expr) else o
+                    for o in info.offsets
+                )
+
+                deltas = []
+                for o in info.offsets:
+                    if isinstance(o, sp.Expr) and loop_var_sym in o.free_symbols:
+                        deltas.append(sp.simplify(o.diff(loop_var_sym)))
+                    else:
+                        deltas.append(sp.Integer(0))
+
+                initial_info = BlockPtrInfo(
+                    shape=info.shape, strides=info.strides,
+                    offsets=initial_offsets, block_shape=info.block_shape,
+                    order=info.order, boundary_dims=info.boundary_dims)
+                hoisted_code = _format_make_block_ptr(ptr_name, initial_info, printer)
+                h_stmt = ast.parse(f"{var_name} = {hoisted_code}").body[0]
+                ast.copy_location(h_stmt, stmt)
+                hoisted.append(h_stmt)
+
+                delta_str = _format_tuple(deltas, printer)
+                a_stmt = ast.parse(
+                    f"{var_name} = tl.advance({var_name}, {delta_str})").body[0]
+                ast.copy_location(a_stmt, stmt)
+                advance_stmts.append(a_stmt)
+
+                block_ptr_vars[var_name] = (ptr_name, initial_info)
+                continue
+
+        new_body.append(stmt)
+
+    new_body.extend(advance_stmts)
+    return hoisted, new_body
+
+
+class _BlockPtrLoadRewriter(ast.NodeTransformer):
+    """Rewrite ``tl.load``/``tl.store`` for block_ptr variables.
+
+    Removes ``mask=`` and adds ``boundary_check=`` when needed.
+    """
+
+    def __init__(self, block_ptr_vars):
+        self.block_ptr_vars = block_ptr_vars
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+
+        if not isinstance(node.func, ast.Attribute):
+            return node
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == 'tl'):
+            return node
+        if node.func.attr not in ('load', 'store'):
+            return node
+
+        if not node.args or not isinstance(node.args[0], ast.Name):
+            return node
+        var_name = node.args[0].id
+        if var_name not in self.block_ptr_vars:
+            return node
+
+        _, info = self.block_ptr_vars[var_name]
+
+        node.keywords = [kw for kw in node.keywords if kw.arg != 'mask']
+
+        if info.boundary_dims:
+            boundary_str = ', '.join(str(d) for d in info.boundary_dims)
+            boundary_node = ast.parse(f"({boundary_str},)").body[0].value
+            node.keywords.append(
+                ast.keyword(arg='boundary_check', value=boundary_node))
+
+        return node
+
+
+# ---------------------------------------------------------------------------
 # Triton adapter
 # ---------------------------------------------------------------------------
 
@@ -214,9 +391,7 @@ class TritonAdapter(DSLAdapter):
 
     def __init__(self, use_block_ptr=False):
         self.use_block_ptr = use_block_ptr
-
-    def get_rewriter_options(self):
-        return {'use_block_ptr': self.use_block_ptr}
+        self._block_ptr_vars = {}
 
     def unwrap(self, fn):
         original_fn = fn
@@ -250,14 +425,16 @@ class TritonAdapter(DSLAdapter):
     def get_code_printer(self):
         return TritonCodePrinter()
 
-    def try_block_ptr_pattern(self, stmt, eval_env, printer):
+    def transform_assignment(self, stmt, eval_env, printer):
+        if not self.use_block_ptr:
+            return None
+        return self._try_block_ptr_pattern(stmt, eval_env, printer)
+
+    def _try_block_ptr_pattern(self, stmt, eval_env, printer):
         """Detect ``var = ptr + L[subscripts]`` and generate make_block_ptr.
 
-        Returns ``(target_name, code_str, ptr_name, BlockPtrInfo)`` or ``None``.
+        Returns ``(ast_node, eval_updates)`` or ``None``.
         """
-        from lego.rewriter import (
-            _extract_subscript_indices, _format_make_block_ptr,
-        )
         from lego.core import TileByLayout
 
         if not (isinstance(stmt.value, ast.BinOp)
@@ -266,7 +443,6 @@ class TritonAdapter(DSLAdapter):
 
         left, right = stmt.value.left, stmt.value.right
 
-        # Try both orderings: ptr + L[...] and L[...] + ptr
         ptr_node, subscript_node = None, None
         if isinstance(right, ast.Subscript):
             ptr_node, subscript_node = left, right
@@ -275,7 +451,6 @@ class TritonAdapter(DSLAdapter):
         else:
             return None
 
-        # The subscript target must be a known TileByLayout
         if not isinstance(subscript_node.value, ast.Name):
             return None
         layout_name = subscript_node.value.id
@@ -283,22 +458,36 @@ class TritonAdapter(DSLAdapter):
         if not isinstance(layout, TileByLayout):
             return None
 
-        # Extract pointer variable name
         ptr_name = ast.unparse(ptr_node)
 
-        # Extract and evaluate subscript indices
         indices = _extract_subscript_indices(subscript_node, eval_env)
         if indices is None:
             return None
 
-        # Get structured block_ptr metadata (returns None for incompatible layouts)
         info = extract_block_ptr_metadata(layout, indices)
         if info is None:
             return None
 
         target_name = stmt.targets[0].id
         code = _format_make_block_ptr(ptr_name, info, printer)
-        return (target_name, code, ptr_name, info)
+        new_node = ast.parse(f"{target_name} = {code}").body[0]
+        self._block_ptr_vars[target_name] = (ptr_name, info)
+
+        updates = {target_name: sp.Symbol(target_name, integer=True, positive=True)}
+        return new_node, updates
+
+    def transform_for_loop(self, for_stmt, body, eval_env, printer):
+        if not self.use_block_ptr or not self._block_ptr_vars:
+            return None
+        return _transform_block_ptr_loop(for_stmt, self._block_ptr_vars,
+                                         eval_env, printer)
+
+    def post_process_body(self, func_def):
+        if not self._block_ptr_vars:
+            return
+        rewriter = _BlockPtrLoadRewriter(self._block_ptr_vars)
+        for i, stmt in enumerate(func_def.body):
+            func_def.body[i] = rewriter.visit(stmt)
 
     def compile_and_wrap(self, new_source, tree, original_fn, wrappers,
                          return_source=False):
