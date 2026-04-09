@@ -115,8 +115,6 @@ void legoRegisterPasses() {
   mlir::lego::registerLegoExternalSMTVerifierPass();
   mlir::lego::registerLegoVerifyBijectivityPass();
   mlir::lego::registerLegoVerifyPass();
-  mlir::lego::registerLegoVerifyCoalescingPass();
-  mlir::lego::registerLegoVerifyBankConflictsPass();
   mlir::lego::registerLegoStrengthReductionPass();
 
   // Named pipelines: "lego-lower", "lego-to-llvm", "lego-to-spirv", "lego-to-llvmspirv"
