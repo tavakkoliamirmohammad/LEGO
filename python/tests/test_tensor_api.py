@@ -225,6 +225,14 @@ class TestDescriptorAPI:
         o2 = o1.then(Col(2, 4))       # 2 dims, different sizes
         assert len(o2.chain) == 2
 
+    def test_order_by_then_different_num_elements_same_dims(self):
+        """OrderBy.then() accepts different total elements when dim counts match."""
+        o1 = OrderBy(Row(4, 8))       # 2 dims, 32 elements
+        o2 = o1.then(Col(3, 5))       # 2 dims, 15 elements
+        assert len(o2.chain) == 2
+        assert o1.dims() == (4, 8)
+        assert o2.dims() == (3, 5)
+
     def test_functional_constructors(self):
         """Functional constructors create correct types."""
         r = row(4, 8)
