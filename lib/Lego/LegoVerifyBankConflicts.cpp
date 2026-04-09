@@ -60,34 +60,55 @@ private:
                                     nextId, WARP_SIZE, baseThread, addresses)))
       return success();
 
+    // Constrain base_thread >= 0 (thread IDs are non-negative)
+    Value zero = smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(0));
+    Value baseGeZero = smt::IntCmpOp::create(
+        b, apply.getLoc(), smt::IntPredicate::ge, baseThread, zero);
+    smt::AssertOp::create(b, apply.getLoc(), baseGeZero);
+
     // Bank conflict detection.
     // bank(addr) = (addr * ELEMENT_SIZE / 4) % NUM_BANKS
     Value numBanksConst = smt::IntConstantOp::create(
         b, apply.getLoc(), b.getI64IntegerAttr(NUM_BANKS));
-    Value elementSizeConst = smt::IntConstantOp::create(
-        b, apply.getLoc(), b.getI64IntegerAttr(ELEMENT_SIZE));
-    Value fourConst = smt::IntConstantOp::create(
-        b, apply.getLoc(), b.getI64IntegerAttr(4));
+
+    // Pre-compute bank for each thread. Hoist loop-invariant constants.
+    SmallVector<Value> banks;
+    bool simplified = (ELEMENT_SIZE % 4 == 0);
+    int wordScale = simplified ? ELEMENT_SIZE / 4 : 0;
+    Value scaleConst = (simplified && wordScale != 1)
+        ? smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(wordScale))
+        : Value();
+    Value elementSizeConst = !simplified
+        ? smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(ELEMENT_SIZE))
+        : Value();
+    Value fourConst = !simplified
+        ? smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(4))
+        : Value();
+
+    for (int t = 0; t < WARP_SIZE; ++t) {
+      Value bankInput;
+      if (simplified) {
+        if (wordScale == 1) {
+          bankInput = addresses[t];
+        } else {
+          bankInput = smt::IntMulOp::create(
+              b, apply.getLoc(), ValueRange{addresses[t], scaleConst});
+        }
+      } else {
+        Value byteAddr = smt::IntMulOp::create(
+            b, apply.getLoc(), ValueRange{addresses[t], elementSizeConst});
+        bankInput = smt::IntDivOp::create(b, apply.getLoc(), byteAddr, fourConst);
+      }
+      Value bank = smt::IntModOp::create(
+          b, apply.getLoc(), bankInput, numBanksConst);
+      banks.push_back(bank);
+    }
 
     SmallVector<Value> conflicts;
     for (int i = 0; i < WARP_SIZE; ++i) {
       for (int j = i + 1; j < WARP_SIZE; ++j) {
-        Value byte_addr_i = smt::IntMulOp::create(
-            b, apply.getLoc(), ValueRange{addresses[i], elementSizeConst});
-        Value bank_word_i = smt::IntDivOp::create(
-            b, apply.getLoc(), byte_addr_i, fourConst);
-        Value bank_i = smt::IntModOp::create(
-            b, apply.getLoc(), bank_word_i, numBanksConst);
-
-        Value byte_addr_j = smt::IntMulOp::create(
-            b, apply.getLoc(), ValueRange{addresses[j], elementSizeConst});
-        Value bank_word_j = smt::IntDivOp::create(
-            b, apply.getLoc(), byte_addr_j, fourConst);
-        Value bank_j = smt::IntModOp::create(
-            b, apply.getLoc(), bank_word_j, numBanksConst);
-
         Value sameBank = smt::EqOp::create(
-            b, apply.getLoc(), bank_i, bank_j);
+            b, apply.getLoc(), banks[i], banks[j]);
         Value diffAddr = smt::DistinctOp::create(
             b, apply.getLoc(), ValueRange{addresses[i], addresses[j]});
         Value conflict = smt::AndOp::create(
@@ -105,16 +126,11 @@ private:
       Value eqAddr = smt::EqOp::create(b, apply.getLoc(), namedAddr, addresses[t]);
       smt::AssertOp::create(b, apply.getLoc(), eqAddr);
 
-      Value byte_addr_t = smt::IntMulOp::create(
-          b, apply.getLoc(), ValueRange{addresses[t], elementSizeConst});
-      Value bank_word_t = smt::IntDivOp::create(
-          b, apply.getLoc(), byte_addr_t, fourConst);
-      Value bank = smt::IntModOp::create(b, apply.getLoc(), bank_word_t, numBanksConst);
       Value namedBank = smt::DeclareFunOp::create(
           b, apply.getLoc(),
           Type(b.getType<smt::IntType>()),
           b.getStringAttr("bank_" + std::to_string(t)));
-      Value eqBank = smt::EqOp::create(b, apply.getLoc(), namedBank, bank);
+      Value eqBank = smt::EqOp::create(b, apply.getLoc(), namedBank, banks[t]);
       smt::AssertOp::create(b, apply.getLoc(), eqBank);
     }
 
@@ -123,12 +139,13 @@ private:
 
     SmallVector<std::string> allVars;
     allVars.push_back("base_thread");
-    for (int t = 0; t < WARP_SIZE; ++t) {
+    for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
         allVars.push_back("addr_" + std::to_string(t));
         allVars.push_back("bank_" + std::to_string(t));
     }
 
-    SMTResult result = smtCtx.checkSatisfiability(allVars);
+    // Bank conflict formulas are O(WARP_SIZE^2) with mod/div — allow more time.
+    SMTResult result = smtCtx.checkSatisfiability(allVars, /*timeoutMs=*/120000);
 
     if (result.isSat) {
       std::string warnMsg = "Layout may cause shared memory bank conflicts";

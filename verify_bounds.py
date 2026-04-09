@@ -1,7 +1,4 @@
 import sys
-import z3
-
-import sys
 import subprocess
 
 def verify(smt2_file):

@@ -82,11 +82,16 @@ private:
       inputIndices.push_back(var);
     }
 
-    // Add bounds constraints: 0 <= input_i < dim_i
+    // Add bounds constraints: 0 <= input_i < dim_i, and dim_i > 0
     SmallVector<Value> dims = getLayoutInputDims(genP);
     Value zero = smt::IntConstantOp::create(b, genP.getLoc(), b.getI64IntegerAttr(0));
     for (size_t i = 0; i < numDims && i < dims.size(); ++i) {
       Value dim = builder.getOrCreate(dims[i]);
+
+      // Assert: dim_i > 0 (tensor dimensions are always positive)
+      Value dimPositive = smt::IntCmpOp::create(
+          b, genP.getLoc(), smt::IntPredicate::gt, dim, zero);
+      smt::AssertOp::create(b, genP.getLoc(), dimPositive);
 
       // Assert: input_i >= 0
       Value geZero = smt::IntCmpOp::create(
@@ -214,10 +219,19 @@ private:
 
     // Compute volume = dim[0] * dim[1] * ... * dim[n-1]
     Value volume = nullptr;
-    if (!dims.empty()) {
+    if (dims.empty()) {
+      // 0-dimensional layout: flat_input can only be 0
+      Value eqZero = smt::EqOp::create(b, genP.getLoc(), flatInput, zero);
+      smt::AssertOp::create(b, genP.getLoc(), eqZero);
+    } else {
       SmallVector<Value> dimValues;
       for (Value d : dims) {
-        dimValues.push_back(builder.getOrCreate(d));
+        Value dimVal = builder.getOrCreate(d);
+        dimValues.push_back(dimVal);
+        // Assert: dim > 0 (tensor dimensions are always positive)
+        Value dimPositive = smt::IntCmpOp::create(
+            b, genP.getLoc(), smt::IntPredicate::gt, dimVal, zero);
+        smt::AssertOp::create(b, genP.getLoc(), dimPositive);
       }
       if (dimValues.size() == 1) {
         volume = dimValues[0];

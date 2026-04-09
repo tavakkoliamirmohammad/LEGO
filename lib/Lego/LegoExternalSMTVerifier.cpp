@@ -62,6 +62,14 @@ struct LegoExternalSMTVerifierPassImpl
       for (Value d : dims) builder.getOrCreate(d);
       for (Value idx : apply.getIndices()) builder.getOrCreate(idx);
 
+      // Assert dim > 0 for all symbolic dimensions
+      Value zeroForDims = smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(0));
+      for (Value d : dims) {
+        Value smtDim = builder.getOrCreate(d);
+        Value dimPositive = smt::IntCmpOp::create(b, apply.getLoc(), smt::IntPredicate::gt, smtDim, zeroForDims);
+        smt::AssertOp::create(b, apply.getLoc(), dimPositive);
+      }
+
       for (auto assume : assumes) {
          Value cond = builder.getOrCreate(assume.getCondition());
          smt::AssertOp::create(b, assume.getLoc(), cond);
@@ -82,6 +90,9 @@ struct LegoExternalSMTVerifierPassImpl
       SMTResult result = smtCtx.checkSatisfiability({});
       if (result.isSat) {
           apply.emitError("Out-of-bounds access is possible (proven by Z3)");
+      } else if (result.isUnknown) {
+          apply.emitWarning("Bounds check returned unknown (Z3 timeout or undecidable). "
+                            "Verification result may be incomplete.");
       }
     }
 
@@ -93,6 +104,14 @@ struct LegoExternalSMTVerifierPassImpl
       SmallVector<Value> dims = getLayoutInputDims(inv.getLayout());
       for (Value d : dims) builder.getOrCreate(d);
       builder.getOrCreate(inv.getFlatIndex());
+
+      // Assert dim > 0 for all symbolic dimensions
+      Value zeroForDims = smt::IntConstantOp::create(b, inv.getLoc(), b.getI64IntegerAttr(0));
+      for (Value d : dims) {
+        Value smtDim = builder.getOrCreate(d);
+        Value dimPositive = smt::IntCmpOp::create(b, inv.getLoc(), smt::IntPredicate::gt, smtDim, zeroForDims);
+        smt::AssertOp::create(b, inv.getLoc(), dimPositive);
+      }
 
       for (auto assume : assumes) {
          Value cond = builder.getOrCreate(assume.getCondition());
@@ -116,6 +135,9 @@ struct LegoExternalSMTVerifierPassImpl
       SMTResult result = smtCtx.checkSatisfiability({});
       if (result.isSat) {
           inv.emitError("Out-of-bounds flat index is possible (proven by Z3)");
+      } else if (result.isUnknown) {
+          inv.emitWarning("Inverse bounds check returned unknown (Z3 timeout or undecidable). "
+                          "Verification result may be incomplete.");
       }
     }
 

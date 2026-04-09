@@ -51,12 +51,19 @@ private:
     SMTSolverContext smtCtx(apply.getLoc(), state, nextId);
     OpBuilder &b = *smtCtx.b;
 
+
     Value baseThread;
     SmallVector<Value> addresses;
     if (failed(computeWarpAddresses(apply, apply.getLayout(),
                                     apply.getIndices(), smtCtx, state,
                                     nextId, WARP_SIZE, baseThread, addresses)))
       return success();
+
+    // Constrain base_thread >= 0 (thread IDs are non-negative)
+    Value zero = smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(0));
+    Value baseGeZero = smt::IntCmpOp::create(
+        b, apply.getLoc(), smt::IntPredicate::ge, baseThread, zero);
+    smt::AssertOp::create(b, apply.getLoc(), baseGeZero);
 
     // Verify: addresses are sequential (unit stride).
     SmallVector<Value> nonSequential;
@@ -85,10 +92,11 @@ private:
 
     SmallVector<std::string> allVars;
     allVars.push_back("base_thread");
-    for (int t = 0; t < WARP_SIZE; ++t)
+    for (int t = 0; t < 8 && t < WARP_SIZE; ++t)
         allVars.push_back("addr_" + std::to_string(t));
 
-    SMTResult result = smtCtx.checkSatisfiability(allVars);
+    // Coalescing formulas span WARP_SIZE threads — allow more time.
+    SMTResult result = smtCtx.checkSatisfiability(allVars, /*timeoutMs=*/120000);
 
     if (result.isSat) {
       std::string warnMsg = "Layout may produce non-coalesced memory accesses (unit stride not guaranteed)";
