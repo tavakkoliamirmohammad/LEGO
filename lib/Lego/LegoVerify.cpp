@@ -34,10 +34,34 @@ struct LegoVerifyPassImpl
     if (checkOps.empty())
       return;
 
+    // Merge check ops that reference the same flat index: combine their
+    // property flags so we only build warp addresses once per operand.
+    DenseMap<Value, SmallVector<CheckOp>> byOperand;
+    for (auto checkOp : checkOps)
+      byOperand[checkOp.getFlatIndex()].push_back(checkOp);
+
+    SmallVector<CheckOp> mergedOps;
+    for (auto &[flatIdx, ops] : byOperand) {
+      if (ops.size() == 1) {
+        mergedOps.push_back(ops[0]);
+        continue;
+      }
+      // Merge flags into the first op, erase the rest.
+      CheckOp primary = ops[0];
+      for (unsigned i = 1; i < ops.size(); ++i) {
+        if (ops[i].getCoalescing() && !primary.getCoalescing())
+          primary.setCoalescing(true);
+        if (ops[i].getBankConflictFree() && !primary.getBankConflictFree())
+          primary.setBankConflictFree(true);
+        ops[i].erase();
+      }
+      mergedOps.push_back(primary);
+    }
+
     AsmState state(module);
     unsigned nextId = 0;
 
-    for (auto checkOp : checkOps) {
+    for (auto checkOp : mergedOps) {
       if (checkOp.getCoalescing())
         verifyCoalescing(checkOp, state, nextId);
       if (checkOp.getBankConflictFree())

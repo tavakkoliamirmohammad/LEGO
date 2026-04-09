@@ -259,6 +259,7 @@ def CheckOp : Lego_Op<"check"> {
     DefaultValuedAttr<I64Attr, "4">:$element_size
   );
   let assemblyFormat = "$flat_index attr-dict";
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
