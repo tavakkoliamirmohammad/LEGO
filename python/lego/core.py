@@ -250,8 +250,16 @@ class OrderBy(LayoutBlock):
         self.perms = perms
         self.chain = [self]
 
+    def _dim_product(self):
+        return reduce(lambda a, b: a * b, self.dims(), 1)
+
     def then(self, *perms: LayoutBlock):
         new_o = OrderBy(*perms)
+        if sp.simplify(self._dim_product() - new_o._dim_product()) != 0:
+            raise ValueError(
+                f"Dimension product mismatch in chain: "
+                f"{self._dim_product()} != {new_o._dim_product()}"
+            )
         new_o.chain = self.chain + [new_o]
         return new_o
 

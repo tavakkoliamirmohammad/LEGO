@@ -170,7 +170,7 @@ class TestDescriptorAPI:
     def test_order_by_then_returns_new_object(self):
         """OrderBy.then() returns a new OrderBy, not self."""
         o1 = OrderBy(Row(4, 8))
-        o2 = o1.then(Col(2, 4))
+        o2 = o1.then(Col(8, 4))
         assert o2 is not o1
         assert isinstance(o2, OrderBy)
 
@@ -178,14 +178,14 @@ class TestDescriptorAPI:
         """OrderBy.then() must not modify the original's chain."""
         o1 = OrderBy(Row(4, 8))
         assert len(o1.chain) == 1
-        o1.then(Col(2, 4))
+        o1.then(Col(8, 4))
         assert len(o1.chain) == 1
 
     def test_order_by_then_builds_chain(self):
         """OrderBy.then() accumulates all steps in the chain."""
         o1 = OrderBy(Row(4, 8))
-        o2 = o1.then(Col(2, 4))
-        o3 = o2.then(Row(16, 16))
+        o2 = o1.then(Col(8, 4))
+        o3 = o2.then(Row(2, 16))
         assert len(o1.chain) == 1
         assert len(o2.chain) == 2
         assert len(o3.chain) == 3
@@ -194,23 +194,36 @@ class TestDescriptorAPI:
     def test_order_by_then_preserves_perms(self):
         """Each OrderBy in the chain keeps its own perms."""
         o1 = OrderBy(Row(4, 8))
-        o2 = o1.then(Col(2, 4))
+        o2 = o1.then(Col(8, 4))
         assert o1.perms[0].dims() == (4, 8)
-        assert o2.perms[0].dims() == (2, 4)
+        assert o2.perms[0].dims() == (8, 4)
 
     def test_order_by_then_chain_feeds_group_by(self):
         """GroupBy receives the full chain from a .then() result."""
-        o = OrderBy(Row(4, 8)).then(Col(2, 4))
+        o = OrderBy(Row(4, 8)).then(Col(8, 4))
         gb = o.GroupBy([(4, 8)])
         assert isinstance(gb, GroupBy)
         assert len(gb.objects) == 2
 
     def test_order_by_then_chain_feeds_tile_by(self):
         """TileBy receives the full chain from a .then() result."""
-        o = OrderBy(Row(4, 8)).then(Col(2, 4))
+        o = OrderBy(Row(4, 8)).then(Col(8, 4))
         tb = o.TileBy((4,), (8,))
         assert isinstance(tb, TileByLayout)
         assert len(tb._input_chain) == 2
+
+    def test_order_by_then_rejects_mismatched_products(self):
+        """OrderBy.then() raises ValueError when dimension products differ."""
+        import pytest
+        o = OrderBy(Row(4, 8))  # product = 32
+        with pytest.raises(ValueError, match="Dimension product mismatch"):
+            o.then(Col(2, 4))  # product = 8 != 32
+
+    def test_order_by_then_allows_different_shapes_same_product(self):
+        """OrderBy.then() allows different dim counts if products match."""
+        o1 = OrderBy(Row(4, 8))       # 2 dims, product = 32
+        o2 = o1.then(Col(32,))        # 1 dim,  product = 32
+        assert len(o2.chain) == 2
 
     def test_functional_constructors(self):
         """Functional constructors create correct types."""
