@@ -63,21 +63,6 @@ bool runZ3(const std::string &smtLib);
 // Helper to generate SMT-LIB get-value commands for a list of variables
 std::string generateGetValueCommands(const SmallVector<std::string> &varNames);
 
-/// Compute per-thread flat addresses for a warp of threads accessing
-/// a layout via an ApplyOp.  Builds SMT expressions for each thread's
-/// flat index by substituting (baseThread + t) for the lego.thread_id
-/// argument and evaluating the layout body.
-///
-/// Supports all layout types: GenP (via region evaluation), RegP,
-/// OrderBy, GroupBy, and TileBy (via materializing arith ops and
-/// encoding them into SMT).
-///
-/// Returns success() and fills \p addresses (one per thread) and
-/// \p baseThread.  Returns failure() if the layout cannot be lowered.
-LogicalResult computeWarpAddresses(
-    Operation *apply, Value layout, ValueRange indices,
-    SMTSolverContext &smtCtx, AsmState &state, unsigned &nextId,
-    int warpSize, Value &baseThread, SmallVectorImpl<Value> &addresses);
 
 } // namespace lego
 } // namespace mlir

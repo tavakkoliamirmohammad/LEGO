@@ -6,7 +6,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "Lego/LegoOps.h"
 #include "Lego/Passes.h"
-#include "Lego/LegoLayoutLowering.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Matchers.h"
@@ -16,16 +15,20 @@
 using namespace mlir;
 using namespace mlir::lego;
 
+namespace {
+
 // ============================================================================
-// Helpers (in lego namespace for shared header)
+// Helpers
 // ============================================================================
 
-static Value getConstantIndex(OpBuilder &b, Location loc, int64_t val) {
+Value getConstantIndex(OpBuilder &b, Location loc, int64_t val) {
   return arith::ConstantIndexOp::create(b, loc, val);
 }
 
-namespace mlir {
-namespace lego {
+// Forward declarations
+Value applyLayout(OpBuilder &b, Location loc, Value layout, ValueRange indices);
+SmallVector<Value> applyInverseLayout(OpBuilder &b, Location loc, Value layout,
+                                      Value flatIndex);
 
 // ============================================================================
 // flatten_index / unflatten_index  (Python L93-136)
@@ -284,7 +287,7 @@ SmallVector<Value> applyInverseGroupBy(OpBuilder &b, Location loc,
 // ============================================================================
 
 /// Collect the k-th dim from each inner perm → [P0.dim[k], P1.dim[k], ...].
-SmallVector<Value> getPerPermDimsAtK(OrderByOp ob, int k) {
+static SmallVector<Value> getPerPermDimsAtK(OrderByOp ob, int k) {
   SmallVector<Value> dims;
   for (Value perm : ob.getPerms())
     dims.push_back(getLayoutInputDims(perm)[k]);
@@ -292,8 +295,8 @@ SmallVector<Value> getPerPermDimsAtK(OrderByOp ob, int k) {
 }
 
 /// Collect the k-th tile dim from each level → [T[0][k], T[1][k], ...].
-SmallVector<Value> getTileDimsAtK(ValueRange tileDims, int d,
-                                   int q_tile, int k) {
+static SmallVector<Value> getTileDimsAtK(ValueRange tileDims, int d,
+                                          int q_tile, int k) {
   SmallVector<Value> dims;
   for (int l = 0; l < q_tile; l++)
     dims.push_back(tileDims[l * d + k]);
@@ -301,8 +304,8 @@ SmallVector<Value> getTileDimsAtK(ValueRange tileDims, int d,
 }
 
 /// Check if TileBy is identity (tile dims match inner perm dims exactly).
-bool isTileByIdentity(TileByOp op, OrderByOp innerOB,
-                       int d, int q_tile) {
+static bool isTileByIdentity(TileByOp op, OrderByOp innerOB,
+                              int d, int q_tile) {
   if (!innerOB || q_tile != (int)innerOB.getPerms().size())
     return false;
   auto tileDims = op.getTileDims();
@@ -454,13 +457,6 @@ SmallVector<Value> applyInverseLayout(OpBuilder &b, Location loc, Value layout,
 
   return {};
 }
-
-} // namespace lego
-} // namespace mlir
-
-namespace {
-
-using namespace mlir::lego;
 
 // ============================================================================
 // Rewrite Patterns
