@@ -1,10 +1,10 @@
 """JavaScript code printer for LEGO layout expressions."""
 
 from sympy.printing.jscode import JavascriptCodePrinter
-from .core import *
+from ._printer_base import LEGOStaticLangMixin
 
 
-class LEGOJSCodePrinter(JavascriptCodePrinter):
+class LEGOJSCodePrinter(LEGOStaticLangMixin, JavascriptCodePrinter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -12,12 +12,6 @@ class LEGOJSCodePrinter(JavascriptCodePrinter):
         arg = expr.args[0]
         num, den = arg.as_numer_denom()
         return f"Math.floor(({self._print(num)}) / ({self._print(den)}))"
-
-    def _print_Mod(self, expr):
-        return f"(({self._print(expr.args[0])}) % ({self._print(expr.args[1])}))"
-
-    def _print_BroadcastRange(self, expr):
-        return f"({self._print(expr.args[0])})"
 
     def _print_lego_arange(self, expr):
         # Generate Array.from({length: stop - start}, (_, i) => i + start)

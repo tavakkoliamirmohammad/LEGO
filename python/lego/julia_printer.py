@@ -1,10 +1,10 @@
 """Julia code printer for LEGO layout expressions."""
 
 from sympy.printing.julia import JuliaCodePrinter
-from .core import *
+from ._printer_base import LEGOStaticLangMixin
 
 
-class LEGOJuliaCodePrinter(JuliaCodePrinter):
+class LEGOJuliaCodePrinter(LEGOStaticLangMixin, JuliaCodePrinter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -16,9 +16,6 @@ class LEGOJuliaCodePrinter(JuliaCodePrinter):
 
     def _print_Mod(self, expr):
         return f"mod({self._print(expr.args[0])}, {self._print(expr.args[1])})"
-
-    def _print_BroadcastRange(self, expr):
-        return f"({self._print(expr.args[0])})"
 
     def _print_lego_arange(self, expr):
         # Julia ranges are inclusive and 1-indexed by convention,

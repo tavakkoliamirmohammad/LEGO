@@ -1,17 +1,12 @@
 """Rust code printer for LEGO layout expressions."""
 
 from sympy.printing.rust import RustCodePrinter
-from .core import *
+from ._printer_base import LEGOStaticLangMixin
 
 
-class LEGORustCodePrinter(RustCodePrinter):
+class LEGORustCodePrinter(LEGOStaticLangMixin, RustCodePrinter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-    def _print_floor(self, expr):
-        arg = expr.args[0]
-        num, den = arg.as_numer_denom()
-        return f"(({self._print(num)}) / ({self._print(den)}))"
 
     def _print_Pow(self, expr):
         from sympy.core.numbers import equal_valued
@@ -25,13 +20,6 @@ class LEGORustCodePrinter(RustCodePrinter):
             return f"({self._print(expr.base)} as f64).sqrt()"
         else:
             return f"({self._print(expr.base)} as f64).powi({self._print(expr.exp)})"
-
-    def _print_Mod(self, expr):
-        return f"(({self._print(expr.args[0])}) % ({self._print(expr.args[1])}))"
-
-    def _print_BroadcastRange(self, expr):
-        # Rust has no built-in broadcast; emit the base expression
-        return f"({self._print(expr.args[0])})"
 
     def _print_lego_arange(self, expr):
         return f"({self._print(expr.args[0])}..{self._print(expr.args[1])})"
