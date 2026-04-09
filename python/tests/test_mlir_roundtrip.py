@@ -731,71 +731,102 @@ class TestExpandedLowering:
 # Tests for unsigned vs signed division/remainder selection
 # ============================================================================
 
+def _lower_expr_to_ir(sympy_expr, symbols):
+    """Lower a SymPy expression to MLIR and return the IR string.
+
+    symbols: list of sp.Symbol used in the expression (become func args).
+    Returns the MLIR module string after lowering (before any passes).
+    """
+    from lego.backend.symbolic import _lower_sympy_to_index, _get_cached_context
+    from lego.mlir.ir import Context, Location, Module, InsertionPoint, IndexType, FunctionType
+    from lego.mlir.dialects import func as _func_dialect
+
+    ctx = _get_cached_context()
+    with ctx, Location.unknown():
+        module = Module.create()
+        idx_ty = IndexType.get()
+        func_ty = FunctionType.get([idx_ty] * len(symbols), [idx_ty])
+        with InsertionPoint(module.body):
+            f = _func_dialect.FuncOp("test_lower", func_ty)
+        entry = f.add_entry_block()
+        sym_to_val = {s: entry.arguments[i] for i, s in enumerate(symbols)}
+        with InsertionPoint(entry):
+            result = _lower_sympy_to_index(sympy_expr, sym_to_val)
+            _func_dialect.ReturnOp([result])
+    return str(module)
+
+
 class TestUnsignedOps:
     """Verify divui/remui are emitted for non-negative symbols, divsi/remsi otherwise."""
 
-    def test_positive_symbols_use_divui(self):
-        """floor(a/b) with positive symbols should produce divui in the IR."""
-        import os
-        old_debug = os.environ.get('LEGO_DEBUG')
-        os.environ['LEGO_DEBUG'] = '1'
-        try:
-            from lego.backend.symbolic import simplify_via_mlir, _LEGO_DEBUG
-            import io, contextlib
-            N = sym("N")  # positive=True
-            L = GenP([4, N], lambda args: N * args[0] + args[1])
-            f = io.StringIO()
-            with contextlib.redirect_stderr(f):
-                flat = sym("flat")
-                _ = L.f_inv(flat)
-                # The roundtrip itself is the real test — if divui produces
-                # wrong results for positive values, assert_expr_equal would catch it.
-        finally:
-            if old_debug is None:
-                os.environ.pop('LEGO_DEBUG', None)
-            else:
-                os.environ['LEGO_DEBUG'] = old_debug
+    def test_floor_positive_emits_divui(self):
+        """floor(a/b) with positive symbols must emit arith.divui, not divsi."""
+        a = sp.Symbol("a", integer=True, positive=True)
+        b = sp.Symbol("b", integer=True, positive=True)
+        ir = _lower_expr_to_ir(sp.floor(a / b), [a, b])
+        assert "arith.divui" in ir, f"Expected divui in IR:\n{ir}"
+        assert "arith.divsi" not in ir, f"Unexpected divsi in IR:\n{ir}"
 
-    def test_roundtrip_floor_positive(self):
-        """floor(x/N) roundtrip: positive symbols should produce correct result."""
+    def test_floor_bare_emits_divsi(self):
+        """floor(a/b) with bare symbols must emit arith.divsi, not divui."""
+        a = sp.Symbol("a", integer=True)
+        b = sp.Symbol("b", integer=True)
+        ir = _lower_expr_to_ir(sp.floor(a / b), [a, b])
+        assert "arith.divsi" in ir, f"Expected divsi in IR:\n{ir}"
+        assert "arith.divui" not in ir, f"Unexpected divui in IR:\n{ir}"
+
+    def test_mod_positive_emits_remui(self):
+        """Mod(a, b) with positive symbols must emit arith.remui, not remsi."""
+        a = sp.Symbol("a", integer=True, positive=True)
+        b = sp.Symbol("b", integer=True, positive=True)
+        ir = _lower_expr_to_ir(sp.Mod(a, b), [a, b])
+        assert "arith.remui" in ir, f"Expected remui in IR:\n{ir}"
+        assert "arith.remsi" not in ir, f"Unexpected remsi in IR:\n{ir}"
+
+    def test_mod_bare_emits_remsi(self):
+        """Mod(a, b) with bare symbols must emit arith.remsi, not remui."""
+        a = sp.Symbol("a", integer=True)
+        b = sp.Symbol("b", integer=True)
+        ir = _lower_expr_to_ir(sp.Mod(a, b), [a, b])
+        assert "arith.remsi" in ir, f"Expected remsi in IR:\n{ir}"
+        assert "arith.remui" not in ir, f"Unexpected remui in IR:\n{ir}"
+
+    def test_mul_with_denom_positive_emits_divui(self):
+        """a/b as Mul(a, 1/b) with positive symbols must emit divui."""
+        a = sp.Symbol("a", integer=True, positive=True)
+        b = sp.Symbol("b", integer=True, positive=True)
+        expr = a * sp.Rational(1, 1) / b  # triggers sp.Mul branch
+        ir = _lower_expr_to_ir(expr, [a, b])
+        assert "arith.divui" in ir, f"Expected divui in IR:\n{ir}"
+        assert "arith.divsi" not in ir, f"Unexpected divsi in IR:\n{ir}"
+
+    def test_nonneg_numerator_positive_denom(self):
+        """nonnegative (may be 0) numerator with positive denominator → divui."""
+        z = sp.Symbol("z", integer=True, nonnegative=True)
+        m = sp.Symbol("m", integer=True, positive=True)
+        ir = _lower_expr_to_ir(sp.floor(z / m), [z, m])
+        assert "arith.divui" in ir, f"Expected divui in IR:\n{ir}"
+
+    def test_negative_numerator_emits_divsi(self):
+        """Negative numerator must use divsi even with positive denominator."""
+        a = sp.Symbol("a", integer=True, positive=True)
+        b = sp.Symbol("b", integer=True, positive=True)
+        # -a / b  →  numerator is -a (is_nonnegative=False)
+        ir = _lower_expr_to_ir(sp.floor(-a / b), [a, b])
+        assert "arith.divsi" in ir, f"Expected divsi in IR:\n{ir}"
+
+    def test_roundtrip_positive_numerical(self):
+        """End-to-end: positive symbols roundtrip produces correct values."""
         N = sym("N")
         L = GenP([4, N], lambda args: N * args[0] + args[1])
         flat = sym("flat")
-        result = L.f_inv(flat)
-        i_val, j_val = result
+        i_val, j_val = L.f_inv(flat)
         assert_expr_equal(i_val, sp.floor(flat / N))
         assert_expr_equal(j_val, sp.Mod(flat, N))
-        # Numerical check
         for n in [2, 3, 5]:
             for x in range(4 * n):
-                i_num = int(i_val.subs({flat: x, N: n}))
-                j_num = int(j_val.subs({flat: x, N: n}))
-                assert n * i_num + j_num == x
-
-    def test_roundtrip_mod_positive(self):
-        """Mod(x, N) with positive symbols should roundtrip correctly via OrderBy."""
-        N = sym("N")
-        L = OrderBy(GenP([N], lambda args: sp.Mod(args[0], N),
-                         lambda flat: (sp.Mod(flat, N),))).GroupBy([(N,)])
-        i = sym("i")
-        result = L[i]
-        assert_expr_equal(result, sp.Mod(i, N))
-
-    def test_bare_symbols_still_work(self):
-        """Symbols without assumptions must still produce correct results (divsi path)."""
-        # Use bare symbols (no positive=True) to exercise the signed fallback.
-        N = sp.Symbol("N_bare", integer=True)
-        flat = sp.Symbol("flat_bare", integer=True)
-        L = GenP([4, N], lambda args: N * args[0] + args[1])
-        result = L.f_inv(flat)
-        i_val, j_val = result
-        assert_expr_equal(i_val, sp.floor(flat / N))
-        # Without positive assumptions, SymPy may wrap in floor().
-        # Verify numerical correctness instead of exact symbolic form.
-        for n in [2, 3, 5]:
-            for x in range(4 * n):
-                j_num = int(j_val.subs({flat: x, N: n}))
-                assert j_num == x % n, f"Mod failed for N={n}, flat={x}"
+                assert n * int(i_val.subs({flat: x, N: n})) + \
+                       int(j_val.subs({flat: x, N: n})) == x
 
 
 # ============================================================================
