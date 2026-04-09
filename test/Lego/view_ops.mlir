@@ -92,7 +92,7 @@ func.func @test_gen_p_view(%mem: memref<16xf32>, %i: index, %j: index) -> f32 {
 
 // -----
 
-// Test: View passed as function argument (A7 fix)
+// Test: View passed as function argument
 // The callee receives a !lego.view argument; the pass should resolve
 // the CastViewOp from the call site by cloning layout ops and adding
 // a memref argument.
