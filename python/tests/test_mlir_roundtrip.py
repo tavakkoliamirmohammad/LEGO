@@ -909,5 +909,21 @@ class TestParseRelational:
         assert lb == 6
 
 
+def test_signed_division_roundtrip():
+    """Verify MLIR roundtrip uses signed division for index arithmetic."""
+    from lego.core import Row
+    from lego.backend.symbolic import simplify_via_mlir
+    import sympy as sp
+
+    M, N = sp.symbols('M N', positive=True, integer=True)
+    flat = sp.Symbol('flat', nonneg=True, integer=True)
+    result = simplify_via_mlir(Row(M, N), 'inv', flat,
+                                constraints={flat: (0, M * N)})
+    assert len(result) == 2
+    subs = {M: 4, N: 3, flat: 7}
+    assert int(result[0].subs(subs)) == 2  # 7 // 3 = 2
+    assert int(result[1].subs(subs)) == 1  # 7 % 3 = 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -116,7 +116,7 @@ def _lower_sympy_to_index(expr, sym_to_val):
     if isinstance(expr, sp.Mul):
         num, den = expr.as_numer_denom()
         if den != sp.S.One:
-            return arith.divui(_lower_sympy_to_index(num, sym_to_val),
+            return arith.divsi(_lower_sympy_to_index(num, sym_to_val),
                                _lower_sympy_to_index(den, sym_to_val))
         coeff, rest = expr.as_coeff_Mul()
         if rest == sp.S.One:
@@ -130,11 +130,11 @@ def _lower_sympy_to_index(expr, sym_to_val):
     if isinstance(expr, sp.floor):
         inner = expr.args[0]
         num, den = inner.as_numer_denom()
-        return arith.divui(_lower_sympy_to_index(num, sym_to_val),
+        return arith.divsi(_lower_sympy_to_index(num, sym_to_val),
                            _lower_sympy_to_index(den, sym_to_val))
 
     if isinstance(expr, sp.Mod):
-        return arith.remui(_lower_sympy_to_index(expr.args[0], sym_to_val),
+        return arith.remsi(_lower_sympy_to_index(expr.args[0], sym_to_val),
                            _lower_sympy_to_index(expr.args[1], sym_to_val))
 
     if isinstance(expr, sp.Abs):
