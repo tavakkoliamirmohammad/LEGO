@@ -6,11 +6,9 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SMT/IR/SMTOps.h"
-#include "mlir/Target/SMTLIB/ExportSMTLIB.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/AsmState.h"
 
 using namespace mlir;
@@ -32,7 +30,6 @@ struct LegoVerifyBankConflictsPassImpl
     getContext().getOrLoadDialect<smt::SMTDialect>();
     ModuleOp module = getOperation();
 
-    // Find all lego.apply operations that might access shared memory
     SmallVector<ApplyOp> applyOps;
     module.walk([&](ApplyOp apply) { applyOps.push_back(apply); });
 
@@ -42,115 +39,29 @@ struct LegoVerifyBankConflictsPassImpl
     unsigned nextId = 0;
 
     for (auto apply : applyOps) {
-      // Check for bank conflicts
-      // This is a performance check, so we emit warnings rather than errors
       if (failed(verifyBankConflictFree(apply, state, nextId))) {
-        // Don't signal pass failure for performance properties
+        // Performance property — emit warnings, don't signal pass failure.
       }
     }
   }
 
 private:
-  // Verify that a warp of WARP_SIZE threads has no bank conflicts
-  // Bank conflicts occur when bank(addr_i) = bank(addr_j) for i ≠ j
-  // where bank(addr) = (addr * elementSize / 4) % numBanks
   LogicalResult verifyBankConflictFree(ApplyOp apply, AsmState &state, unsigned &nextId) {
-    SMTSolverContext smtCtx(apply.getLoc(), state, nextId);
-    OpBuilder &b = *smtCtx.b;
-    SMTBuilder &builder = *smtCtx.builder;
-
-    size_t numIndices = apply.getIndices().size();
     int WARP_SIZE = warpSize.getValue();
     int NUM_BANKS = numBanks.getValue();
     int ELEMENT_SIZE = elementSize.getValue();
-    std::string baseThreadVarName = "base_thread";
+    SMTSolverContext smtCtx(apply.getLoc(), state, nextId);
+    OpBuilder &b = *smtCtx.b;
 
-    // Base thread variable
-    Value baseThread = smt::DeclareFunOp::create(
-        b, apply.getLoc(),
-        Type(b.getType<smt::IntType>()),
-        b.getStringAttr(baseThreadVarName));
-
-    // Get the layout and check it's a gen_p
-    GenPOp genP = dyn_cast_or_null<GenPOp>(apply.getLayout().getDefiningOp());
-    if (!genP || genP.getBody().empty()) {
-      // Skip non-gen_p layouts
-      return success();
-    }
-
-    // Build a function that computes the address for a given thread ID
-    // The apply operation's indices are expressions in terms of the function arguments
-    // We need to translate those index expressions into SMT
-
-    // First, translate each index argument into SMT, treating BlockArguments as symbolic
-    SmallVector<Value> symbolicIndices;
-    for (Value idx : apply.getIndices()) {
-      Value smtIdx = builder.getOrCreate(idx);
-      symbolicIndices.push_back(smtIdx);
-    }
-
-    // Compute addresses for all threads in the warp
+    Value baseThread;
     SmallVector<Value> addresses;
-    for (int t = 0; t < WARP_SIZE; ++t) {
-      // For each thread, substitute thread ID into the index expressions
-      // This requires building the index computation with thread = t
+    if (failed(computeWarpAddresses(apply, apply.getLayout(),
+                                    apply.getIndices(), smtCtx, state,
+                                    nextId, WARP_SIZE, baseThread, addresses)))
+      return success();
 
-      // We'll create a fresh builder context for each thread
-      DenseMap<Value, Value> threadValMap;
-
-      // Map the base thread parameter to (baseThread + t)
-      Value tConst = smt::IntConstantOp::create(
-          b, apply.getLoc(), b.getI64IntegerAttr(t));
-      Value threadId = smt::IntAddOp::create(
-          b, apply.getLoc(), ValueRange{baseThread, tConst});
-
-      // Map function arguments to thread-specific values
-      auto parentFunc = apply->getParentOfType<func::FuncOp>();
-      if (parentFunc) {
-        bool found = false;
-        
-        // Find the argument with the `lego.thread_id` attribute
-        for (BlockArgument arg : parentFunc.getArguments()) {
-          if (parentFunc.getArgAttr(arg.getArgNumber(), "lego.thread_id")) {
-            threadValMap[arg] = threadId;
-            found = true;
-            break;
-          }
-        }
-        
-        if (!found) {
-          apply.emitWarning("Could not find a block argument with 'lego.thread_id' attribute in parent function. Verification might not be accurate.");
-          // We can optionally return success() here to abort check early
-        }
-      }
-
-      // Build index values for this thread using a helper
-      SMTBuilder threadBuilder(b, state, nextId);
-      threadBuilder.valMap = threadValMap;
-
-      SmallVector<Value> concreteIndices;
-      for (Value idx : apply.getIndices()) {
-        Value smtIdx = threadBuilder.getOrCreate(idx);
-        concreteIndices.push_back(smtIdx);
-      }
-
-      // Compute flat index using the layout's apply region
-      SmallVector<Value> flatResults;
-      threadBuilder.buildRegion(genP.getBody(), concreteIndices, flatResults);
-      if (flatResults.size() != 1) {
-        return success();
-      }
-
-      addresses.push_back(flatResults[0]);
-    }
-
-    // Check for bank conflicts
-    // The layout generates element indices (not byte addresses)
-    // byte_address = element_index * ELEMENT_SIZE
-    // bank_word = byte_address / 4
-    // bank = bank_word % NUM_BANKS
-    // Conflicts occur when multiple threads access different addresses in the same bank
-
+    // Bank conflict detection.
+    // bank(addr) = (addr * ELEMENT_SIZE / 4) % NUM_BANKS
     Value numBanksConst = smt::IntConstantOp::create(
         b, apply.getLoc(), b.getI64IntegerAttr(NUM_BANKS));
     Value elementSizeConst = smt::IntConstantOp::create(
@@ -158,12 +69,9 @@ private:
     Value fourConst = smt::IntConstantOp::create(
         b, apply.getLoc(), b.getI64IntegerAttr(4));
 
-    // We check if there EXISTS a conflict (SAT = conflict exists)
     SmallVector<Value> conflicts;
-
     for (int i = 0; i < WARP_SIZE; ++i) {
       for (int j = i + 1; j < WARP_SIZE; ++j) {
-        // bank_i = (addr_i * ELEMENT_SIZE / 4) % NUM_BANKS
         Value byte_addr_i = smt::IntMulOp::create(
             b, apply.getLoc(), ValueRange{addresses[i], elementSizeConst});
         Value bank_word_i = smt::IntDivOp::create(
@@ -171,7 +79,6 @@ private:
         Value bank_i = smt::IntModOp::create(
             b, apply.getLoc(), bank_word_i, numBanksConst);
 
-        // bank_j = (addr_j * ELEMENT_SIZE / 4) % NUM_BANKS
         Value byte_addr_j = smt::IntMulOp::create(
             b, apply.getLoc(), ValueRange{addresses[j], elementSizeConst});
         Value bank_word_j = smt::IntDivOp::create(
@@ -179,21 +86,18 @@ private:
         Value bank_j = smt::IntModOp::create(
             b, apply.getLoc(), bank_word_j, numBanksConst);
 
-        // Check if same bank AND different addresses
         Value sameBank = smt::EqOp::create(
             b, apply.getLoc(), bank_i, bank_j);
         Value diffAddr = smt::DistinctOp::create(
             b, apply.getLoc(), ValueRange{addresses[i], addresses[j]});
         Value conflict = smt::AndOp::create(
             b, apply.getLoc(), ValueRange{sameBank, diffAddr});
-
         conflicts.push_back(conflict);
       }
     }
 
-    // Declare named variables for addresses and banks (BEFORE exporting!)
+    // Named variables for counter-example readability.
     for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
-      // Address
       Value namedAddr = smt::DeclareFunOp::create(
           b, apply.getLoc(),
           Type(b.getType<smt::IntType>()),
@@ -201,7 +105,6 @@ private:
       Value eqAddr = smt::EqOp::create(b, apply.getLoc(), namedAddr, addresses[t]);
       smt::AssertOp::create(b, apply.getLoc(), eqAddr);
 
-      // Bank number
       Value byte_addr_t = smt::IntMulOp::create(
           b, apply.getLoc(), ValueRange{addresses[t], elementSizeConst});
       Value bank_word_t = smt::IntDivOp::create(
@@ -215,12 +118,11 @@ private:
       smt::AssertOp::create(b, apply.getLoc(), eqBank);
     }
 
-    // Assert that at least one conflict exists
     Value anyConflict = smt::OrOp::create(b, apply.getLoc(), conflicts);
     smt::AssertOp::create(b, apply.getLoc(), anyConflict);
 
     SmallVector<std::string> allVars;
-    allVars.push_back(baseThreadVarName);
+    allVars.push_back("base_thread");
     for (int t = 0; t < WARP_SIZE; ++t) {
         allVars.push_back("addr_" + std::to_string(t));
         allVars.push_back("bank_" + std::to_string(t));
@@ -230,12 +132,10 @@ private:
 
     if (result.isSat) {
       std::string warnMsg = "Layout may cause shared memory bank conflicts";
-      if (result.model.count(baseThreadVarName)) {
+      if (result.model.count("base_thread")) {
         warnMsg += "\n  Counter-example starting at thread: " +
-                   std::to_string(result.model[baseThreadVarName]);
+                   std::to_string(result.model["base_thread"]);
       }
-
-      // Show sample of addresses and banks to illustrate conflicts
       warnMsg += "\n  Sample memory access pattern (first 8 threads):";
       for (int t = 0; t < 8 && t < WARP_SIZE; ++t) {
         std::string addrVar = "addr_" + std::to_string(t);
@@ -247,11 +147,9 @@ private:
         }
       }
       warnMsg += "\n  (Conflict occurs when multiple threads access different addresses in the same bank)";
-
       apply.emitWarning(warnMsg);
       return failure();
     } else if (result.isUnsat) {
-      // Bank-conflict free!
       return success();
     } else {
       apply.emitWarning("Bank conflict check returned unknown");

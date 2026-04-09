@@ -1,13 +1,9 @@
 #define GEN_PASS_DEF_LEGONORMALIZATIONPASS
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "Lego/LegoOps.h"
 #include "Lego/Passes.h"
-#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include <numeric>
@@ -33,11 +29,9 @@ struct RowOpRewrite : public OpRewritePattern<RowOp> {
     auto dims = op.getDims();
     int d = dims.size();
     
-    // Identity permutation: [0, 1, ..., d-1]
     SmallVector<int64_t> perm(d);
     std::iota(perm.begin(), perm.end(), 0);
 
-    // Create RegPOp
     auto regPOp = RegPOp::create(rewriter, loc, op.getType(),
                                  rewriter.getI64ArrayAttr(perm), op.getDims());
 
@@ -60,13 +54,11 @@ struct ColOpRewrite : public OpRewritePattern<ColOp> {
     auto dims = op.getDims();
     int d = dims.size();
 
-    // Reversed identity: [d-1, ..., 0]
     SmallVector<int64_t> perm(d);
     for (int i = 0; i < d; ++i) {
       perm[i] = d - 1 - i;
     }
 
-    // Create RegPOp
     auto regPOp = RegPOp::create(rewriter, loc, op.getType(),
                                  rewriter.getI64ArrayAttr(perm), op.getDims());
 

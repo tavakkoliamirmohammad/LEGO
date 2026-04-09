@@ -269,7 +269,7 @@ class TestCompileBackend:
 
     def test_backend_registered(self):
         """The 'lego' backend is available after import lego."""
-        import lego  # triggers registration
+        import lego.backend.fx_backend  # noqa: F401  # triggers registration
         # torch._dynamo has the backend
         from torch._dynamo import list_backends
         backends = list_backends()

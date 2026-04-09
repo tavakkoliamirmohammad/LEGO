@@ -8,6 +8,8 @@ using namespace mlir;
 
 namespace {
 
+static constexpr StringLiteral kMaterializedAttr = "lego.materialized";
+
 /// Converts `lego.assume_bounds %x ub: %d` directly into
 /// `%x_bounded = arith.remui %x, %d` and replaces downstream uses.
 /// Also handles the already-lowered form: lego.assume(cmpi slt, %x, %d).
@@ -67,7 +69,7 @@ struct LegoMaterializeAssumeBoundsPass
       Value bounded =
           arith::RemUIOp::create(builder, originOp->getLoc(), x, d);
       Operation *remOp = bounded.getDefiningOp();
-      remOp->setAttr("lego.materialized", builder.getUnitAttr());
+      remOp->setAttr(kMaterializedAttr, builder.getUnitAttr());
 
       x.replaceUsesWithIf(bounded, [&](OpOperand &operand) {
         Operation *user = operand.getOwner();
@@ -121,7 +123,7 @@ struct LegoMaterializeAssumeBoundsPass
   void runCleanup() {
     SmallVector<arith::RemUIOp> toFold;
     getOperation()->walk([&](arith::RemUIOp op) {
-      if (op->hasAttr("lego.materialized"))
+      if (op->hasAttr(kMaterializedAttr))
         toFold.push_back(op);
     });
     for (auto op : toFold) {

@@ -1,5 +1,7 @@
 #include "Lego/SMTUtils.h"
+#include "Lego/LegoOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SMT/IR/SMTOps.h"
 #include "mlir/Target/SMTLIB/ExportSMTLIB.h"
 #include <sys/wait.h>
@@ -202,9 +204,6 @@ SMTResult runZ3WithModel(const std::string &smtLib) {
 
   result.rawOutput = output;
 
-  // Debug: Print raw Z3 output (temporary)
-  // fprintf(stderr, "=== Z3 RAW OUTPUT ===\n%s\n=== END Z3 OUTPUT ===\n", output.c_str());
-
   // Parse the result
   if (output.find("unsat") != std::string::npos) {
     result.isUnsat = true;
@@ -268,7 +267,6 @@ SMTResult runZ3WithModel(const std::string &smtLib) {
             if (errno == 0 && endPtr != valueStr.c_str() && !varName.empty()) {
               if (isNegative) value = -value;
               result.model[varName] = value;
-              // fprintf(stderr, "  Parsed: %s = %lld\n", varName.c_str(), value);
             }
           }
 
@@ -294,6 +292,65 @@ std::string generateGetValueCommands(const SmallVector<std::string> &varNames) {
   }
   commands += "))\n";
   return commands;
+}
+
+LogicalResult computeWarpAddresses(
+    Operation *apply, Value layout, ValueRange indices,
+    SMTSolverContext &smtCtx, AsmState &state, unsigned &nextId,
+    int warpSize, Value &baseThread, SmallVectorImpl<Value> &addresses) {
+  OpBuilder &b = *smtCtx.b;
+  Location loc = apply->getLoc();
+
+  // Layout must be a GenPOp with a non-empty body.
+  auto genP = dyn_cast_or_null<GenPOp>(layout.getDefiningOp());
+  if (!genP || genP.getBody().empty())
+    return failure();
+
+  // Symbolic base_thread variable.
+  baseThread = smt::DeclareFunOp::create(
+      b, loc, Type(b.getType<smt::IntType>()),
+      b.getStringAttr("base_thread"));
+
+  // Find the lego.thread_id argument in the enclosing func.
+  auto parentFunc = apply->getParentOfType<func::FuncOp>();
+  std::optional<BlockArgument> threadArg;
+  if (parentFunc) {
+    for (BlockArgument arg : parentFunc.getArguments()) {
+      if (parentFunc.getArgAttr(arg.getArgNumber(), "lego.thread_id")) {
+        threadArg = arg;
+        break;
+      }
+    }
+    if (!threadArg)
+      apply->emitWarning("Could not find a block argument with "
+                         "'lego.thread_id' attribute in parent function. "
+                         "Verification might not be accurate.");
+  }
+
+  addresses.clear();
+  for (int t = 0; t < warpSize; ++t) {
+    Value tConst = smt::IntConstantOp::create(b, loc, b.getI64IntegerAttr(t));
+    Value threadId = smt::IntAddOp::create(b, loc, ValueRange{baseThread, tConst});
+
+    DenseMap<Value, Value> threadValMap;
+    if (threadArg)
+      threadValMap[*threadArg] = threadId;
+
+    SMTBuilder threadBuilder(b, state, nextId);
+    threadBuilder.valMap = threadValMap;
+
+    SmallVector<Value> concreteIndices;
+    for (Value idx : indices)
+      concreteIndices.push_back(threadBuilder.getOrCreate(idx));
+
+    SmallVector<Value> flatResults;
+    threadBuilder.buildRegion(genP.getBody(), concreteIndices, flatResults);
+    if (flatResults.size() != 1)
+      return failure();
+
+    addresses.push_back(flatResults[0]);
+  }
+  return success();
 }
 
 } // namespace lego

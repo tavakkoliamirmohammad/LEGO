@@ -338,18 +338,19 @@ class LayoutCompiler:
 
     def compile(self):
         if self._engine is None:
+            # Build module once (reuses cached mlir_text if already built)
+            builder = self._get_ir_builder()
+            self._ctx, module = builder.build_module()
+            if self._mlir_text is None:
+                self._mlir_text = str(module)
+
             # Check global cache first
-            cache_key = _mlir_cache_key(self.mlir_text)
+            cache_key = _mlir_cache_key(self._mlir_text)
             with _CACHE_LOCK:
                 cached = _COMPILER_CACHE.get(cache_key)
             if cached is not None:
                 self._ctx, self._engine = cached
                 return self._engine
-
-            builder = self._get_ir_builder()
-            self._ctx, module = builder.build_module()
-            if self._mlir_text is None:
-                self._mlir_text = str(module)
             with self._ctx:
                 if _LEGO_DEBUG:
                     print("=== MLIR input (LEGO dialect) ===", file=sys.stderr)

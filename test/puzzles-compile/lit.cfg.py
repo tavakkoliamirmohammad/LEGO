@@ -28,3 +28,8 @@ config.available_features.add('gpu')
 
 # Inject LEGO_COMPILE_ONLY into the environment for all test processes.
 config.environment['LEGO_COMPILE_ONLY'] = '1'
+
+# Each puzzle imports PyTorch/numpy/CUDA (~1.5 GB each).
+# Limit parallelism to avoid OOM kills under tight cgroup limits.
+lit_config.parallelism_groups['compile-puzzles'] = 2
+config.parallelism_group = 'compile-puzzles'

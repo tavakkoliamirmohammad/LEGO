@@ -1,27 +1,10 @@
 """CUDA C source code generation adapter for the LEGO rewriter."""
 
-import ast
-
 from lego.cuda_c_printer import LEGOCUDACCodePrinter
-from lego.frontends._adapter import DSLAdapter
-from lego.rewriter import rewrite
+from lego.frontends._adapter import SourceGenAdapter, source_generate
 
-
-class CUDACAdapter(DSLAdapter):
-    """Adapter that emits CUDA C source code from LEGO layout expressions."""
-
-    def unwrap(self, fn):
-        return fn, fn, []
-
-    def find_runtime_vars(self, func_def):
-        return set()
-
-    def get_code_printer(self):
-        return LEGOCUDACCodePrinter()
-
-    def compile_and_wrap(self, new_source, tree, original_fn, wrappers,
-                         return_source=False):
-        return new_source
+# Kept for backwards compatibility (direct adapter use).
+CUDACAdapter = lambda: SourceGenAdapter(LEGOCUDACCodePrinter())
 
 
 def generate(fn, **kwargs):
@@ -31,4 +14,4 @@ def generate(fn, **kwargs):
 
         cuda_code = lego.cuda_c_gen.generate(index_kernel)
     """
-    return rewrite(fn, CUDACAdapter(), return_source=True, **kwargs)
+    return source_generate(fn, LEGOCUDACCodePrinter(), **kwargs)
