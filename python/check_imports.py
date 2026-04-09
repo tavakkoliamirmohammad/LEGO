@@ -8,7 +8,7 @@ from lego.backend.dialects.lego_dialect import register
 print("[check-lego-imports] Testing frontend imports...")
 from lego.frontends._adapter import DSLAdapter
 from lego.frontends.python_mlir import (
-    Tiled, TiledPermute, RowMajor, ColMajor, Custom, Transposed,
+    TiledPermute, RowMajor, ColMajor, Custom, Transposed,
     ZCurve, Swizzle, BlockCyclic, Batched, LegoLayout, LegoArray,
 )
 from lego.frontends.triton_jit import TritonAdapter, jit as triton_jit
