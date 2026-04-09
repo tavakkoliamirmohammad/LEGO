@@ -212,17 +212,17 @@ class TestDescriptorAPI:
         assert isinstance(tb, TileByLayout)
         assert len(tb._input_chain) == 2
 
-    def test_order_by_then_rejects_mismatched_products(self):
-        """OrderBy.then() raises ValueError when dimension products differ."""
+    def test_order_by_then_rejects_mismatched_dim_count(self):
+        """OrderBy.then() raises ValueError when dimension counts differ."""
         import pytest
-        o = OrderBy(Row(4, 8))  # product = 32
-        with pytest.raises(ValueError, match="Dimension product mismatch"):
-            o.then(Col(2, 4))  # product = 8 != 32
+        o = OrderBy(Row(4, 8))  # 2 dims
+        with pytest.raises(ValueError, match="Dimension count mismatch"):
+            o.then(Col(32,))  # 1 dim != 2 dims
 
-    def test_order_by_then_allows_different_shapes_same_product(self):
-        """OrderBy.then() allows different dim counts if products match."""
-        o1 = OrderBy(Row(4, 8))       # 2 dims, product = 32
-        o2 = o1.then(Col(32,))        # 1 dim,  product = 32
+    def test_order_by_then_allows_different_sizes_same_dim_count(self):
+        """OrderBy.then() allows different sizes if dim counts match."""
+        o1 = OrderBy(Row(4, 8))       # 2 dims
+        o2 = o1.then(Col(2, 4))       # 2 dims, different sizes
         assert len(o2.chain) == 2
 
     def test_functional_constructors(self):
