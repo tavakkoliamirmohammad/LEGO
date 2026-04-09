@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "command": "ext=\"${TOOL_INPUT_file_path##*.}\"; if [ \"$ext\" = \"cpp\" ] || [ \"$ext\" = \"h\" ]; then clang-format -i \"$TOOL_INPUT_file_path\" 2>/dev/null || true; fi"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "command": "case \"$TOOL_INPUT_file_path\" in */third_party/*|*/build/*|*/build-wasm/*) echo 'BLOCK: Do not edit generated or third-party files'; exit 1;; esac"
+      }
+    ]
+  }
+}
