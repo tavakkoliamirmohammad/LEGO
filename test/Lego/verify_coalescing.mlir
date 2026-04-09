@@ -113,3 +113,58 @@ func.func @test_identity_coalesced(%tid: index {lego.thread_id}) {
   %addr = lego.apply %layout(%i) : !lego.layout
   return
 }
+
+// -----
+
+// Test 5: RegP row-major (should pass - coalesced, non-GenP layout)
+func.func @test_regp_row_coalesced(%base_tid: index {lego.thread_id}) {
+  %c4 = arith.constant 4 : index
+  %c32 = arith.constant 32 : index
+
+  // RegP with identity perm [0,1] = row-major: flat = i*32 + j
+  %layout = lego.reg_p perm [0, 1] dims[%c4, %c32] : !lego.layout
+
+  %i = arith.constant 0 : index
+  %c0 = arith.constant 0 : index
+  %j = arith.addi %base_tid, %c0 : index
+  %addr = lego.apply %layout(%i, %j) : !lego.layout
+
+  return
+}
+
+// -----
+
+// Test 6: RegP column-major (should warn - NOT coalesced, non-GenP layout)
+func.func @test_regp_col_not_coalesced(%base_tid: index {lego.thread_id}) {
+  %c32 = arith.constant 32 : index
+  %c4 = arith.constant 4 : index
+
+  // RegP with reversed perm [1,0] = col-major: flat = j*32 + i
+  %layout = lego.reg_p perm [1, 0] dims[%c32, %c4] : !lego.layout
+
+  %i = arith.constant 0 : index
+  %c0 = arith.constant 0 : index
+  %j = arith.addi %base_tid, %c0 : index
+  // expected-warning@+1 {{Layout may produce non-coalesced memory accesses}}
+  %addr = lego.apply %layout(%i, %j) : !lego.layout
+
+  return
+}
+
+// -----
+
+// Test 7: OrderBy with RegP inner (should pass - coalesced)
+func.func @test_orderby_regp_coalesced(%base_tid: index {lego.thread_id}) {
+  %c4 = arith.constant 4 : index
+  %c32 = arith.constant 32 : index
+
+  %inner = lego.reg_p perm [0, 1] dims[%c4, %c32] : !lego.layout
+  %layout = lego.order_by(%inner) : !lego.layout
+
+  %i = arith.constant 0 : index
+  %c0 = arith.constant 0 : index
+  %j = arith.addi %base_tid, %c0 : index
+  %addr = lego.apply %layout(%i, %j) : !lego.layout
+
+  return
+}

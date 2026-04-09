@@ -6,6 +6,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "Lego/LegoOps.h"
 #include "Lego/Passes.h"
+#include "Lego/LegoLayoutLowering.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Matchers.h"
@@ -15,20 +16,16 @@
 using namespace mlir;
 using namespace mlir::lego;
 
-namespace {
-
 // ============================================================================
-// Helpers
+// Helpers (in lego namespace for shared header)
 // ============================================================================
 
-Value getConstantIndex(OpBuilder &b, Location loc, int64_t val) {
+static Value getConstantIndex(OpBuilder &b, Location loc, int64_t val) {
   return arith::ConstantIndexOp::create(b, loc, val);
 }
 
-// Forward declarations
-Value applyLayout(OpBuilder &b, Location loc, Value layout, ValueRange indices);
-SmallVector<Value> applyInverseLayout(OpBuilder &b, Location loc, Value layout,
-                                      Value flatIndex);
+namespace mlir {
+namespace lego {
 
 // ============================================================================
 // flatten_index / unflatten_index  (Python L93-136)
@@ -287,7 +284,7 @@ SmallVector<Value> applyInverseGroupBy(OpBuilder &b, Location loc,
 // ============================================================================
 
 /// Collect the k-th dim from each inner perm → [P0.dim[k], P1.dim[k], ...].
-static SmallVector<Value> getPerPermDimsAtK(OrderByOp ob, int k) {
+SmallVector<Value> getPerPermDimsAtK(OrderByOp ob, int k) {
   SmallVector<Value> dims;
   for (Value perm : ob.getPerms())
     dims.push_back(getLayoutInputDims(perm)[k]);
@@ -295,8 +292,8 @@ static SmallVector<Value> getPerPermDimsAtK(OrderByOp ob, int k) {
 }
 
 /// Collect the k-th tile dim from each level → [T[0][k], T[1][k], ...].
-static SmallVector<Value> getTileDimsAtK(ValueRange tileDims, int d,
-                                          int q_tile, int k) {
+SmallVector<Value> getTileDimsAtK(ValueRange tileDims, int d,
+                                   int q_tile, int k) {
   SmallVector<Value> dims;
   for (int l = 0; l < q_tile; l++)
     dims.push_back(tileDims[l * d + k]);
@@ -304,8 +301,8 @@ static SmallVector<Value> getTileDimsAtK(ValueRange tileDims, int d,
 }
 
 /// Check if TileBy is identity (tile dims match inner perm dims exactly).
-static bool isTileByIdentity(TileByOp op, OrderByOp innerOB,
-                              int d, int q_tile) {
+bool isTileByIdentity(TileByOp op, OrderByOp innerOB,
+                       int d, int q_tile) {
   if (!innerOB || q_tile != (int)innerOB.getPerms().size())
     return false;
   auto tileDims = op.getTileDims();
@@ -458,6 +455,13 @@ SmallVector<Value> applyInverseLayout(OpBuilder &b, Location loc, Value layout,
   return {};
 }
 
+} // namespace lego
+} // namespace mlir
+
+namespace {
+
+using namespace mlir::lego;
+
 // ============================================================================
 // Rewrite Patterns
 // ============================================================================
@@ -555,6 +559,197 @@ struct CastViewOpLowering : public OpRewritePattern<CastViewOp> {
 };
 
 // ============================================================================
+// View argument resolution
+//
+// When a function takes !lego.view arguments, LoadOp/StoreOp lowering
+// can't find the CastViewOp because the view is a block argument.
+// This pre-pass resolves this by expanding function signatures to
+// include the underlying memref and layout, then inserting CastViewOp
+// at the function entry.
+// ============================================================================
+
+/// Find all call sites for a given function in the module.
+static SmallVector<func::CallOp> findCallSites(ModuleOp module,
+                                                func::FuncOp func) {
+  SmallVector<func::CallOp> calls;
+  StringRef funcName = func.getSymName();
+  module.walk([&](func::CallOp call) {
+    if (call.getCallee() == funcName)
+      calls.push_back(call);
+  });
+  return calls;
+}
+
+/// Collect the transitive set of ops that define `root`, stopping at
+/// block arguments.  Returns ops in topological order.
+static SmallVector<Operation *> collectDefChain(Value root) {
+  SmallVector<Operation *> result;
+  SmallVector<Value> worklist = {root};
+  DenseSet<Operation *> visited;
+
+  while (!worklist.empty()) {
+    Value v = worklist.pop_back_val();
+    Operation *def = v.getDefiningOp();
+    if (!def || visited.count(def))
+      continue;
+    visited.insert(def);
+    result.push_back(def);
+    for (Value operand : def->getOperands())
+      worklist.push_back(operand);
+  }
+
+  // Reverse for topological order (operands before users).
+  std::reverse(result.begin(), result.end());
+  return result;
+}
+
+/// Resolve view function arguments by expanding signatures.
+/// For each function arg of type !lego.view, if all callers pass a
+/// CastViewOp result, expand the signature to include a memref arg,
+/// clone the layout-defining ops into the callee, and insert a
+/// CastViewOp at the function entry.
+static void resolveViewArguments(ModuleOp module) {
+  SmallVector<func::FuncOp> funcsToProcess;
+  module.walk([&](func::FuncOp func) {
+    for (Type argTy : func.getArgumentTypes()) {
+      if (isa<ViewType>(argTy)) {
+        funcsToProcess.push_back(func);
+        break;
+      }
+    }
+  });
+
+  for (func::FuncOp func : funcsToProcess) {
+    if (func.isDeclaration())
+      continue;
+
+    auto calls = findCallSites(module, func);
+    if (calls.empty())
+      continue;
+
+    // Collect view argument positions (skip already-resolved ones).
+    SmallVector<unsigned> viewArgIndices;
+    for (unsigned i = 0; i < func.getNumArguments(); ++i) {
+      if (!isa<ViewType>(func.getFunctionType().getInput(i)))
+        continue;
+      BlockArgument arg = func.getArgument(i);
+      // Skip if already resolved: arg has no remaining uses (CastViewOp
+      // was lowered) or its sole use is an inserted CastViewOp.
+      if (arg.use_empty())
+        continue;
+      bool alreadyResolved = false;
+      if (arg.hasOneUse()) {
+        if (isa<CastViewOp>(*arg.user_begin()))
+          alreadyResolved = true;
+      }
+      if (!alreadyResolved)
+        viewArgIndices.push_back(i);
+    }
+
+    // For each view arg, check that ALL callers pass a CastViewOp result.
+    struct ViewArgInfo {
+      unsigned argIdx;
+      Type memrefType;
+      CastViewOp firstCastOp; // Used to clone layout ops.
+    };
+    SmallVector<ViewArgInfo> resolvableArgs;
+
+    for (unsigned viewIdx : viewArgIndices) {
+      bool allCallersOk = true;
+      Type memrefType;
+      CastViewOp firstCast;
+
+      for (auto call : calls) {
+        Value operand = call.getOperand(viewIdx);
+        auto castOp = operand.getDefiningOp<CastViewOp>();
+        if (!castOp) {
+          allCallersOk = false;
+          break;
+        }
+        if (!memrefType) {
+          memrefType = castOp.getMemref().getType();
+          firstCast = castOp;
+        }
+      }
+
+      if (allCallersOk && memrefType)
+        resolvableArgs.push_back({viewIdx, memrefType, firstCast});
+    }
+
+    if (resolvableArgs.empty())
+      continue;
+
+    // Build new function type: original args + memref per view arg.
+    SmallVector<Type> newArgTypes(func.getArgumentTypes());
+    SmallVector<unsigned> memrefArgPositions;
+
+    for (auto &info : resolvableArgs) {
+      memrefArgPositions.push_back(newArgTypes.size());
+      newArgTypes.push_back(info.memrefType);
+    }
+
+    auto newFuncType = FunctionType::get(func.getContext(), newArgTypes,
+                                         func.getResultTypes());
+
+    // Add new block arguments.
+    Block &entryBlock = func.getBody().front();
+    for (auto &info : resolvableArgs)
+      entryBlock.addArgument(info.memrefType, func.getLoc());
+
+    func.setFunctionType(newFuncType);
+
+    // At the function entry, clone layout-defining ops from the first
+    // call site and create a CastViewOp for each resolved view arg.
+    OpBuilder builder(func.getContext());
+    builder.setInsertionPointToStart(&entryBlock);
+
+    for (unsigned i = 0; i < resolvableArgs.size(); ++i) {
+      unsigned viewArgIdx = resolvableArgs[i].argIdx;
+      unsigned memrefPos = memrefArgPositions[i];
+      CastViewOp srcCast = resolvableArgs[i].firstCastOp;
+
+      Value memrefArg = entryBlock.getArgument(memrefPos);
+      Value viewArg = entryBlock.getArgument(viewArgIdx);
+
+      // Clone the layout def chain into the callee.
+      Value srcLayout = srcCast.getLayout();
+      auto defChain = collectDefChain(srcLayout);
+
+      IRMapping mapping;
+      // Map block args in the source that are arith constants — they'll
+      // be cloned.  Block args in the source that are function params
+      // need corresponding params in the callee (handled by the existing
+      // arg passing).
+      for (Operation *op : defChain) {
+        Operation *cloned = builder.clone(*op, mapping);
+        for (unsigned r = 0; r < op->getNumResults(); ++r)
+          mapping.map(op->getResult(r), cloned->getResult(r));
+      }
+
+      Value clonedLayout = mapping.lookupOrDefault(srcLayout);
+      auto newCastView = CastViewOp::create(
+          builder, func.getLoc(), viewArg.getType(), memrefArg, clonedLayout);
+      viewArg.replaceAllUsesWith(newCastView.getResult());
+    }
+
+    // Update all call sites to pass extra memref arguments.
+    for (auto call : calls) {
+      SmallVector<Value> newOperands(call.getOperands());
+      for (auto &info : resolvableArgs) {
+        auto castOp = call.getOperand(info.argIdx).getDefiningOp<CastViewOp>();
+        newOperands.push_back(castOp.getMemref());
+      }
+      OpBuilder callBuilder(call);
+      auto newCall = func::CallOp::create(callBuilder, call.getLoc(),
+                                          call.getCallee(),
+                                          call.getResultTypes(), newOperands);
+      call.replaceAllUsesWith(newCall.getResults());
+      call.erase();
+    }
+  }
+}
+
+// ============================================================================
 // Pass
 // ============================================================================
 
@@ -566,6 +761,9 @@ struct LegoToArithPassImpl
   void runOnOperation() override {
     ModuleOp module = getOperation();
     MLIRContext *context = &getContext();
+
+    // Resolve view function arguments before pattern-based lowering.
+    resolveViewArguments(module);
 
     RewritePatternSet patterns(context);
     patterns.add<ApplyOpLowering, ApplyInverseOpLowering, LoadOpLowering,

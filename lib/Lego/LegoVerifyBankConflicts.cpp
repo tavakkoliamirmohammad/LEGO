@@ -57,8 +57,10 @@ private:
     SmallVector<Value> addresses;
     if (failed(computeWarpAddresses(apply, apply.getLayout(),
                                     apply.getIndices(), smtCtx, state,
-                                    nextId, WARP_SIZE, baseThread, addresses)))
+                                    nextId, WARP_SIZE, baseThread, addresses))) {
+      // computeWarpAddresses emits its own warning for unsupported types.
       return success();
+    }
 
     // Constrain base_thread >= 0 (thread IDs are non-negative)
     Value zero = smt::IntConstantOp::create(b, apply.getLoc(), b.getI64IntegerAttr(0));

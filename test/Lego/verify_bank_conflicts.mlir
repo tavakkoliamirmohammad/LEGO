@@ -219,3 +219,41 @@ func.func @test_worst_case_conflict(%tid: index {lego.thread_id}) {
 }
 
 // -----
+
+// Test 8: RegP row-major conflict-free (non-GenP layout, should pass)
+func.func @test_regp_conflict_free(%base_tid: index {lego.thread_id}) {
+  %c4 = arith.constant 4 : index
+  %c32 = arith.constant 32 : index
+
+  // RegP identity perm = row-major, 32 columns → each thread hits different bank
+  %layout = lego.reg_p perm [0, 1] dims[%c4, %c32] : !lego.layout
+
+  %i = arith.constant 0 : index
+  %c0 = arith.constant 0 : index
+  %j = arith.addi %base_tid, %c0 : index
+  %addr = lego.apply %layout(%i, %j) : !lego.layout
+
+  return
+}
+
+// -----
+
+// Test 9: RegP column-major bank conflict (non-GenP layout, should warn)
+func.func @test_regp_col_conflict(%base_tid: index {lego.thread_id}) {
+  %c32 = arith.constant 32 : index
+  %c4 = arith.constant 4 : index
+
+  // RegP reversed perm = col-major: flat = j*32 + i
+  // Threads access consecutive j → addresses stride by 32 → same bank
+  %layout = lego.reg_p perm [1, 0] dims[%c32, %c4] : !lego.layout
+
+  %i = arith.constant 0 : index
+  %c0 = arith.constant 0 : index
+  %j = arith.addi %base_tid, %c0 : index
+  // expected-warning@+1 {{Layout may cause shared memory bank conflicts}}
+  %addr = lego.apply %layout(%i, %j) : !lego.layout
+
+  return
+}
+
+// -----
