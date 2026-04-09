@@ -167,6 +167,51 @@ class TestDescriptorAPI:
         layout = OrderBy(Col(4, 8)).TileBy((4,), (8,))
         assert isinstance(layout, TileByLayout)
 
+    def test_order_by_then_returns_new_object(self):
+        """OrderBy.then() returns a new OrderBy, not self."""
+        o1 = OrderBy(Row(4, 8))
+        o2 = o1.then(Col(2, 4))
+        assert o2 is not o1
+        assert isinstance(o2, OrderBy)
+
+    def test_order_by_then_does_not_mutate_original(self):
+        """OrderBy.then() must not modify the original's chain."""
+        o1 = OrderBy(Row(4, 8))
+        assert len(o1.chain) == 1
+        o1.then(Col(2, 4))
+        assert len(o1.chain) == 1
+
+    def test_order_by_then_builds_chain(self):
+        """OrderBy.then() accumulates all steps in the chain."""
+        o1 = OrderBy(Row(4, 8))
+        o2 = o1.then(Col(2, 4))
+        o3 = o2.then(Row(16, 16))
+        assert len(o1.chain) == 1
+        assert len(o2.chain) == 2
+        assert len(o3.chain) == 3
+        assert o3.chain[0] is o1
+
+    def test_order_by_then_preserves_perms(self):
+        """Each OrderBy in the chain keeps its own perms."""
+        o1 = OrderBy(Row(4, 8))
+        o2 = o1.then(Col(2, 4))
+        assert o1.perms[0].dims() == (4, 8)
+        assert o2.perms[0].dims() == (2, 4)
+
+    def test_order_by_then_chain_feeds_group_by(self):
+        """GroupBy receives the full chain from a .then() result."""
+        o = OrderBy(Row(4, 8)).then(Col(2, 4))
+        gb = o.GroupBy([(4, 8)])
+        assert isinstance(gb, GroupBy)
+        assert len(gb.objects) == 2
+
+    def test_order_by_then_chain_feeds_tile_by(self):
+        """TileBy receives the full chain from a .then() result."""
+        o = OrderBy(Row(4, 8)).then(Col(2, 4))
+        tb = o.TileBy((4,), (8,))
+        assert isinstance(tb, TileByLayout)
+        assert len(tb._input_chain) == 2
+
     def test_functional_constructors(self):
         """Functional constructors create correct types."""
         r = row(4, 8)
