@@ -98,6 +98,25 @@ struct LegoToROCDLPipelineOptions
 };
 #endif
 
+#ifdef LEGO_HAS_XEVM
+/// Options for the lego-to-xevm pipeline.
+struct LegoToXeVMPipelineOptions
+    : public PassPipelineOptions<LegoToXeVMPipelineOptions> {
+  PassOptions::Option<std::string> chip{
+      *this, "chip",
+      llvm::cl::desc("Intel GPU chip (e.g., bmg, pvc)"),
+      llvm::cl::init("bmg")};
+  PassOptions::Option<int> optLevel{
+      *this, "opt-level",
+      llvm::cl::desc("XeVM optimization level (0-3)"),
+      llvm::cl::init(2)};
+  PassOptions::Option<std::string> format{
+      *this, "format",
+      llvm::cl::desc("Output format: fatbin, assembly, or binary"),
+      llvm::cl::init("fatbin")};
+};
+#endif
+
 
 void registerLegoPipelines();
 void buildLegoLowerPipeline(OpPassManager &pm);
@@ -116,12 +135,16 @@ void buildLegoToNVVMPipeline(OpPassManager &pm,
 void buildLegoToROCDLPipeline(OpPassManager &pm,
                                const LegoToROCDLPipelineOptions &options);
 #endif
+#ifdef LEGO_HAS_XEVM
+void buildLegoToXeVMPipeline(OpPassManager &pm,
+                              const LegoToXeVMPipelineOptions &options);
+#endif
 
 
 // =========================================================================
 // Shared GPU pipeline building blocks.
 //
-// Every GPU backend (NVVM, ROCDL, future XeVM, …) follows the same
+// Every GPU backend (NVVM, ROCDL, XeVM, …) follows the same
 // three-phase pattern:
 //
 //   1. buildLegoGPUOutlinePipeline    — LEGO lower → canonicalize → outline

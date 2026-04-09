@@ -232,6 +232,13 @@ detect_llvm_target(NVPTX  "NVPTX backend enabled — NVVM compilation support av
 detect_llvm_target(SPIRV  "SPIRV backend enabled — LLVM SPIR-V compilation support available")
 detect_llvm_target(AMDGPU "AMDGPU backend enabled")
 
+# XeVM/Intel GPU backend requires the SPIRV LLVM target for compilation.
+if(LEGO_HAS_SPIRV)
+  set(LEGO_HAS_XEVM ON)
+  add_definitions(-DLEGO_HAS_XEVM)
+  message(STATUS "XeVM/Intel GPU backend enabled (requires SPIRV target)")
+endif()
+
 # --- Per-backend runner flags ---
 # Each can be explicitly set (-DLEGO_ENABLE_CUDA_RUNNER=ON) or auto-detected.
 # LEGO_ENABLE_RUNNERS=ON is a shortcut that enables all detected backends.
