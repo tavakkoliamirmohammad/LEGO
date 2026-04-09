@@ -1,10 +1,9 @@
 import ast
-import atexit
 import os
 import sys
 
 from lego.python_printer import LEGOPythonCodePrinter
-from lego.frontends._adapter import DSLAdapter
+from lego.frontends._adapter import DSLAdapter, write_and_exec_temp_file
 from lego.rewriter import rewrite
 
 
@@ -90,34 +89,14 @@ class CutileAdapter(DSLAdapter):
 
     def compile_and_wrap(self, new_source, tree, original_fn, wrappers,
                          return_source=False):
-        _save = os.environ.get('LEGO_SAVE_KERNEL', False)
-        temp_dir = os.environ.get("LEGO_TEMP_DIR", "/tmp/lego_kernels")
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_file = os.path.join(
-            temp_dir, f"{original_fn.__name__}_{id(original_fn)}.py")
-
-        # Write to file so cuTile can use inspect.getsource()
-        with open(temp_file, 'w') as f:
-            f.write(new_source)
+        result = write_and_exec_temp_file(
+            new_source, tree, original_fn, return_source=return_source)
 
         if return_source:
-            if not _save:
-                os.remove(temp_file)
-            return new_source
+            source_text, _ = result
+            return source_text
 
-        # Compile and execute
-        code_obj = compile(tree, filename=temp_file, mode='exec')
-        namespace = original_fn.__globals__.copy()
-        exec(code_obj, namespace)
-
-        # Register cleanup at exit unless LEGO_SAVE_KERNEL is set
-        if not _save:
-            atexit.register(
-                lambda f=temp_file: os.remove(f) if os.path.exists(f) else None)
-
-        transformed_fn = namespace[original_fn.__name__]
-        transformed_fn.__code__ = transformed_fn.__code__.replace(
-            co_filename=temp_file)
+        namespace, transformed_fn = result
 
         # Re-apply cuTile wrappers in reverse order
         if wrappers:
