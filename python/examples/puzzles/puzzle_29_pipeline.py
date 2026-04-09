@@ -144,7 +144,7 @@ if __name__ == "__main__":
     print("Sub-test 1: 3-stage pipeline", file=sys.stderr)
     run_benchmark(
         pipeline_3stage, compute_expected_pipeline,
-        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
         label=f"pipeline N={N}",
         init_mod=10,
         atol=1e-2,
@@ -169,7 +169,7 @@ if __name__ == "__main__":
     print("Sub-test 2: Double-buffered stencil", file=sys.stderr)
     run_benchmark(
         stencil_double_buf, compute_expected_stencil,
-        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
         label=f"stencil N={N}",
         init_mod=10,
         atol=1e-2,

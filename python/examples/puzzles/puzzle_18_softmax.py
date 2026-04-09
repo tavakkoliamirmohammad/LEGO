@@ -76,7 +76,7 @@ if __name__ == "__main__":
 
     run_benchmark(
         softmax, compute_expected,
-        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
         label=f"{BATCH}x{SIZE}",
         init_mod=10,
         atol=1e-4,

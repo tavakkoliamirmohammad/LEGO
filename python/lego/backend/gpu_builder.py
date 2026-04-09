@@ -202,6 +202,14 @@ GPUTarget(
     tmp_prefix="lego_llvmspirv_",
 ).register()
 
+GPUTarget(
+    name="intel",
+    pipeline="lego-to-xevm",
+    default_chip="bmg",
+    default_format="assembly",
+    tmp_prefix="lego_intel_",
+).register()
+
 
 # ============================================================================
 # Layout-aware buffer descriptor

@@ -47,6 +47,6 @@ if __name__ == "__main__":
 
     run_benchmark(
         add_10_guard, compute_expected,
-        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
         label=f"SIZE={SIZE},TPB={TPB}",
     )
