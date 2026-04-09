@@ -4,7 +4,7 @@ from .core import *
 
 class LEGOCCodePrinter(C99CodePrinter):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, kwargs)
+        super().__init__(*args, **kwargs)
 
     def _print_floor(self, expr):
         arg = expr.args[0]

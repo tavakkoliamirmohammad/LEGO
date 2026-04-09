@@ -6,7 +6,7 @@ from .core import *
 
 class LEGOGLSLCodePrinter(GLSLPrinter):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, kwargs)
+        super().__init__(*args, **kwargs)
 
     def _print_floor(self, expr):
         arg = expr.args[0]

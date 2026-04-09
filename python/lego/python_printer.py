@@ -5,7 +5,7 @@ from sympy.printing.pycode import PythonCodePrinter
 class LEGOPythonCodePrinter(PythonCodePrinter):
     def __init__(self, *args, **kwargs):
         self.do_broadcast = kwargs.pop('do_broadcast', True)
-        super().__init__(*args, kwargs)
+        super().__init__(*args, **kwargs)
 
     def _print_floor(self, expr):
         """

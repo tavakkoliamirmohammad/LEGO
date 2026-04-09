@@ -6,9 +6,11 @@ from .core import *
 
 class LEGOFortranCodePrinter(FCodePrinter):
     def __init__(self, *args, **kwargs):
-        # Default to Fortran 95 standard
-        kwargs.setdefault('standard', 95)
-        super().__init__(*args, kwargs)
+        # Default to Fortran 95 standard via the settings dict.
+        settings = kwargs.get('settings') or {}
+        settings.setdefault('standard', 95)
+        kwargs['settings'] = settings
+        super().__init__(*args, **kwargs)
 
     def _print_floor(self, expr):
         arg = expr.args[0]
