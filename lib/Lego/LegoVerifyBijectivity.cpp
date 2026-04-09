@@ -219,7 +219,11 @@ private:
 
     // Compute volume = dim[0] * dim[1] * ... * dim[n-1]
     Value volume = nullptr;
-    if (!dims.empty()) {
+    if (dims.empty()) {
+      // 0-dimensional layout: flat_input can only be 0
+      Value eqZero = smt::EqOp::create(b, genP.getLoc(), flatInput, zero);
+      smt::AssertOp::create(b, genP.getLoc(), eqZero);
+    } else if (!dims.empty()) {
       SmallVector<Value> dimValues;
       for (Value d : dims) {
         Value dimVal = builder.getOrCreate(d);

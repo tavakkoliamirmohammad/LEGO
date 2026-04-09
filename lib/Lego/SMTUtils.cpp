@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
+#include <signal.h>
+#include <sstream>
 
 namespace mlir {
 namespace lego {
@@ -54,32 +56,46 @@ Value SMTBuilder::getOrCreate(Value v) {
     valMap[v] = smt::IntDivOp::create(builder, loc, valMap[divOp.getLhs()], valMap[divOp.getRhs()]);
   } else if (auto divSIOp = dyn_cast<arith::DivSIOp>(defOp)) {
     // Signed division truncates toward zero (C semantics), but SMT-LIB div
-    // is Euclidean (rounds toward negative infinity). Encode as:
-    //   divsi(a, b) = ite(a >= 0, a div b, -((-a) div b))
+    // is Euclidean (rounds toward negative infinity). Must handle all four
+    // sign combinations of (a, b):
+    //   trunc_div(a, b) = sign(a)*sign(b) * (|a| div |b|)
+    // Encoded as:
+    //   absA = ite(a >= 0, a, -a),  absB = ite(b > 0, b, -b)
+    //   posQuot = absA div absB
+    //   result = ite((a >= 0) == (b > 0), posQuot, -posQuot)
     Value a = valMap[divSIOp.getLhs()];
     Value bVal = valMap[divSIOp.getRhs()];
     Value zero = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(0));
     Value aGeZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::ge, a, zero);
-    Value posDiv = smt::IntDivOp::create(builder, loc, a, bVal);
+    Value bGtZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::gt, bVal, zero);
     Value negA = smt::IntSubOp::create(builder, loc, zero, a);
-    Value negDiv = smt::IntDivOp::create(builder, loc, negA, bVal);
-    Value negResult = smt::IntSubOp::create(builder, loc, zero, negDiv);
-    valMap[v] = smt::IteOp::create(builder, loc, aGeZero, posDiv, negResult);
+    Value negB = smt::IntSubOp::create(builder, loc, zero, bVal);
+    Value absA = smt::IteOp::create(builder, loc, aGeZero, a, negA);
+    Value absB = smt::IteOp::create(builder, loc, bGtZero, bVal, negB);
+    Value posQuot = smt::IntDivOp::create(builder, loc, absA, absB);
+    Value negQuot = smt::IntSubOp::create(builder, loc, zero, posQuot);
+    // Same sign => positive result, different sign => negative result
+    Value sameSign = smt::EqOp::create(builder, loc, aGeZero, bGtZero);
+    valMap[v] = smt::IteOp::create(builder, loc, sameSign, posQuot, negQuot);
   } else if (auto remOp = dyn_cast<arith::RemUIOp>(defOp)) {
     // Unsigned remainder: Euclidean mod matches when operands >= 0.
     valMap[v] = smt::IntModOp::create(builder, loc, valMap[remOp.getLhs()], valMap[remOp.getRhs()]);
   } else if (auto remSIOp = dyn_cast<arith::RemSIOp>(defOp)) {
-    // Signed remainder (C semantics): a - truncdiv(a, b) * b
-    // Reuse the truncation-toward-zero division encoding.
+    // Signed remainder (C semantics): a - trunc_div(a, b) * b
+    // trunc_div uses absolute values, same as DivSIOp above.
     Value a = valMap[remSIOp.getLhs()];
     Value bVal = valMap[remSIOp.getRhs()];
     Value zero = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(0));
     Value aGeZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::ge, a, zero);
-    Value posDiv = smt::IntDivOp::create(builder, loc, a, bVal);
+    Value bGtZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::gt, bVal, zero);
     Value negA = smt::IntSubOp::create(builder, loc, zero, a);
-    Value negDiv = smt::IntDivOp::create(builder, loc, negA, bVal);
-    Value negResult = smt::IntSubOp::create(builder, loc, zero, negDiv);
-    Value truncDiv = smt::IteOp::create(builder, loc, aGeZero, posDiv, negResult);
+    Value negB = smt::IntSubOp::create(builder, loc, zero, bVal);
+    Value absA = smt::IteOp::create(builder, loc, aGeZero, a, negA);
+    Value absB = smt::IteOp::create(builder, loc, bGtZero, bVal, negB);
+    Value posQuot = smt::IntDivOp::create(builder, loc, absA, absB);
+    Value negQuot = smt::IntSubOp::create(builder, loc, zero, posQuot);
+    Value sameSign = smt::EqOp::create(builder, loc, aGeZero, bGtZero);
+    Value truncDiv = smt::IteOp::create(builder, loc, sameSign, posQuot, negQuot);
     Value prod = smt::IntMulOp::create(builder, loc, ValueRange{truncDiv, bVal});
     valMap[v] = smt::IntSubOp::create(builder, loc, a, prod);
   } else if (auto cmpOp = dyn_cast<arith::CmpIOp>(defOp)) {
@@ -114,16 +130,12 @@ Value SMTBuilder::getOrCreate(Value v) {
     Value falseVal = valMap[selectOp.getFalseValue()];
     valMap[v] = smt::IteOp::create(builder, loc, cond, trueVal, falseVal);
   } else if (auto shliOp = dyn_cast<arith::ShLIOp>(defOp)) {
-    // shli(a, b) = a * 2^b. For constant shifts, expand directly.
-    Value a = valMap[shliOp.getLhs()];
-    Value b = valMap[shliOp.getRhs()];
-    Value two = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(2));
-    // Encode as a * 2^b using repeated multiplication is impractical for symbolic b.
-    // For the common case of constant shift, the constant folder already produced a
-    // multiply. For symbolic shifts, fall through to the diagnostic below.
+    // shli(a, b) = a * 2^b. Only supported for constant shifts.
+    // Symbolic shifts fall through to the unrecognized-op warning below.
     if (auto constOp = dyn_cast_or_null<arith::ConstantOp>(shliOp.getRhs().getDefiningOp())) {
       if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue())) {
         int64_t shift = intAttr.getInt();
+        Value a = valMap[shliOp.getLhs()];
         Value factor = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(1LL << shift));
         valMap[v] = smt::IntMulOp::create(builder, loc, ValueRange{a, factor});
       }
@@ -139,6 +151,7 @@ Value SMTBuilder::getOrCreate(Value v) {
     }
   } else if (auto andiOp = dyn_cast<arith::AndIOp>(defOp)) {
     // andi(a, mask) where mask = 2^k - 1 is equivalent to a mod 2^k
+    bool handled = false;
     if (auto constOp = dyn_cast_or_null<arith::ConstantOp>(andiOp.getRhs().getDefiningOp())) {
       if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue())) {
         int64_t mask = intAttr.getInt();
@@ -146,8 +159,17 @@ Value SMTBuilder::getOrCreate(Value v) {
           // mask is 2^k - 1
           Value modulus = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(mask + 1));
           valMap[v] = smt::IntModOp::create(builder, loc, valMap[andiOp.getLhs()], modulus);
+          handled = true;
+        } else {
+          andiOp->emitWarning("SMT encoding: arith.andi with non-power-of-2 mask (0x")
+              << llvm::Twine::utohexstr(mask)
+              << ") cannot be encoded precisely — replaced with unconstrained variable. "
+                 "Verification results may be unsound.";
         }
       }
+    }
+    if (!handled) {
+      // Non-constant or non-power-of-2 mask: fall through to generic warning
     }
   } else if (auto truncOp = dyn_cast<arith::TruncIOp>(defOp)) {
     // trunci %x : iN to iM => x mod 2^M (wrapping semantics)
@@ -264,13 +286,20 @@ SMTResult runZ3WithModel(const std::string &smtLib, unsigned timeoutMs) {
     smtLibWithTimeout = smtLib;
 
   int out_pipe[2]; int in_pipe[2];
-  if (pipe(out_pipe) == -1 || pipe(in_pipe) == -1) {
+  if (pipe(out_pipe) == -1) {
+    result.isUnknown = true;
+    return result;
+  }
+  if (pipe(in_pipe) == -1) {
+    close(out_pipe[0]); close(out_pipe[1]);
     result.isUnknown = true;
     return result;
   }
 
   pid_t pid = fork();
   if (pid == -1) {
+    close(out_pipe[0]); close(out_pipe[1]);
+    close(in_pipe[0]); close(in_pipe[1]);
     result.isUnknown = true;
     return result;
   }
@@ -288,8 +317,31 @@ SMTResult runZ3WithModel(const std::string &smtLib, unsigned timeoutMs) {
   close(out_pipe[0]);
   close(in_pipe[1]);
 
-  write(out_pipe[1], smtLibWithTimeout.c_str(), smtLibWithTimeout.size());
+  // Write SMT-LIB to Z3 stdin with retry on short writes and EINTR.
+  const char *writePtr = smtLibWithTimeout.c_str();
+  size_t remaining = smtLibWithTimeout.size();
+  bool writeOk = true;
+  while (remaining > 0) {
+    ssize_t written = write(out_pipe[1], writePtr, remaining);
+    if (written > 0) {
+      writePtr += written;
+      remaining -= written;
+    } else if (written == -1 && errno == EINTR) {
+      continue;
+    } else {
+      writeOk = false;
+      break;
+    }
+  }
   close(out_pipe[1]);
+
+  if (!writeOk) {
+    close(in_pipe[0]);
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+    result.isUnknown = true;
+    return result;
+  }
 
   std::string output;
   char buffer[4096];
@@ -298,18 +350,42 @@ SMTResult runZ3WithModel(const std::string &smtLib, unsigned timeoutMs) {
     output.append(buffer, n);
   }
   close(in_pipe[0]);
-  waitpid(pid, nullptr, 0);
+
+  int wstatus = 0;
+  waitpid(pid, &wstatus, 0);
 
   result.rawOutput = output;
 
-  // Debug: Print raw Z3 output (temporary)
-  // fprintf(stderr, "=== Z3 RAW OUTPUT ===\n%s\n=== END Z3 OUTPUT ===\n", output.c_str());
+  // Check if Z3 exited abnormally (crash, missing binary, signal)
+  if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
+    if (output.empty()) {
+      // Z3 likely crashed or was not found — treat as unknown with note
+      result.isUnknown = true;
+      return result;
+    }
+    // Non-zero exit but has output — Z3 may have printed sat/unsat before error,
+    // fall through to normal parsing.
+  }
 
-  // Parse the result
-  if (output.find("unsat") != std::string::npos) {
+  // Parse the result — match on line boundaries to avoid false matches
+  // from variable names containing "sat" or "unsat".
+  bool foundUnsat = false;
+  bool foundSat = false;
+  std::istringstream lines(output);
+  std::string line;
+  while (std::getline(lines, line)) {
+    // Trim whitespace
+    size_t start = line.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) continue;
+    std::string trimmed = line.substr(start);
+    if (trimmed == "unsat") { foundUnsat = true; break; }
+    if (trimmed == "sat") { foundSat = true; break; }
+    if (trimmed == "unknown") { result.isUnknown = true; return result; }
+  }
+
+  if (foundUnsat) {
     result.isUnsat = true;
-  } else if (output.find("sat") != std::string::npos &&
-             output.find("unsat") == std::string::npos) {
+  } else if (foundSat) {
     result.isSat = true;
 
     // Parse model from output

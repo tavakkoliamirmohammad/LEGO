@@ -52,12 +52,12 @@ func.func @rem_different_divisors(%x: index, %d1: index, %d2: index) -> index {
 // When the numerator contains a shared factor with the divisor.
 // CHECK-LABEL: func.func @extended_div_shared_factor
 // CHECK-SAME:  (%[[Q:.*]]: index, %[[S:.*]]: index, %[[K:.*]]: index, %[[R:.*]]: index)
-// CHECK:       %[[QDIVK:.*]] = arith.divui %[[Q]], %[[K]] : index
-// CHECK:       %[[QREMK:.*]] = arith.remui %[[Q]], %[[K]] : index
-// CHECK:       arith.muli %[[QREMK]], %[[S]] : index
-// CHECK:       arith.addi
-// CHECK:       arith.divui
-// CHECK:       arith.addi %[[QDIVK]],
+// CHECK-DAG:   %[[QDIVK:.*]] = arith.divui %[[Q]], %[[K]] : index
+// CHECK-DAG:   %[[QREMK:.*]] = arith.remui %[[Q]], %[[K]] : index
+// CHECK:       %[[QRKS:.*]] = arith.muli %[[QREMK]], %[[S]] : index
+// CHECK:       %[[INNER_NUM:.*]] = arith.addi %[[QRKS]], %[[R]] : index
+// CHECK:       %[[INNER_DIV:.*]] = arith.divui %[[INNER_NUM]],
+// CHECK:       arith.addi %[[QDIVK]], %[[INNER_DIV]]
 func.func @extended_div_shared_factor(%q: index, %s: index, %k: index, %r: index) -> index {
   %qs = arith.muli %q, %s : index
   %num = arith.addi %qs, %r : index
@@ -70,9 +70,9 @@ func.func @extended_div_shared_factor(%q: index, %s: index, %k: index, %r: index
 // CHECK-LABEL: func.func @extended_rem_shared_factor
 // CHECK-SAME:  (%[[Q:.*]]: index, %[[S:.*]]: index, %[[K:.*]]: index, %[[R:.*]]: index)
 // CHECK:       %[[QREMK:.*]] = arith.remui %[[Q]], %[[K]] : index
-// CHECK:       arith.muli %[[QREMK]], %[[S]] : index
-// CHECK:       arith.addi
-// CHECK:       arith.remui
+// CHECK:       %[[QRKS:.*]] = arith.muli %[[QREMK]], %[[S]] : index
+// CHECK:       %[[INNER_NUM:.*]] = arith.addi %[[QRKS]], %[[R]] : index
+// CHECK:       arith.remui %[[INNER_NUM]],
 func.func @extended_rem_shared_factor(%q: index, %s: index, %k: index, %r: index) -> index {
   %qs = arith.muli %q, %s : index
   %num = arith.addi %qs, %r : index

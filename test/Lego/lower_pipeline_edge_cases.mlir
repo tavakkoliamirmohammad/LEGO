@@ -122,8 +122,8 @@ func.func @groupby_regroup_lower(%i: index, %j: index) -> index {
 // --- Full roundtrip through pipeline: apply then apply_inverse should cancel ---
 // CHECK-LABEL: func.func @roundtrip_cancel
 // CHECK-SAME:  (%[[I:.*]]: index, %[[J:.*]]: index)
-// After CSE/canonicalize, apply followed by apply_inverse should produce
-// the original indices (or equivalent arithmetic that simplifies).
+// After lowering, apply followed by apply_inverse produces equivalent
+// arithmetic. The key property is that no lego ops remain.
 // CHECK-NOT:   lego.
 // CHECK:       return
 func.func @roundtrip_cancel(%i: index, %j: index) -> (index, index) {

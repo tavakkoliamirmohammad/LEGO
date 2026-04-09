@@ -12,7 +12,7 @@
 // CHECK-SAME: (%[[I:.*]]: index, %[[J:.*]]: index)
 // CHECK:       %[[LAYOUT:.*]] = lego.row
 // CHECK:       lego.assert_apply_bounds %[[LAYOUT]](%[[I]], %[[J]])
-// CHECK:       lego.apply %[[LAYOUT]](%[[I]], %[[J]])
+// CHECK-NEXT:  lego.apply %[[LAYOUT]](%[[I]], %[[J]])
 func.func @bounds_check_apply(%i: index, %j: index) -> index {
   %c4 = arith.constant 4 : index
   %c8 = arith.constant 8 : index
@@ -26,7 +26,7 @@ func.func @bounds_check_apply(%i: index, %j: index) -> index {
 // CHECK-SAME: (%[[F:.*]]: index)
 // CHECK:       %[[LAYOUT:.*]] = lego.row
 // CHECK:       lego.assert_inv_bounds %[[LAYOUT]](%[[F]])
-// CHECK:       lego.apply_inverse %[[LAYOUT]](%[[F]])
+// CHECK-NEXT:  lego.apply_inverse %[[LAYOUT]](%[[F]])
 func.func @bounds_check_apply_inverse(%f: index) -> (index, index) {
   %c4 = arith.constant 4 : index
   %c8 = arith.constant 8 : index
