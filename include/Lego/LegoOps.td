@@ -229,6 +229,39 @@ def StoreOp : Lego_Op<"store", [
 }
 
 //===----------------------------------------------------------------------===//
+// SMT Verification Operations
+//===----------------------------------------------------------------------===//
+
+def CheckOp : Lego_Op<"check"> {
+  let summary = "Verify memory access properties via SMT";
+  let description = [{
+    Marks a flat index value for SMT verification. The `lego-verify` pass
+    (run as part of `lego-lower`) finds these ops, encodes the operand's
+    arith def-use chain to SMT, checks the requested properties with Z3,
+    emits diagnostics, and erases the op.
+
+    The parent function must have a block argument with the `lego.thread_id`
+    attribute.
+
+    Example:
+    ```mlir
+    %addr = lego.apply %layout(%i, %j) : !lego.layout
+    lego.check %addr {coalescing}
+    lego.check %addr {bank_conflict_free, warp_size = 16, num_banks = 32}
+    ```
+  }];
+  let arguments = (ins
+    Index:$flat_index,
+    UnitAttr:$coalescing,
+    UnitAttr:$bank_conflict_free,
+    DefaultValuedAttr<I64Attr, "32">:$warp_size,
+    DefaultValuedAttr<I64Attr, "32">:$num_banks,
+    DefaultValuedAttr<I64Attr, "4">:$element_size
+  );
+  let assemblyFormat = "$flat_index attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
 // Bounds Verification Operations
 //===----------------------------------------------------------------------===//
 
