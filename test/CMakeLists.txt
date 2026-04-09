@@ -49,7 +49,16 @@ add_lit_testsuite(check-lego "Running the Lego regression tests"
   )
 
 # --- Puzzle lit tests (GPU integration tests) ---
-if(TARGET LegoPythonModules AND LEGO_ENABLE_RUNNERS)
+# Always register the test suite — lit feature flags (nvidia-gpu, cuda, etc.)
+# handle skipping when no GPU hardware is available.
+if(TARGET LegoPythonModules)
+  # Ensure runner booleans are defined (default OFF when no GPU detected).
+  foreach(_var LEGO_HOST_HAS_NVIDIA_GPU LEGO_HOST_HAS_AMD_GPU LEGO_HOST_HAS_METAL
+               LEGO_ENABLE_CUDA_RUNNER LEGO_ENABLE_ROCM_RUNNER LEGO_ENABLE_METAL_RUNNER)
+    if(NOT DEFINED ${_var})
+      set(${_var} OFF)
+    endif()
+  endforeach()
   llvm_canonicalize_cmake_booleans(
     LEGO_HOST_HAS_NVIDIA_GPU LEGO_HOST_HAS_AMD_GPU LEGO_HOST_HAS_METAL
     LEGO_ENABLE_CUDA_RUNNER LEGO_ENABLE_ROCM_RUNNER LEGO_ENABLE_METAL_RUNNER)
