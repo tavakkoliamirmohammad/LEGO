@@ -3,6 +3,7 @@ LEGO: Layout Expression Language for Code Generation
 
   Backend:   lego.backend (symbolic, codegen, compiler, dialects)
   Frontends: lego.frontends.triton_jit, .cutile_jit, .python_mlir
+  PyTorch:   lego.torch (annotate, rearrange, LegoTensor, torch.compile)
 """
 from .core import *
 from .frontends.triton_jit import jit, get_kernel_source
@@ -68,3 +69,8 @@ def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
     )
 
 
+# PyTorch integration — only when torch is already loaded.
+import sys as _sys3
+if 'torch' in _sys3.modules:
+    from .torch import annotate, rearrange, LegoTensor  # noqa: F401
+del _sys3

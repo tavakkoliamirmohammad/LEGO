@@ -1,0 +1,324 @@
+"""
+Tests for LEGO Layer 2: LegoTensor subclass with __torch_dispatch__.
+
+Covers: annotate, rearrange, 4-tier op classification, layout transforms,
+pickling, autograd, and end-to-end model flow.
+"""
+
+import pytest
+import warnings
+import pickle
+import numpy as np
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+try:
+    import torch
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+
+pytestmark = pytest.mark.skipif(not _HAS_TORCH, reason="PyTorch not available")
+
+if _HAS_TORCH:
+    import lego
+    from lego.torch import annotate, rearrange, LegoTensor
+    from lego.torch.tensor import _warned_ops, TransposedLayout
+    from lego.frontends.python_mlir import ColMajor, RowMajor, TiledPermute
+
+
+# ============================================================================
+# annotate
+# ============================================================================
+
+class TestAnnotate:
+    def test_returns_lego_tensor(self):
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4)
+        ax = annotate(x, layout)
+        assert isinstance(ax, LegoTensor)
+        assert ax.lego_layout is layout
+
+    def test_metadata_only_no_data_copy(self):
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4)
+        ax = annotate(x, layout)
+        assert ax._data.data_ptr() == x.data_ptr()
+
+    def test_composition(self):
+        l1 = RowMajor((4, 4))
+        l2 = ColMajor((4, 4))
+        x = torch.randn(4, 4)
+        ax = annotate(annotate(x, l1), l2)
+        assert isinstance(ax, LegoTensor)
+
+    def test_shape_dtype_device(self):
+        layout = ColMajor((8, 8))
+        x = torch.randn(8, 8, dtype=torch.float64)
+        ax = annotate(x, layout)
+        assert ax.shape == (8, 8)
+        assert ax.dtype == torch.float64
+
+
+# ============================================================================
+# rearrange
+# ============================================================================
+
+class TestRearrange:
+    def test_physically_rearranges(self):
+        layout = ColMajor((4, 4))
+        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        rx = rearrange(x, layout)
+        assert isinstance(rx, LegoTensor)
+        assert rx._is_physical
+        # Data should differ from original
+        assert not torch.equal(rx._data, x)
+
+    def test_round_trip_via_inverse(self):
+        """rearrange then inverse permutation recovers original."""
+        layout = ColMajor((4, 4))
+        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        rx = rearrange(x, layout)
+        # Inverse: apply inv permutation
+        from lego.backend.compiler import LayoutCompiler
+        compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
+        _, inv = compiler.get_permutation_table()
+        inv_idx = torch.from_numpy(np.ascontiguousarray(inv))
+        back = rx._data.reshape(-1)[inv_idx].reshape(4, 4)
+        torch.testing.assert_close(back, x)
+
+    def test_autograd(self):
+        """Backward through rearrange."""
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4, requires_grad=True)
+        rx = rearrange(x, layout)
+        loss = rx._data.sum()
+        loss.backward()
+        assert x.grad is not None
+        assert x.grad.shape == (4, 4)
+
+
+# ============================================================================
+# Tier 1: Pointwise propagation
+# ============================================================================
+
+class TestTier1:
+    def test_add_preserves_layout(self):
+        layout = ColMajor((4, 4))
+        a = annotate(torch.randn(4, 4), layout)
+        b = annotate(torch.randn(4, 4), layout)
+        c = a + b
+        assert isinstance(c, LegoTensor)
+        assert c.lego_layout is layout
+
+    def test_relu_preserves_layout(self):
+        layout = ColMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+        y = torch.relu(x)
+        assert isinstance(y, LegoTensor)
+        assert y.lego_layout is layout
+
+    def test_mul_scalar(self):
+        layout = RowMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+        y = x * 3.0
+        assert isinstance(y, LegoTensor)
+        assert y.lego_layout is layout
+
+    def test_neg(self):
+        layout = ColMajor((4, 4))
+        x = annotate(torch.ones(4, 4), layout)
+        y = -x
+        assert isinstance(y, LegoTensor)
+        torch.testing.assert_close(y._data, -torch.ones(4, 4))
+
+    def test_exp(self):
+        layout = ColMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+        y = torch.exp(x)
+        assert isinstance(y, LegoTensor)
+        torch.testing.assert_close(y._data, torch.exp(x._data))
+
+    def test_correctness(self):
+        """Pointwise result matches plain tensor."""
+        layout = ColMajor((4, 4))
+        a = torch.randn(4, 4)
+        b = torch.randn(4, 4)
+        expected = a + b
+        actual = annotate(a, layout) + annotate(b, layout)
+        torch.testing.assert_close(actual._data, expected)
+
+
+# ============================================================================
+# Tier 2: Layout transforms
+# ============================================================================
+
+class TestTier2:
+    def test_transpose_creates_transposed_layout(self):
+        layout = ColMajor((4, 8))
+        x = annotate(torch.randn(4, 8), layout)
+        y = x.t()
+        assert isinstance(y, LegoTensor)
+        assert isinstance(y.lego_layout, TransposedLayout)
+        assert y.shape == (8, 4)
+
+    def test_transpose_int(self):
+        layout = ColMajor((2, 3, 4))
+        x = annotate(torch.randn(2, 3, 4), layout)
+        y = torch.transpose(x, 0, 2)
+        assert isinstance(y, LegoTensor)
+        assert y.shape == (4, 3, 2)
+
+    def test_permute(self):
+        layout = ColMajor((2, 3, 4))
+        x = annotate(torch.randn(2, 3, 4), layout)
+        y = x.permute(2, 0, 1)
+        assert isinstance(y, LegoTensor)
+        assert y.shape == (4, 2, 3)
+
+    def test_double_transpose_composes(self):
+        layout = ColMajor((4, 8))
+        x = annotate(torch.randn(4, 8), layout)
+        y = x.t().t()
+        assert isinstance(y, LegoTensor)
+        assert y.shape == (4, 8)
+
+
+# ============================================================================
+# Tier 3: Drop + warn
+# ============================================================================
+
+class TestTier3:
+    def test_reshape_drops_layout(self):
+        _warned_ops.clear()
+        layout = ColMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            y = x.reshape(2, 8)
+        assert not isinstance(y, LegoTensor)
+        layout_warns = [x for x in w if "layout-aware" in str(x.message)]
+        assert len(layout_warns) >= 1
+
+    def test_warns_once(self):
+        _warned_ops.clear()
+        layout = ColMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            x.reshape(2, 8)
+            x.reshape(2, 8)
+        layout_warns = [x for x in w if "layout-aware" in str(x.message)]
+        assert len(layout_warns) == 1
+
+
+# ============================================================================
+# Tier 4: LEGO kernel (stub — runs standard op)
+# ============================================================================
+
+class TestTier4:
+    def test_mm_correctness(self):
+        layout = ColMajor((4, 4))
+        a = annotate(torch.randn(4, 4), layout)
+        b = annotate(torch.randn(4, 4), layout)
+        c = torch.mm(a, b)
+        expected = torch.mm(a._data, b._data)
+        torch.testing.assert_close(c, expected)
+
+    def test_mm_returns_plain_tensor(self):
+        """Until Phase 1, mm returns plain tensor (no layout propagation)."""
+        layout = ColMajor((4, 4))
+        a = annotate(torch.randn(4, 4), layout)
+        b = annotate(torch.randn(4, 4), layout)
+        c = torch.mm(a, b)
+        assert not isinstance(c, LegoTensor)
+
+
+# ============================================================================
+# Full reductions
+# ============================================================================
+
+class TestReductions:
+    def test_sum_returns_scalar(self):
+        layout = ColMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+        s = torch.sum(x)
+        assert not isinstance(s, LegoTensor)
+        torch.testing.assert_close(s, torch.sum(x._data))
+
+    def test_mean(self):
+        layout = ColMajor((4, 4))
+        x = annotate(torch.arange(16, dtype=torch.float32).reshape(4, 4), layout)
+        torch.testing.assert_close(torch.mean(x), torch.mean(x._data))
+
+
+# ============================================================================
+# Serialization
+# ============================================================================
+
+class TestSerialization:
+    def test_pickle_round_trip(self):
+        layout = ColMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+        buf = pickle.dumps(x)
+        y = pickle.loads(buf)
+        assert isinstance(y, LegoTensor)
+        torch.testing.assert_close(y._data, x._data)
+
+    def test_repr(self):
+        layout = ColMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+        r = repr(x)
+        assert "LegoTensor" in r
+        assert "virtual" in r
+
+
+# ============================================================================
+# End-to-end: annotated tensors through a model
+# ============================================================================
+
+class TestEndToEnd:
+    def test_simple_model(self):
+        """Annotated tensors flow through a simple model without errors."""
+        layout = ColMajor((4, 4))
+        x = annotate(torch.randn(4, 4), layout)
+
+        # Tier 1 chain
+        y = torch.relu(x)
+        y = y + x
+        y = y * 2.0
+        y = torch.sigmoid(y)
+
+        assert isinstance(y, LegoTensor)
+        assert y.lego_layout is layout
+        assert y.shape == (4, 4)
+
+    def test_model_with_transpose(self):
+        """Layout transforms compose correctly through a model."""
+        layout = ColMajor((4, 8))
+        x = annotate(torch.randn(4, 8), layout)
+        y = torch.relu(x)          # Tier 1
+        z = y.t()                   # Tier 2
+        w = torch.relu(z)           # Tier 1 on transposed
+        assert isinstance(w, LegoTensor)
+        assert w.shape == (8, 4)
+
+    def test_nn_module(self):
+        """LegoTensor works as input to nn.Module."""
+        layout = RowMajor((8, 4))
+
+        class SimpleNet(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(4, 4, bias=False)
+
+            def forward(self, x):
+                return torch.relu(x)  # Just pointwise
+
+        model = SimpleNet()
+        x = annotate(torch.randn(8, 4), layout)
+        y = model(x)
+        assert isinstance(y, LegoTensor)
+        assert y.shape == (8, 4)
