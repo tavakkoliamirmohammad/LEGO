@@ -83,6 +83,20 @@ def LegoVerifyBijectivityPass : Pass<"lego-verify-bijectivity", "mlir::ModuleOp"
   let constructor = "mlir::lego::createLegoVerifyBijectivityPass()";
 }
 
+def LegoVerifyPass : Pass<"lego-verify", "mlir::ModuleOp"> {
+  let summary = "Verify memory access properties marked by lego.check ops";
+  let description = [{
+    Finds all lego.check ops in the module, encodes their operand's arith
+    def-use chain to SMT, verifies the requested properties (coalescing,
+    bank-conflict freedom) with Z3, emits diagnostics, and erases the ops.
+
+    This pass should run after arith optimization (canonicalize + CSE) so
+    that Z3 gets the smallest possible formula. It runs as part of the
+    lego-lower pipeline, before strength reduction.
+  }];
+  let constructor = "mlir::lego::createLegoVerifyPass()";
+}
+
 def LegoVerifyCoalescingPass : Pass<"lego-verify-coalescing", "mlir::ModuleOp"> {
   let summary = "Verify that layouts produce coalesced memory access patterns";
   let description = [{
