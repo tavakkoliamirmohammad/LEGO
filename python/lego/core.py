@@ -445,21 +445,6 @@ class GroupBy(LayoutBlock):
                 _merge_bound(constraints, lhs, ub=ub)
 
 
-    def transform(self, tensor):
-        """Apply layout transform via MLIR JIT compilation."""
-        from .backend.compiler import get_compiler
-        if not hasattr(self, '_compiled'):
-            self._compiled = get_compiler(self, tensor.shape)
-        return self._compiled.transform_numpy(tensor) if hasattr(tensor, 'ctypes') \
-            else self._compiled.transform_numpy(tensor)
-
-    def inverse_transform(self, tensor):
-        """Apply inverse layout transform."""
-        from .backend.compiler import get_compiler
-        if not hasattr(self, '_compiled'):
-            self._compiled = get_compiler(self, tensor.shape)
-        return self._compiled.inverse_transform_numpy(tensor)
-
     def __getitem__(self, key):
         if not isinstance(key, tuple):
             key = (key,)

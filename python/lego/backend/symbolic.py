@@ -1,7 +1,7 @@
 """
 SymPy lowering pipeline: SymPy layout expressions → MLIR LEGO dialect → arith → SymPy.
 """
-from lego.core import *
+from lego.core import Row, Col, RegP, GenP, OrderBy, GroupBy, TileByLayout
 import sys
 import threading
 import sympy as sp
@@ -116,8 +116,11 @@ def _lower_sympy_to_index(expr, sym_to_val):
     if isinstance(expr, sp.Mul):
         num, den = expr.as_numer_denom()
         if den != sp.S.One:
-            return arith.divui(_lower_sympy_to_index(num, sym_to_val),
-                               _lower_sympy_to_index(den, sym_to_val))
+            n = _lower_sympy_to_index(num, sym_to_val)
+            d = _lower_sympy_to_index(den, sym_to_val)
+            if num.is_nonnegative and den.is_positive:
+                return arith.divui(n, d)
+            return arith.divsi(n, d)
         coeff, rest = expr.as_coeff_Mul()
         if rest == sp.S.One:
             return _index_const(int(coeff))
@@ -130,12 +133,19 @@ def _lower_sympy_to_index(expr, sym_to_val):
     if isinstance(expr, sp.floor):
         inner = expr.args[0]
         num, den = inner.as_numer_denom()
-        return arith.divui(_lower_sympy_to_index(num, sym_to_val),
-                           _lower_sympy_to_index(den, sym_to_val))
+        n = _lower_sympy_to_index(num, sym_to_val)
+        d = _lower_sympy_to_index(den, sym_to_val)
+        if num.is_nonnegative and den.is_positive:
+            return arith.divui(n, d)
+        return arith.divsi(n, d)
 
     if isinstance(expr, sp.Mod):
-        return arith.remui(_lower_sympy_to_index(expr.args[0], sym_to_val),
-                           _lower_sympy_to_index(expr.args[1], sym_to_val))
+        a_expr, b_expr = expr.args[0], expr.args[1]
+        a = _lower_sympy_to_index(a_expr, sym_to_val)
+        b = _lower_sympy_to_index(b_expr, sym_to_val)
+        if a_expr.is_nonnegative and b_expr.is_positive:
+            return arith.remui(a, b)
+        return arith.remsi(a, b)
 
     if isinstance(expr, sp.Abs):
         inner = _lower_sympy_to_index(expr.args[0], sym_to_val)

@@ -5,12 +5,10 @@ import pytest
 import sympy as sp
 
 from lego.core import OrderBy, Row, Col, RegP, TileByLayout
-from lego.rewriter import (
-    rewrite, _format_tuple, _format_make_block_ptr,
-    _try_block_ptr_pattern, _extract_subscript_indices,
-)
+from lego.rewriter import rewrite
 from lego.frontends.triton_jit import (
     TritonAdapter, TritonCodePrinter, BlockPtrInfo, extract_block_ptr_metadata,
+    _format_tuple, _format_make_block_ptr, _extract_subscript_indices,
 )
 
 
@@ -688,17 +686,12 @@ class TestRegPBlockPtrCodegen:
 class TestAdapterOptions:
     def test_default_no_block_ptr(self):
         adapter = TritonAdapter()
-        assert adapter.get_rewriter_options() == {'use_block_ptr': False}
+        assert adapter.use_block_ptr is False
 
     def test_block_ptr_enabled(self):
         adapter = TritonAdapter(use_block_ptr=True)
-        assert adapter.get_rewriter_options() == {'use_block_ptr': True}
+        assert adapter.use_block_ptr is True
 
     def test_auto_mode(self):
         adapter = TritonAdapter(use_block_ptr='auto')
-        assert adapter.get_rewriter_options() == {'use_block_ptr': 'auto'}
-
-    def test_base_adapter_default_options(self):
-        from lego.frontends._adapter import DSLAdapter
-        from lego.frontends.numba_jit import NumbaCUDAAdapter
-        assert NumbaCUDAAdapter().get_rewriter_options() == {}
+        assert adapter.use_block_ptr == 'auto'

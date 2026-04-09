@@ -728,6 +728,108 @@ class TestExpandedLowering:
 
 
 # ============================================================================
+# Tests for unsigned vs signed division/remainder selection
+# ============================================================================
+
+def _lower_expr_to_ir(sympy_expr, symbols):
+    """Lower a SymPy expression to MLIR and return the IR string.
+
+    symbols: list of sp.Symbol used in the expression (become func args).
+    Returns the MLIR module string after lowering (before any passes).
+    """
+    from lego.backend.symbolic import _lower_sympy_to_index, _get_cached_context
+    from lego.mlir.ir import Context, Location, Module, InsertionPoint, IndexType, FunctionType
+    from lego.mlir.dialects import func as _func_dialect
+
+    ctx = _get_cached_context()
+    with ctx, Location.unknown():
+        module = Module.create()
+        idx_ty = IndexType.get()
+        func_ty = FunctionType.get([idx_ty] * len(symbols), [idx_ty])
+        with InsertionPoint(module.body):
+            f = _func_dialect.FuncOp("test_lower", func_ty)
+        entry = f.add_entry_block()
+        sym_to_val = {s: entry.arguments[i] for i, s in enumerate(symbols)}
+        with InsertionPoint(entry):
+            result = _lower_sympy_to_index(sympy_expr, sym_to_val)
+            _func_dialect.ReturnOp([result])
+    return str(module)
+
+
+class TestUnsignedOps:
+    """Verify divui/remui are emitted for non-negative symbols, divsi/remsi otherwise."""
+
+    def test_floor_positive_emits_divui(self):
+        """floor(a/b) with positive symbols must emit arith.divui, not divsi."""
+        a = sp.Symbol("a", integer=True, positive=True)
+        b = sp.Symbol("b", integer=True, positive=True)
+        ir = _lower_expr_to_ir(sp.floor(a / b), [a, b])
+        assert "arith.divui" in ir, f"Expected divui in IR:\n{ir}"
+        assert "arith.divsi" not in ir, f"Unexpected divsi in IR:\n{ir}"
+
+    def test_floor_bare_emits_divsi(self):
+        """floor(a/b) with bare symbols must emit arith.divsi, not divui."""
+        a = sp.Symbol("a", integer=True)
+        b = sp.Symbol("b", integer=True)
+        ir = _lower_expr_to_ir(sp.floor(a / b), [a, b])
+        assert "arith.divsi" in ir, f"Expected divsi in IR:\n{ir}"
+        assert "arith.divui" not in ir, f"Unexpected divui in IR:\n{ir}"
+
+    def test_mod_positive_emits_remui(self):
+        """Mod(a, b) with positive symbols must emit arith.remui, not remsi."""
+        a = sp.Symbol("a", integer=True, positive=True)
+        b = sp.Symbol("b", integer=True, positive=True)
+        ir = _lower_expr_to_ir(sp.Mod(a, b), [a, b])
+        assert "arith.remui" in ir, f"Expected remui in IR:\n{ir}"
+        assert "arith.remsi" not in ir, f"Unexpected remsi in IR:\n{ir}"
+
+    def test_mod_bare_emits_remsi(self):
+        """Mod(a, b) with bare symbols must emit arith.remsi, not remui."""
+        a = sp.Symbol("a", integer=True)
+        b = sp.Symbol("b", integer=True)
+        ir = _lower_expr_to_ir(sp.Mod(a, b), [a, b])
+        assert "arith.remsi" in ir, f"Expected remsi in IR:\n{ir}"
+        assert "arith.remui" not in ir, f"Unexpected remui in IR:\n{ir}"
+
+    def test_mul_with_denom_positive_emits_divui(self):
+        """a/b as Mul(a, 1/b) with positive symbols must emit divui."""
+        a = sp.Symbol("a", integer=True, positive=True)
+        b = sp.Symbol("b", integer=True, positive=True)
+        expr = a * sp.Rational(1, 1) / b  # triggers sp.Mul branch
+        ir = _lower_expr_to_ir(expr, [a, b])
+        assert "arith.divui" in ir, f"Expected divui in IR:\n{ir}"
+        assert "arith.divsi" not in ir, f"Unexpected divsi in IR:\n{ir}"
+
+    def test_nonneg_numerator_positive_denom(self):
+        """nonnegative (may be 0) numerator with positive denominator → divui."""
+        z = sp.Symbol("z", integer=True, nonnegative=True)
+        m = sp.Symbol("m", integer=True, positive=True)
+        ir = _lower_expr_to_ir(sp.floor(z / m), [z, m])
+        assert "arith.divui" in ir, f"Expected divui in IR:\n{ir}"
+
+    def test_negative_numerator_emits_divsi(self):
+        """Negative numerator must use divsi even with positive denominator."""
+        a = sp.Symbol("a", integer=True, positive=True)
+        b = sp.Symbol("b", integer=True, positive=True)
+        # -a / b  →  numerator is -a (is_nonnegative=False)
+        ir = _lower_expr_to_ir(sp.floor(-a / b), [a, b])
+        assert "arith.divsi" in ir, f"Expected divsi in IR:\n{ir}"
+
+    def test_roundtrip_positive_numerical(self):
+        """End-to-end: positive symbols roundtrip produces correct values."""
+        N = sym("N")
+        L = GenP([4, N], lambda args: N * args[0] + args[1])
+        flat = sym("flat")
+        i_val, j_val = L.f_inv(flat)
+        assert_expr_equal(i_val, sp.floor(flat / N))
+        assert_expr_equal(j_val, sp.Mod(flat, N))
+        for n in [2, 3, 5]:
+            for x in range(4 * n):
+                assert n * int(i_val.subs({flat: x, N: n})) + \
+                       int(j_val.subs({flat: x, N: n})) == x
+
+
+# ============================================================================
 # Tests for GenP auto-inverse
 # ============================================================================
 
@@ -907,6 +1009,22 @@ class TestParseRelational:
         assert X in constraints
         lb, _ = constraints[X]
         assert lb == 6
+
+
+def test_signed_division_roundtrip():
+    """Verify MLIR roundtrip uses signed division for index arithmetic."""
+    from lego.core import Row
+    from lego.backend.symbolic import simplify_via_mlir
+    import sympy as sp
+
+    M, N = sp.symbols('M N', positive=True, integer=True)
+    flat = sp.Symbol('flat', nonneg=True, integer=True)
+    result = simplify_via_mlir(Row(M, N), 'inv', flat,
+                                constraints={flat: (0, M * N)})
+    assert len(result) == 2
+    subs = {M: 4, N: 3, flat: 7}
+    assert int(result[0].subs(subs)) == 2  # 7 // 3 = 2
+    assert int(result[1].subs(subs)) == 1  # 7 % 3 = 1
 
 
 if __name__ == "__main__":

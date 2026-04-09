@@ -1,16 +1,12 @@
+import sympy as sp
+from sympy import S
 from sympy.printing.c import C99CodePrinter
-from .core import *
+from ._printer_base import LEGOStaticLangMixin
 
 
-class LEGOCCodePrinter(C99CodePrinter):
+class LEGOCCodePrinter(LEGOStaticLangMixin, C99CodePrinter):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, kwargs)
-
-    def _print_floor(self, expr):
-        arg = expr.args[0]
-        # Try to extract numerator and denominator from the argument
-        num, den = arg.as_numer_denom()
-        return f"(({self._print(num)})/({self._print(den)}))"
+        super().__init__(*args, **kwargs)
 
     def _print_Pow(self, expr):
         from sympy.printing.precedence import precedence

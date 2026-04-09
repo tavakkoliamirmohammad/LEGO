@@ -31,9 +31,28 @@ class DSLAdapter(ABC):
                          return_source: bool) -> Any:
         """Compile transformed source, re-apply DSL decorators, return result."""
 
-    def get_rewriter_options(self) -> dict:
-        """Return DSL-specific options for the rewriter. Default: empty."""
-        return {}
+    def transform_assignment(self, stmt, eval_env, printer):
+        """Optionally transform an assignment before normal processing.
+
+        Called for every ``ast.Assign`` with a single ``ast.Name`` target.
+        Return an ``(ast_node, eval_updates)`` pair to replace the statement,
+        or ``None`` to let the rewriter handle it normally.
+        ``eval_updates`` is a dict merged into *eval_env*.
+        """
+        return None
+
+    def transform_for_loop(self, for_stmt, body, eval_env, printer):
+        """Optionally transform a for-loop after its body has been processed.
+
+        Return ``(hoisted_stmts, new_body)`` or ``None`` for no transformation.
+        """
+        return None
+
+    def post_process_body(self, func_def):
+        """Final pass over the function body after all statements are processed.
+
+        Modify *func_def* in place. Default: no-op.
+        """
 
 
 class SourceGenAdapter(DSLAdapter):
@@ -66,3 +85,41 @@ def source_generate(fn, printer, **kwargs):
     """Generate source code from a function with LEGO layout expressions."""
     from lego.rewriter import rewrite
     return rewrite(fn, SourceGenAdapter(printer), return_source=True, **kwargs)
+
+
+def write_and_exec_temp_file(new_source, tree, original_fn, return_source=False):
+    """Write transformed source to a temp file, compile, and exec it.
+
+    Shared by Triton and cuTile adapters. Returns (source_text, None)
+    if return_source is True, otherwise (namespace, transformed_fn).
+    """
+    import os
+    import atexit
+
+    _save = os.environ.get('LEGO_SAVE_KERNEL', False)
+    temp_dir = os.environ.get("LEGO_TEMP_DIR", "/tmp/lego_kernels")
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_file = os.path.join(
+        temp_dir, f"{original_fn.__name__}_{id(original_fn)}.py")
+
+    with open(temp_file, 'w') as f:
+        f.write(new_source)
+
+    if return_source:
+        if not _save:
+            os.remove(temp_file)
+        return new_source, None
+
+    code_obj = compile(tree, filename=temp_file, mode='exec')
+    namespace = original_fn.__globals__.copy()
+    exec(code_obj, namespace)  # noqa: S102 — intentional dynamic exec
+
+    if not _save:
+        atexit.register(
+            lambda f=temp_file: os.remove(f) if os.path.exists(f) else None)
+
+    transformed_fn = namespace[original_fn.__name__]
+    transformed_fn.__code__ = transformed_fn.__code__.replace(
+        co_filename=temp_file)
+
+    return namespace, transformed_fn

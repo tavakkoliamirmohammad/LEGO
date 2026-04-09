@@ -83,26 +83,6 @@ class TestLayoutCompiler:
         np.testing.assert_array_equal(result, expected)
 
 
-class TestGroupByTransform:
-    """Test GroupBy.transform() and .inverse_transform() methods."""
-
-    def test_groupby_transform(self):
-        """GroupBy.transform works on NumPy arrays."""
-        shape = (4, 8)
-        layout = RowMajor(shape)
-        result = layout.create_tensor(np.float32)
-        assert result.shape == shape
-
-    def test_groupby_inverse_transform(self):
-        """GroupBy.inverse_transform reverses the transform."""
-        shape = (4, 8)
-        layout = RowMajor(shape)
-        result = layout.create_tensor(np.float32)
-        back = layout.inverse_transform(result)
-        expected = np.arange(32, dtype=np.float32).reshape(shape)
-        np.testing.assert_array_equal(back, expected)
-
-
 class TestConvenienceConstructors:
     """Test the convenience constructor functions."""
 

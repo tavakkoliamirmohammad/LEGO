@@ -1,21 +1,16 @@
 """Fortran code printer for LEGO layout expressions."""
 
 from sympy.printing.fortran import FCodePrinter
-from .core import *
+from ._printer_base import LEGOStaticLangMixin
 
 
-class LEGOFortranCodePrinter(FCodePrinter):
+class LEGOFortranCodePrinter(LEGOStaticLangMixin, FCodePrinter):
     def __init__(self, *args, **kwargs):
-        # Default to Fortran 95 standard
-        kwargs.setdefault('standard', 95)
-        super().__init__(*args, kwargs)
-
-    def _print_floor(self, expr):
-        arg = expr.args[0]
-        num, den = arg.as_numer_denom()
-        # Fortran integer division truncates toward zero; for positive values
-        # this matches floor division.
-        return f"(({self._print(num)}) / ({self._print(den)}))"
+        # Default to Fortran 95 standard via the settings dict.
+        settings = kwargs.get('settings') or {}
+        settings.setdefault('standard', 95)
+        kwargs['settings'] = settings
+        super().__init__(*args, **kwargs)
 
     def _print_Pow(self, expr):
         from sympy.core.numbers import equal_valued
@@ -30,10 +25,6 @@ class LEGOFortranCodePrinter(FCodePrinter):
 
     def _print_Mod(self, expr):
         return f"mod({self._print(expr.args[0])}, {self._print(expr.args[1])})"
-
-    def _print_BroadcastRange(self, expr):
-        # Fortran arrays are 1-indexed; emit the base expression
-        return f"({self._print(expr.args[0])})"
 
     def _print_lego_arange(self, expr):
         # Fortran implicit DO / array constructor range
