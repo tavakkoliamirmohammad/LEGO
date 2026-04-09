@@ -69,8 +69,15 @@ def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
     )
 
 
-# PyTorch integration — only when torch is already loaded.
-import sys as _sys3
-if 'torch' in _sys3.modules:
-    from .torch import annotate, rearrange, LegoTensor  # noqa: F401
-del _sys3
+# PyTorch integration — deferred to avoid pulling torch (~4s) when not needed.
+# Once torch is imported, `lego.annotate` etc. become available.
+def __getattr__(name):
+    if name in ("annotate", "rearrange", "LegoTensor"):
+        import sys
+        if "torch" in sys.modules:
+            from .torch import annotate, rearrange, LegoTensor  # noqa: F811
+            globals()["annotate"] = annotate
+            globals()["rearrange"] = rearrange
+            globals()["LegoTensor"] = LegoTensor
+            return globals()[name]
+    raise AttributeError(f"module 'lego' has no attribute {name!r}")

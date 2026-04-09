@@ -27,6 +27,11 @@ if _HAS_TORCH:
     from lego.torch import annotate, rearrange, LegoTensor
     from lego.torch.tensor import _warned_ops, TransposedLayout
     from lego.frontends.python_mlir import ColMajor, RowMajor, TiledPermute
+    _HAS_CUDA = torch.cuda.is_available()
+else:
+    _HAS_CUDA = False
+
+requires_cuda = pytest.mark.skipif(not _HAS_CUDA, reason="CUDA not available")
 
 
 # ============================================================================
@@ -371,3 +376,101 @@ class TestDimReductions:
         result = torch.mean(ax, dim=0)
         expected = torch.mean(x, dim=0)
         torch.testing.assert_close(result, expected)
+
+
+# ============================================================================
+# Hardening: edge cases
+# ============================================================================
+
+class TestEdgeCases:
+    def test_mm_annotated_plus_plain(self):
+        """mm with one annotated and one plain tensor."""
+        layout = ColMajor((4, 8))
+        a = annotate(torch.randn(4, 8), layout)
+        b = torch.randn(8, 3)
+        c = torch.mm(a, b)
+        expected = torch.mm(a._data, b)
+        torch.testing.assert_close(c, expected)
+
+    def test_rearrange_all_layouts(self):
+        """rearrange works with all layout types."""
+        import numpy as np
+        from lego.backend.compiler import LayoutCompiler
+        for name, layout in [
+            ("ColMajor", ColMajor((4, 4))),
+            ("TiledPermute", TiledPermute((8, 8), tile_shape=(4, 4))),
+        ]:
+            x = torch.arange(layout.numel, dtype=torch.float32).reshape(layout.shape)
+            rx = rearrange(x, layout)
+            assert rx._is_physical, f"{name}: not physical"
+            compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
+            _, inv = compiler.get_permutation_table()
+            inv_t = torch.from_numpy(np.ascontiguousarray(inv))
+            back = rx._data.reshape(-1)[inv_t].reshape(layout.shape)
+            torch.testing.assert_close(back, x, msg=f"{name}: round-trip failed")
+
+    def test_chain_annotate_relu_transpose_relu_sum(self):
+        """Full chain: annotate -> relu -> transpose -> relu -> sum."""
+        layout = ColMajor((4, 8))
+        x = torch.randn(4, 8)
+        ax = annotate(x, layout)
+        y = torch.relu(ax)
+        z = y.t()
+        w = torch.relu(z)
+        s = torch.sum(w, dim=0)
+        ref = torch.sum(torch.relu(torch.relu(x).t()), dim=0)
+        torch.testing.assert_close(s, ref)
+
+    def test_rearrange_pointwise_preserves_physical(self):
+        """Pointwise on physically rearranged data preserves physical flag."""
+        layout = ColMajor((4, 4))
+        rx = rearrange(torch.randn(4, 4), layout)
+        y = rx + rx
+        assert isinstance(y, LegoTensor)
+        assert y._is_physical
+
+    def test_top_level_import(self):
+        """annotate/rearrange/LegoTensor importable from top-level lego."""
+        import lego
+        assert hasattr(lego, "annotate")
+        assert hasattr(lego, "rearrange")
+        assert hasattr(lego, "LegoTensor")
+
+
+# ============================================================================
+# CUDA
+# ============================================================================
+
+@requires_cuda
+class TestCUDA:
+    def test_annotate_cuda(self):
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4, device="cuda")
+        ax = annotate(x, layout)
+        y = torch.relu(ax)
+        assert y.device.type == "cuda"
+        assert isinstance(y, LegoTensor)
+        torch.testing.assert_close(y._data, torch.relu(x))
+
+    def test_rearrange_cuda(self):
+        layout = ColMajor((4, 4))
+        x = torch.arange(16, dtype=torch.float32, device="cuda").reshape(4, 4)
+        rx = rearrange(x, layout)
+        assert rx.device.type == "cuda"
+        assert rx._is_physical
+
+    def test_mm_cuda(self):
+        layout = ColMajor((4, 8))
+        a = annotate(torch.randn(4, 8, device="cuda"), layout)
+        b = torch.randn(8, 3, device="cuda")
+        c = torch.mm(a, b)
+        expected = torch.mm(a._data, b)
+        torch.testing.assert_close(c, expected, atol=1e-5, rtol=1e-5)
+
+    def test_rearrange_autograd_cuda(self):
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4, device="cuda", requires_grad=True)
+        rx = rearrange(x, layout)
+        rx._data.sum().backward()
+        assert x.grad is not None
+        assert x.grad.device.type == "cuda"
