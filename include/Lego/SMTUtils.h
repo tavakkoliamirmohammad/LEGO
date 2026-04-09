@@ -47,12 +47,14 @@ struct SMTSolverContext {
   SMTSolverContext(Location loc, AsmState &state, unsigned &nextId);
   ~SMTSolverContext() {}
 
-  // Finalizes the check commands, exports the SMT-LIB and tests solving
-  SMTResult checkSatisfiability(const SmallVector<std::string> &varNamesToExtract);
+  // Finalizes the check commands, exports the SMT-LIB and tests solving.
+  // timeoutMs: Z3 timeout in milliseconds (0 = no timeout, default = 30000).
+  SMTResult checkSatisfiability(const SmallVector<std::string> &varNamesToExtract,
+                                unsigned timeoutMs = 30000);
 };
 
-// Run Z3 and return detailed result
-SMTResult runZ3WithModel(const std::string &smtLib);
+// Run Z3 and return detailed result. timeoutMs=0 means no timeout.
+SMTResult runZ3WithModel(const std::string &smtLib, unsigned timeoutMs = 30000);
 
 // Legacy interface (returns true if SAT)
 bool runZ3(const std::string &smtLib);

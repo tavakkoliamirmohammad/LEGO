@@ -49,13 +49,39 @@ Value SMTBuilder::getOrCreate(Value v) {
   } else if (auto mulOp = dyn_cast<arith::MulIOp>(defOp)) {
     valMap[v] = smt::IntMulOp::create(builder, loc, ValueRange{valMap[mulOp.getLhs()], valMap[mulOp.getRhs()]});
   } else if (auto divOp = dyn_cast<arith::DivUIOp>(defOp)) {
+    // Unsigned division: operands are non-negative in the SMT integer model,
+    // so Euclidean div matches unsigned semantics when operands >= 0.
     valMap[v] = smt::IntDivOp::create(builder, loc, valMap[divOp.getLhs()], valMap[divOp.getRhs()]);
   } else if (auto divSIOp = dyn_cast<arith::DivSIOp>(defOp)) {
-    valMap[v] = smt::IntDivOp::create(builder, loc, valMap[divSIOp.getLhs()], valMap[divSIOp.getRhs()]);
+    // Signed division truncates toward zero (C semantics), but SMT-LIB div
+    // is Euclidean (rounds toward negative infinity). Encode as:
+    //   divsi(a, b) = ite(a >= 0, a div b, -((-a) div b))
+    Value a = valMap[divSIOp.getLhs()];
+    Value bVal = valMap[divSIOp.getRhs()];
+    Value zero = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(0));
+    Value aGeZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::ge, a, zero);
+    Value posDiv = smt::IntDivOp::create(builder, loc, a, bVal);
+    Value negA = smt::IntSubOp::create(builder, loc, zero, a);
+    Value negDiv = smt::IntDivOp::create(builder, loc, negA, bVal);
+    Value negResult = smt::IntSubOp::create(builder, loc, zero, negDiv);
+    valMap[v] = smt::IteOp::create(builder, loc, aGeZero, posDiv, negResult);
   } else if (auto remOp = dyn_cast<arith::RemUIOp>(defOp)) {
+    // Unsigned remainder: Euclidean mod matches when operands >= 0.
     valMap[v] = smt::IntModOp::create(builder, loc, valMap[remOp.getLhs()], valMap[remOp.getRhs()]);
   } else if (auto remSIOp = dyn_cast<arith::RemSIOp>(defOp)) {
-    valMap[v] = smt::IntModOp::create(builder, loc, valMap[remSIOp.getLhs()], valMap[remSIOp.getRhs()]);
+    // Signed remainder (C semantics): a - truncdiv(a, b) * b
+    // Reuse the truncation-toward-zero division encoding.
+    Value a = valMap[remSIOp.getLhs()];
+    Value bVal = valMap[remSIOp.getRhs()];
+    Value zero = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(0));
+    Value aGeZero = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::ge, a, zero);
+    Value posDiv = smt::IntDivOp::create(builder, loc, a, bVal);
+    Value negA = smt::IntSubOp::create(builder, loc, zero, a);
+    Value negDiv = smt::IntDivOp::create(builder, loc, negA, bVal);
+    Value negResult = smt::IntSubOp::create(builder, loc, zero, negDiv);
+    Value truncDiv = smt::IteOp::create(builder, loc, aGeZero, posDiv, negResult);
+    Value prod = smt::IntMulOp::create(builder, loc, ValueRange{truncDiv, bVal});
+    valMap[v] = smt::IntSubOp::create(builder, loc, a, prod);
   } else if (auto cmpOp = dyn_cast<arith::CmpIOp>(defOp)) {
     auto lhs = valMap[cmpOp.getLhs()];
     auto rhs = valMap[cmpOp.getRhs()];
@@ -64,27 +90,90 @@ Value SMTBuilder::getOrCreate(Value v) {
         valMap[v] = smt::EqOp::create(builder, loc, lhs, rhs); break;
       case arith::CmpIPredicate::ne: 
         valMap[v] = smt::DistinctOp::create(builder, loc, ValueRange{lhs, rhs}); break;
+      // NOTE: Unsigned comparisons (ult, ule, ugt, uge) are mapped to the same
+      // SMT integer predicates as signed ones. This is sound ONLY because all
+      // layout index values are constrained to be non-negative (via dim > 0 and
+      // idx >= 0 assertions in the verification passes). If negative values
+      // could appear, unsigned comparisons would need bitvector encoding.
       case arith::CmpIPredicate::slt:
-      case arith::CmpIPredicate::ult: 
+      case arith::CmpIPredicate::ult:
         valMap[v] = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::lt, lhs, rhs); break;
       case arith::CmpIPredicate::sle:
-      case arith::CmpIPredicate::ule: 
+      case arith::CmpIPredicate::ule:
         valMap[v] = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::le, lhs, rhs); break;
       case arith::CmpIPredicate::sgt:
-      case arith::CmpIPredicate::ugt: 
+      case arith::CmpIPredicate::ugt:
         valMap[v] = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::gt, lhs, rhs); break;
       case arith::CmpIPredicate::sge:
-      case arith::CmpIPredicate::uge: 
+      case arith::CmpIPredicate::uge:
         valMap[v] = smt::IntCmpOp::create(builder, loc, smt::IntPredicate::ge, lhs, rhs); break;
     }
-  } else if (isa<arith::IndexCastOp, arith::ExtUIOp, arith::ExtSIOp, arith::TruncIOp>(defOp)) {
+  } else if (auto selectOp = dyn_cast<arith::SelectOp>(defOp)) {
+    Value cond = valMap[selectOp.getCondition()];
+    Value trueVal = valMap[selectOp.getTrueValue()];
+    Value falseVal = valMap[selectOp.getFalseValue()];
+    valMap[v] = smt::IteOp::create(builder, loc, cond, trueVal, falseVal);
+  } else if (auto shliOp = dyn_cast<arith::ShLIOp>(defOp)) {
+    // shli(a, b) = a * 2^b. For constant shifts, expand directly.
+    Value a = valMap[shliOp.getLhs()];
+    Value b = valMap[shliOp.getRhs()];
+    Value two = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(2));
+    // Encode as a * 2^b using repeated multiplication is impractical for symbolic b.
+    // For the common case of constant shift, the constant folder already produced a
+    // multiply. For symbolic shifts, fall through to the diagnostic below.
+    if (auto constOp = dyn_cast_or_null<arith::ConstantOp>(shliOp.getRhs().getDefiningOp())) {
+      if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue())) {
+        int64_t shift = intAttr.getInt();
+        Value factor = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(1LL << shift));
+        valMap[v] = smt::IntMulOp::create(builder, loc, ValueRange{a, factor});
+      }
+    }
+  } else if (auto shruiOp = dyn_cast<arith::ShRUIOp>(defOp)) {
+    // shrui(a, b) = a div 2^b (unsigned, Euclidean div is correct for non-negative a)
+    if (auto constOp = dyn_cast_or_null<arith::ConstantOp>(shruiOp.getRhs().getDefiningOp())) {
+      if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue())) {
+        int64_t shift = intAttr.getInt();
+        Value divisor = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(1LL << shift));
+        valMap[v] = smt::IntDivOp::create(builder, loc, valMap[shruiOp.getLhs()], divisor);
+      }
+    }
+  } else if (auto andiOp = dyn_cast<arith::AndIOp>(defOp)) {
+    // andi(a, mask) where mask = 2^k - 1 is equivalent to a mod 2^k
+    if (auto constOp = dyn_cast_or_null<arith::ConstantOp>(andiOp.getRhs().getDefiningOp())) {
+      if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue())) {
+        int64_t mask = intAttr.getInt();
+        if (mask > 0 && ((mask + 1) & mask) == 0) {
+          // mask is 2^k - 1
+          Value modulus = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(mask + 1));
+          valMap[v] = smt::IntModOp::create(builder, loc, valMap[andiOp.getLhs()], modulus);
+        }
+      }
+    }
+  } else if (auto truncOp = dyn_cast<arith::TruncIOp>(defOp)) {
+    // trunci %x : iN to iM => x mod 2^M (wrapping semantics)
+    Value inner = getOrCreate(truncOp.getIn());
+    unsigned destWidth = truncOp.getType().getIntOrFloatBitWidth();
+    int64_t modulus = 1LL << destWidth;
+    Value mod = smt::IntConstantOp::create(builder, loc, builder.getI64IntegerAttr(modulus));
+    valMap[v] = smt::IntModOp::create(builder, loc, inner, mod);
+  } else if (isa<arith::IndexCastOp, arith::ExtUIOp, arith::ExtSIOp>(defOp)) {
+    // IndexCast and zero/sign extension: identity in unbounded integer model.
+    // This is safe for ExtUIOp (value is non-negative). ExtSIOp is also safe
+    // since unbounded integers already represent the full signed range.
     valMap[v] = getOrCreate(defOp->getOperand(0));
   }
 
   if (!valMap.count(v)) {
-    // Fallback: create a new symbolic variable
-    Type smtTy = v.getType().isInteger(1) ? 
-                 Type(builder.getType<smt::BoolType>()) : 
+    // Emit a warning for unrecognized ops instead of silently creating
+    // unconstrained variables, which would make verification unsound.
+    if (defOp) {
+      defOp->emitWarning("SMT encoding: unsupported operation '")
+          << defOp->getName()
+          << "' — replaced with unconstrained symbolic variable. "
+             "Verification results may be unsound.";
+    }
+    Type smtTy = v.getType().isInteger(1) ?
+                 Type(builder.getType<smt::BoolType>()) :
                  Type(builder.getType<smt::IntType>());
     valMap[v] = smt::DeclareFunOp::create(builder, loc, smtTy, builder.getStringAttr(getSSAName(v)));
   }
@@ -124,7 +213,8 @@ SMTSolverContext::SMTSolverContext(Location l, AsmState &state, unsigned &nextId
   builder = std::make_unique<SMTBuilder>(*b, state, nextId);
 }
 
-SMTResult SMTSolverContext::checkSatisfiability(const SmallVector<std::string> &varNamesToExtract) {
+SMTResult SMTSolverContext::checkSatisfiability(const SmallVector<std::string> &varNamesToExtract,
+                                                unsigned timeoutMs) {
   auto checkOp = smt::CheckOp::create(*b, loc, TypeRange{});
   for (Region &r : checkOp->getRegions()) {
     OpBuilder::InsertionGuard g(*b);
@@ -143,11 +233,14 @@ SMTResult SMTSolverContext::checkSatisfiability(const SmallVector<std::string> &
 
   size_t resetPos = smtLib.rfind("(reset)");
   if (resetPos != std::string::npos) {
-    smtLib.erase(resetPos, 8); // Remove "(reset)\n"
+    smtLib.erase(resetPos, 7); // Remove "(reset)" (7 chars)
+    // Also remove trailing newline if present
+    if (resetPos < smtLib.size() && smtLib[resetPos] == '\n')
+      smtLib.erase(resetPos, 1);
   }
 
   smtLib += generateGetValueCommands(varNamesToExtract);
-  return runZ3WithModel(smtLib);
+  return runZ3WithModel(smtLib, timeoutMs);
 }
 
 bool runZ3(const std::string &smtLib) {
@@ -155,7 +248,7 @@ bool runZ3(const std::string &smtLib) {
   return result.isSat;
 }
 
-SMTResult runZ3WithModel(const std::string &smtLib) {
+SMTResult runZ3WithModel(const std::string &smtLib, unsigned timeoutMs) {
   SMTResult result;
 
 #ifdef __EMSCRIPTEN__
@@ -163,6 +256,13 @@ SMTResult runZ3WithModel(const std::string &smtLib) {
   result.isUnknown = true;
   return result;
 #else
+  // Prepend a timeout to prevent Z3 from hanging on hard QF_NIA instances.
+  std::string smtLibWithTimeout;
+  if (timeoutMs > 0)
+    smtLibWithTimeout = "(set-option :timeout " + std::to_string(timeoutMs) + ")\n" + smtLib;
+  else
+    smtLibWithTimeout = smtLib;
+
   int out_pipe[2]; int in_pipe[2];
   if (pipe(out_pipe) == -1 || pipe(in_pipe) == -1) {
     result.isUnknown = true;
@@ -188,7 +288,7 @@ SMTResult runZ3WithModel(const std::string &smtLib) {
   close(out_pipe[0]);
   close(in_pipe[1]);
 
-  write(out_pipe[1], smtLib.c_str(), smtLib.size());
+  write(out_pipe[1], smtLibWithTimeout.c_str(), smtLibWithTimeout.size());
   close(out_pipe[1]);
 
   std::string output;
