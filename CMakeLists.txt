@@ -518,6 +518,55 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
     COMMENT "Preparing wheel directory"
   )
 
+  # --- Plugin wheel staging directories ---
+
+  set(LEGO_PLUGIN_WHEEL_BASE "${CMAKE_BINARY_DIR}/python_packages")
+
+  if(LEGO_HAS_NVPTX AND MLIR_ENABLE_BINDINGS_PYTHON)
+    set(_CUDA_WHEEL_DIR "${LEGO_PLUGIN_WHEEL_BASE}/lego-cuda")
+    add_custom_target(lego-prepare-cuda-wheel
+      DEPENDS LegoNVPTXPlugin
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_CUDA_WHEEL_DIR}/lego_cuda/_mlir_libs"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/python/plugins/cuda/lego_cuda" "${_CUDA_WHEEL_DIR}/lego_cuda"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "$<TARGET_FILE:LegoNVPTXPlugin>" "${_CUDA_WHEEL_DIR}/lego_cuda/_mlir_libs/"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/python/plugins/cuda/pyproject.toml" "${_CUDA_WHEEL_DIR}/pyproject.toml"
+      COMMENT "Preparing CUDA plugin wheel directory"
+    )
+  endif()
+
+  if(LEGO_HAS_AMDGPU AND MLIR_ENABLE_BINDINGS_PYTHON)
+    set(_ROCM_WHEEL_DIR "${LEGO_PLUGIN_WHEEL_BASE}/lego-rocm")
+    add_custom_target(lego-prepare-rocm-wheel
+      DEPENDS LegoAMDGPUPlugin
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_ROCM_WHEEL_DIR}/lego_rocm/_mlir_libs"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/python/plugins/rocm/lego_rocm" "${_ROCM_WHEEL_DIR}/lego_rocm"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "$<TARGET_FILE:LegoAMDGPUPlugin>" "${_ROCM_WHEEL_DIR}/lego_rocm/_mlir_libs/"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/python/plugins/rocm/pyproject.toml" "${_ROCM_WHEEL_DIR}/pyproject.toml"
+      COMMENT "Preparing ROCm plugin wheel directory"
+    )
+  endif()
+
+  if(LEGO_HAS_SPIRV AND MLIR_ENABLE_BINDINGS_PYTHON)
+    set(_INTEL_WHEEL_DIR "${LEGO_PLUGIN_WHEEL_BASE}/lego-intel")
+    add_custom_target(lego-prepare-intel-wheel
+      DEPENDS LegoSPIRVPlugin
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_INTEL_WHEEL_DIR}/lego_intel/_mlir_libs"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/python/plugins/intel/lego_intel" "${_INTEL_WHEEL_DIR}/lego_intel"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "$<TARGET_FILE:LegoSPIRVPlugin>" "${_INTEL_WHEEL_DIR}/lego_intel/_mlir_libs/"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/python/plugins/intel/pyproject.toml" "${_INTEL_WHEEL_DIR}/pyproject.toml"
+      COMMENT "Preparing Intel plugin wheel directory"
+    )
+  endif()
+
   # --- Naga CLI (SPIR-V → WGSL / MSL / GLSL converter) ---
   # Build naga-cli via cargo and place the binary where _find_naga_binary() looks.
   # Must come after lego-prepare-wheel because copy_directory overwrites bin/.
