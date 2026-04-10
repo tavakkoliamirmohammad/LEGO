@@ -9,6 +9,14 @@ description = "LEGO: Layout Expression Language for Code Generation"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["sympy", "numpy"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: System :: Hardware",
+]
 
 [project.optional-dependencies]
 cuda = ["lego-layout-cuda>=0.2.2"]
@@ -18,15 +26,6 @@ all = [
     "lego-layout-cuda>=0.2.2",
     "lego-layout-rocm>=0.2.2",
     "lego-layout-intel>=0.2.2",
-]
-
-classifiers = [
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "License :: OSI Approved :: MIT License",
-    "Topic :: Software Development :: Compilers",
-    "Topic :: System :: Hardware",
 ]
 
 [tool.pytest.ini_options]
