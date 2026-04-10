@@ -184,6 +184,11 @@ class LegoLayout:
 
     def transform(self, tensor):
         self._validate_numel(tensor)
+        if _HAS_TORCH and isinstance(tensor, torch.Tensor):
+            compiler = self._get_compiler(tensor)
+            fwd, _ = compiler.get_permutation_table()
+            fwd_t = torch.from_numpy(np.ascontiguousarray(fwd)).to(tensor.device)
+            return tensor.reshape(-1)[fwd_t].reshape(self._shape)
         if isinstance(tensor, np.ndarray):
             if self._composed_perm is not None:
                 fwd, _ = self._composed_perm
@@ -195,6 +200,11 @@ class LegoLayout:
     def inverse_transform(self, tensor):
         self._validate_numel(tensor)
         _check_layout_invertible(self._layout)
+        if _HAS_TORCH and isinstance(tensor, torch.Tensor):
+            compiler = self._get_compiler(tensor)
+            _, inv = compiler.get_permutation_table()
+            inv_t = torch.from_numpy(np.ascontiguousarray(inv)).to(tensor.device)
+            return tensor.reshape(-1)[inv_t].reshape(self._shape)
         if isinstance(tensor, np.ndarray):
             if self._composed_perm is not None:
                 _, inv = self._composed_perm
@@ -502,6 +512,17 @@ class BatchedLayout:
         batch_dims = len(self._batch_shape)
         inner_shape = self._base.shape
 
+        if _HAS_TORCH and isinstance(tensor, torch.Tensor):
+            batch_total = 1
+            for d in tensor.shape[:batch_dims]:
+                batch_total *= d
+            flat = tensor.reshape(batch_total, -1)
+            compiler = LayoutCompiler(self._base._layout, self._base._shape, "i64")
+            fwd, _ = compiler.get_permutation_table()
+            fwd_t = torch.from_numpy(np.ascontiguousarray(fwd)).to(tensor.device)
+            result = flat[:, fwd_t]
+            return result.reshape(self._shape)
+
         if isinstance(tensor, np.ndarray):
             batch_total = int(np.prod(tensor.shape[:batch_dims]))
             flat = tensor.reshape(batch_total, -1)
@@ -515,6 +536,17 @@ class BatchedLayout:
     def inverse_transform(self, tensor):
         batch_dims = len(self._batch_shape)
         inner_shape = self._base.shape
+
+        if _HAS_TORCH and isinstance(tensor, torch.Tensor):
+            batch_total = 1
+            for d in tensor.shape[:batch_dims]:
+                batch_total *= d
+            flat = tensor.reshape(batch_total, -1)
+            compiler = LayoutCompiler(self._base._layout, self._base._shape, "i64")
+            _, inv = compiler.get_permutation_table()
+            inv_t = torch.from_numpy(np.ascontiguousarray(inv)).to(tensor.device)
+            result = flat[:, inv_t]
+            return result.reshape(self._shape)
 
         if isinstance(tensor, np.ndarray):
             batch_total = int(np.prod(tensor.shape[:batch_dims]))
