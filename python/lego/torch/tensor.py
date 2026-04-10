@@ -77,8 +77,12 @@ class TransposedLayout:
         return self._shape
 
     def compose(self, other):
-        """Compose with another layout (delegates to base)."""
-        return self._base.compose(other)
+        """Compose with another layout.
+
+        Returns other — the new layout takes precedence since the
+        transpose permutation is already reflected in the data view.
+        """
+        return other
 
     def transpose(self, dim0, dim1):
         perm = list(self._perm)

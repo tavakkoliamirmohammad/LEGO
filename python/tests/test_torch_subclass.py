@@ -190,6 +190,19 @@ class TestTier2:
         assert isinstance(y, LegoTensor)
         assert y.shape == (4, 8)
 
+    def test_compose_after_transpose(self):
+        """Composing a layout after transpose must not drop the transpose."""
+        l1 = ColMajor((4, 8))
+        l2 = RowMajor((8, 4))
+        x = torch.randn(4, 8)
+        ax = annotate(x, l1)
+        tx = ax.t()  # Now has TransposedLayout
+        # Compose l2 onto the transposed layout
+        composed = annotate(tx, l2)
+        assert isinstance(composed, LegoTensor)
+        # The composed layout should reflect BOTH the transpose AND l2
+        assert composed.lego_layout is not l1  # Must not silently drop to base
+
 
 # ============================================================================
 # Tier 3: Drop + warn
