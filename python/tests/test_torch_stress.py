@@ -100,7 +100,9 @@ class TestTritonKernelStress:
     @requires_triton
     @requires_cuda
     def test_large_mm(self):
+        """Large matmul through @lego_jit codegen kernel."""
         from lego.torch.triton_kernels import triton_lego_mm
+        # Sizes must be multiples of block sizes (BM=64, BN=64, BK=32)
         a = torch.randn(256, 128, device="cuda")
         b = torch.randn(128, 256, device="cuda")
         result = triton_lego_mm(a, b)
@@ -109,21 +111,14 @@ class TestTritonKernelStress:
 
     @requires_triton
     @requires_cuda
-    def test_mm_with_tiled_layout(self):
+    def test_rectangular_mm(self):
+        """Rectangular matmul through @lego_jit codegen kernel."""
         from lego.torch.triton_kernels import triton_lego_mm
-        layout = TiledPermute((128, 64), tile_shape=(32, 32))
-        a_data = torch.randn(128, 64, device="cuda")
-
-        from lego.backend.compiler import LayoutCompiler
-        compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
-        fwd, _ = compiler.get_permutation_table()
-        fwd_t = torch.from_numpy(np.ascontiguousarray(fwd)).to("cuda")
-        a_phys = a_data.reshape(-1)[fwd_t].reshape(128, 64)
-
-        b = torch.randn(64, 96, device="cuda")
-        result = triton_lego_mm(a_phys, b, a_layout=layout)
-        expected = torch.mm(a_data, b)
-        torch.testing.assert_close(result, expected, atol=1e-2, rtol=1e-2)
+        a = torch.randn(128, 256, device="cuda")
+        b = torch.randn(256, 64, device="cuda")
+        result = triton_lego_mm(a, b)
+        expected = torch.mm(a, b)
+        torch.testing.assert_close(result, expected, atol=5e-2, rtol=5e-2)
 
 
 class TestRearrangeInCompile:

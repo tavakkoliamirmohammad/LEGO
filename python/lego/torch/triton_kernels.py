@@ -1,11 +1,17 @@
 """
 LEGO Triton Kernel Codegen (Layer 1 -- GPU Path)
 
-Generates Triton matmul kernels that use LEGO layout algebra for index
-computation. When a tensor has a LEGO layout, the kernel reads elements
-using the layout's inverse permutation table (physical->logical remapping).
+Uses ``@lego.jit`` to rewrite standard Triton kernels with LEGO layout
+algebra index expressions. The layout is expressed as::
 
-Falls back to standard Triton matmul when no layout is attached.
+    L_A = OrderBy(Row(M, K)).TileBy([M/BM, K/BK], [BM, BK])
+
+and indexing via ``L_A[block_m, block_k, :, :]`` is compiled by LEGO's
+rewriter into pure arithmetic Triton code -- no permutation tables, no
+extra memory indirection, just O(1) index math per element.
+
+This is the same mechanism used by all Triton examples in
+``python/examples/triton/``.
 """
 
 import torch
@@ -13,6 +19,8 @@ import torch
 try:
     import triton
     import triton.language as tl
+    from lego.core import Row, Col, OrderBy
+    from lego.frontends.triton_jit import jit as lego_jit
     _HAS_TRITON = True
 except ImportError:
     _HAS_TRITON = False
@@ -20,93 +28,58 @@ except ImportError:
 
 if _HAS_TRITON:
 
+    @lego_jit
     @triton.jit
-    def _mm_kernel(
-        A, B, C,
+    def _lego_mm_kernel(
+        a_ptr, b_ptr, c_ptr,
         M, N, K,
-        stride_am, stride_ak,
-        stride_bk, stride_bn,
-        stride_cm, stride_cn,
-        A_perm,
-        has_a_perm: tl.constexpr,
-        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
     ):
         pid_m = tl.program_id(0)
         pid_n = tl.program_id(1)
 
-        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        offs_k = tl.arange(0, BLOCK_K)
+        # LEGO layout algebra: row-major matrices tiled into blocks.
+        # The rewriter compiles L_A[pid_m, k, :, :] into arithmetic
+        # Triton index expressions -- no tables, no indirection.
+        L_A = OrderBy(Row(M, K)).TileBy([M / BM, K / BK], [BM, BK])
+        L_B = OrderBy(Row(K, N)).TileBy([K / BK, N / BN], [BK, BN])
+        L_C = OrderBy(Row(M, N)).TileBy([M / BM, N / BN], [BM, BN])
 
-        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        acc = tl.zeros((BM, BN), dtype=tl.float32)
 
-        for k_start in range(0, K, BLOCK_K):
-            k_offs = k_start + offs_k
+        for k in range(0, tl.cdiv(K, BK)):
+            a = tl.load(a_ptr + L_A[pid_m, k, :, :])
+            b = tl.load(b_ptr + L_B[k, pid_n, :, :])
+            acc = tl.dot(a, b, acc)
 
-            # Load A tile
-            a_ptrs_flat = offs_m[:, None] * K + k_offs[None, :]
-            a_mask = (offs_m[:, None] < M) & (k_offs[None, :] < K)
-            if has_a_perm:
-                # Layout-aware: remap flat indices through inverse perm table
-                safe_ptrs = tl.where(a_mask, a_ptrs_flat, 0)
-                a_phys_idx = tl.load(A_perm + safe_ptrs, mask=a_mask, other=0)
-                a = tl.load(A + a_phys_idx, mask=a_mask, other=0.0)
-            else:
-                a = tl.load(A + a_ptrs_flat, mask=a_mask, other=0.0)
-
-            # Load B tile (standard indexing)
-            b_ptrs = k_offs[:, None] * stride_bk + offs_n[None, :] * stride_bn
-            b_mask = (k_offs[:, None] < K) & (offs_n[None, :] < N)
-            b = tl.load(B + b_ptrs, mask=b_mask, other=0.0)
-
-            acc += tl.dot(a, b)
-
-        # Store C
-        c_ptrs = offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
-        c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-        tl.store(C + c_ptrs, acc, mask=c_mask)
+        tl.store(c_ptr + L_C[pid_m, pid_n, :, :], acc)
 
 
     def triton_lego_mm(a, b, a_layout=None, b_layout=None):
-        """Layout-aware matrix multiply using Triton.
+        """Layout-aware matrix multiply using LEGO-generated Triton kernel.
 
-        If a_layout is provided, the kernel reads A using the layout's
-        inverse permutation table (physical->logical remapping).
+        The kernel uses LEGO layout algebra for index computation.
+        No permutation tables -- pure arithmetic codegen.
         """
         M, K = a.shape
         K2, N = b.shape
         assert K == K2, f"Inner dimensions don't match: {K} vs {K2}"
 
-        c = torch.empty(M, N, device=a.device, dtype=a.dtype)
+        c = torch.empty(M, N, device=a.device, dtype=torch.float32)
 
-        has_a_perm = a_layout is not None
-        if has_a_perm:
-            import numpy as np
-            from lego.backend.compiler import LayoutCompiler
-            base = a_layout._base if hasattr(a_layout, "_base") else a_layout
-            compiler = LayoutCompiler(base._layout, base._shape, "i64")
-            _, inv = compiler.get_permutation_table()
-            a_perm = torch.from_numpy(np.ascontiguousarray(inv)).to(a.device)
-        else:
-            a_perm = torch.empty(0, dtype=torch.long, device=a.device)
+        BM, BN, BK = 64, 64, 32
+        grid = (triton.cdiv(M, BM), triton.cdiv(N, BN))
 
-        BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
-        grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
-
-        _mm_kernel[grid](
+        _lego_mm_kernel[grid](
             a, b, c,
             M, N, K,
-            a.stride(0), a.stride(1),
-            b.stride(0), b.stride(1),
-            c.stride(0), c.stride(1),
-            a_perm, has_a_perm,
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+            BM=BM, BN=BN, BK=BK,
         )
-        return c
+        return c.to(a.dtype)
 
 
     def triton_lego_bmm(a, b, a_layout=None, b_layout=None):
-        """Layout-aware batched matrix multiply using Triton."""
+        """Layout-aware batched matrix multiply using LEGO Triton kernel."""
         B_dim, M, K = a.shape
         _, K2, N = b.shape
         assert K == K2

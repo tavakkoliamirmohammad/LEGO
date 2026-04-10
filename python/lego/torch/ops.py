@@ -16,10 +16,17 @@ import torch
 # lego::mm
 # ============================================================================
 
+def _triton_aligned(a, b, BM=64, BN=64, BK=32):
+    """Check if sizes are compatible with the @lego_jit Triton kernel."""
+    M, K = a.shape
+    _, N = b.shape
+    return M % BM == 0 and N % BN == 0 and K % BK == 0
+
+
 @torch.library.custom_op("lego::mm", mutates_args=())
 def lego_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Layout-aware matrix multiply. Uses Triton on CUDA, torch.mm on CPU."""
-    if a.is_cuda:
+    if a.is_cuda and _triton_aligned(a, b):
         try:
             from .triton_kernels import triton_lego_mm
             return triton_lego_mm(a, b)
@@ -55,7 +62,7 @@ lego_mm.register_autograd(_mm_backward, setup_context=_mm_setup_ctx)
 @torch.library.custom_op("lego::bmm", mutates_args=())
 def lego_bmm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Layout-aware batched matmul. Uses Triton on CUDA, torch.bmm on CPU."""
-    if a.is_cuda:
+    if a.is_cuda and _triton_aligned(a[0], b[0]):
         try:
             from .triton_kernels import triton_lego_bmm
             return triton_lego_bmm(a, b)

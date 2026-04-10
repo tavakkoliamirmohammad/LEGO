@@ -348,14 +348,14 @@ def _dispatch_tier4(func, args, kwargs):
             if not _TIER4_MAP:
                 _populate_tier4_map()
     lego_op = _TIER4_MAP.get(func)
-    raw_args = _unwrap_args(args)
     raw_kwargs = {k: _unwrap(v) for k, v in kwargs.items()}
     if lego_op is not None:
-        # Pass layout info for layout-aware Triton dispatch
         lt = _first_lego(args)
+        # GPU + physical: use Triton kernel with layout-aware indexing
         if lt is not None and lt._is_physical and lt._data.is_cuda:
             try:
                 from .triton_kernels import triton_lego_mm, triton_lego_bmm
+                raw_args = _unwrap_args(args)
                 aten = torch.ops.aten
                 if func == aten.mm.default:
                     return triton_lego_mm(raw_args[0], raw_args[1], a_layout=lt._layout)
@@ -363,7 +363,19 @@ def _dispatch_tier4(func, args, kwargs):
                     return triton_lego_bmm(raw_args[0], raw_args[1], a_layout=lt._layout)
             except ImportError:
                 pass
+        # Physical data (CPU or Triton unavailable): inverse-rearrange to
+        # logical order before calling the op, since lego::mm/bmm/addmm
+        # fallbacks use standard torch ops that expect logical order.
+        if lt is not None and lt._is_physical:
+            def _to_logical(x):
+                if isinstance(x, LegoTensor) and x._is_physical:
+                    return _inverse_rearrange(x)
+                return _unwrap(x)
+            logical_args = _apply_to_args(args, _to_logical)
+            return lego_op(*logical_args, **raw_kwargs)
+        raw_args = _unwrap_args(args)
         return lego_op(*raw_args, **raw_kwargs)
+    raw_args = _unwrap_args(args)
     return func(*raw_args, **raw_kwargs)
 
 

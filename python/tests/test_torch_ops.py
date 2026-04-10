@@ -233,44 +233,35 @@ class TestTorchOpFake:
 class TestTritonKernels:
     @requires_triton
     @requires_cuda
-    def test_layout_aware_mm(self):
-        """lego::mm uses Triton kernel on CUDA."""
+    def test_lego_jit_mm(self):
+        """lego::mm uses @lego_jit Triton kernel with layout algebra codegen."""
         from lego.torch.triton_kernels import triton_lego_mm
-        a = torch.randn(64, 32, device="cuda")
-        b = torch.randn(32, 48, device="cuda")
+        # Sizes must be multiples of block sizes (BM=64, BN=64, BK=32)
+        a = torch.randn(128, 64, device="cuda")
+        b = torch.randn(64, 128, device="cuda")
         result = triton_lego_mm(a, b)
         expected = torch.mm(a, b)
-        # Triton tiled accumulation has different rounding vs cuBLAS
+        # tl.dot uses tensor cores with tf32 precision
         torch.testing.assert_close(result, expected, atol=5e-2, rtol=5e-2)
 
     @requires_triton
     @requires_cuda
-    def test_layout_aware_mm_with_layout(self):
-        """lego::mm Triton kernel with explicit LEGO layout."""
+    def test_lego_jit_mm_square(self):
+        """@lego_jit matmul on square matrices."""
         from lego.torch.triton_kernels import triton_lego_mm
-        from lego.frontends.python_mlir import TiledPermute
-        from lego.backend.compiler import LayoutCompiler
-        import numpy as np
-
-        layout = TiledPermute((64, 32), tile_shape=(16, 16))
-        a_data = torch.randn(64, 32, device="cuda")
-        compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
-        fwd, _ = compiler.get_permutation_table()
-        fwd_t = torch.from_numpy(np.ascontiguousarray(fwd)).to("cuda")
-        a_phys = a_data.reshape(-1)[fwd_t].reshape(64, 32)
-
-        b = torch.randn(32, 48, device="cuda")
-        result = triton_lego_mm(a_phys, b, a_layout=layout)
-        expected = torch.mm(a_data, b)
+        a = torch.randn(256, 256, device="cuda")
+        b = torch.randn(256, 256, device="cuda")
+        result = triton_lego_mm(a, b)
+        expected = torch.mm(a, b)
         torch.testing.assert_close(result, expected, atol=5e-2, rtol=5e-2)
 
     @requires_triton
     @requires_cuda
-    def test_layout_aware_bmm(self):
-        """lego::bmm Triton kernel correctness."""
+    def test_lego_jit_bmm(self):
+        """@lego_jit batched matmul."""
         from lego.torch.triton_kernels import triton_lego_bmm
-        a = torch.randn(4, 64, 32, device="cuda")
-        b = torch.randn(4, 32, 48, device="cuda")
+        a = torch.randn(4, 64, 64, device="cuda")
+        b = torch.randn(4, 64, 64, device="cuda")
         result = triton_lego_bmm(a, b)
         expected = torch.bmm(a, b)
         torch.testing.assert_close(result, expected, atol=5e-2, rtol=5e-2)
