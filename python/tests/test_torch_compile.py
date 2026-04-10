@@ -78,6 +78,60 @@ class TestCompiledExecution:
 
 
 # ============================================================================
+# Backend correctness (unwrap fix)
+# ============================================================================
+
+class TestBackendCorrectness:
+    def test_compiled_mm_correct(self):
+        """torch.compile with lego backend produces correct mm results."""
+        import lego.torch.compile  # noqa: F401
+        layout = ColMajor((8, 8))
+        a = torch.randn(8, 8)
+        b = torch.randn(8, 4)
+
+        def fn(x, y):
+            return torch.mm(x, y)
+
+        compiled = torch.compile(fn, backend="lego")
+        expected = fn(a, b)
+        result = compiled(annotate(a, layout), b)
+        torch.testing.assert_close(result, expected, atol=1e-5, rtol=1e-5)
+
+    def test_compiled_chain_correct(self):
+        """Multi-op chain through compiled backend."""
+        import lego.torch.compile  # noqa: F401
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4)
+
+        def fn(a):
+            y = torch.relu(a)
+            y = y * 2.0
+            z = torch.sum(y, dim=1)
+            return z
+
+        compiled = torch.compile(fn, backend="lego")
+        expected = fn(x)
+        result = compiled(annotate(x, layout))
+        torch.testing.assert_close(result, expected)
+
+    def test_compiled_physical_rearrange(self):
+        """Physically-rearranged data through compiled graph."""
+        import lego.torch.compile  # noqa: F401
+        from lego.torch import rearrange
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4)
+
+        def fn(a):
+            return torch.relu(a) + 1.0
+
+        compiled = torch.compile(fn, backend="lego")
+        rx = rearrange(x, layout)
+        result = compiled(rx)
+        expected = torch.relu(rx._data) + 1.0
+        torch.testing.assert_close(result, expected)
+
+
+# ============================================================================
 # Fusion infrastructure (Path C)
 # ============================================================================
 

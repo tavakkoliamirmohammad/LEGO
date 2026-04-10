@@ -1,13 +1,17 @@
 """
 LEGO Layer 3: torch.compile / Inductor Extension
 
-Registers ``backend="lego"`` for ``torch.compile``.  The backend:
+Registers ``backend="lego"`` for ``torch.compile``. The backend:
 
-1. Propagates layout metadata through the FX graph.
-2. Runs the cross-op layout planner (inserts rearrangements).
-3. Registers Triton lowerings for ``lego::*`` ops  (Path B).
-4. Injects LEGO index arithmetic for pointwise ops   (Path C).
+1. Extracts layout metadata from LegoTensor inputs.
+2. Runs the cross-op layout planner (propagates layout annotations).
+3. Unwraps LegoTensor inputs to plain tensors for inductor.
+4. Registers Triton lowerings for ``lego::*`` ops (Path B).
 5. Delegates to inductor for final compilation.
+
+Virtual annotations: data is in logical order, passed through as-is.
+Physical annotations: data is in physical order, passed through as-is
+(layout-aware ops in the graph know how to handle physical data).
 """
 
 import torch
@@ -24,6 +28,8 @@ def _register_lego_lowerings():
         import lego.torch.ops  # noqa: F401
         make_fallback(torch.ops.lego.mm)
         make_fallback(torch.ops.lego.bmm)
+        make_fallback(torch.ops.lego.addmm)
+        make_fallback(torch.ops.lego.permute)
     except (ImportError, AttributeError):
         pass  # inductor internals changed — degrade gracefully
 
@@ -41,7 +47,6 @@ def lego(gm, example_inputs):
     from torch._inductor.compile_fx import compile_fx
     from .tensor import LegoTensor
     from .planner import plan_layouts
-    from .fusion import materialize_layouts
 
     # 1. Extract layout metadata from LegoTensor inputs
     layout_map = {}
@@ -54,13 +59,21 @@ def lego(gm, example_inputs):
     if layout_map:
         plan_layouts(gm, layout_map)
 
-    # 3. Materialize virtual layouts → physical order for inductor (Path C)
-    unwrapped = materialize_layouts(example_inputs, layout_map, placeholders)
+    # 3. Unwrap LegoTensor inputs to plain tensors.
+    # Virtual annotations: _data is original logical-order data.
+    # Physical annotations: _data is rearranged data.
+    # Both cases: pass _data directly to inductor.
+    unwrapped = []
+    for inp in example_inputs:
+        if isinstance(inp, LegoTensor):
+            unwrapped.append(inp._data)
+        else:
+            unwrapped.append(inp)
 
     # 4. Compile with inductor
     compiled_fn = compile_fx(gm, unwrapped)
 
-    # 5. Wrapper: unwrap and materialize LegoTensor inputs at call time
+    # 5. Wrapper: unwrap LegoTensor inputs at call time
     def wrapper(*args):
         plain = []
         for a in args:
