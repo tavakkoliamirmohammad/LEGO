@@ -436,6 +436,17 @@ class TestEdgeCases:
         assert hasattr(lego, "rearrange")
         assert hasattr(lego, "LegoTensor")
 
+    def test_lego_annotate_without_preimport(self):
+        """lego.annotate works even if accessed before torch is in sys.modules."""
+        import importlib
+        import lego as lego_mod
+        # Force __getattr__ path
+        if "annotate" in lego_mod.__dict__:
+            del lego_mod.__dict__["annotate"]
+        # Should not raise AttributeError
+        fn = lego_mod.annotate
+        assert callable(fn)
+
 
 # ============================================================================
 # CUDA
