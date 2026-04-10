@@ -77,9 +77,11 @@ func.func @test_gen_p_view(%mem: memref<16xf32>, %i: index, %j: index) -> f32 {
       %res = arith.addi %mul, %b : index
       lego.yield %res : index
     }
-    inv (%flat: index) { 
-        %c = arith.constant 0 : index
-        lego.yield %c, %c : index, index
+    inv (%flat: index) {
+        %c4_inv = arith.constant 4 : index
+        %row_idx = arith.divui %flat, %c4_inv : index
+        %col_idx = arith.remui %flat, %c4_inv : index
+        lego.yield %row_idx, %col_idx : index, index
     } : !lego.layout
     
   %view = lego.cast_view %mem, %layout : memref<16xf32>, !lego.layout -> !lego.view<f32>
