@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lego-layout-rocm"
+version = "0.2.2"
+description = "ROCm (AMDGPU) backend plugin for lego-layout"
+requires-python = ">=3.12"
+dependencies = ["lego-layout>=0.2.2"]
+
+[project.entry-points."lego.backends"]
+rocm = "lego_rocm:register"
+
+[tool.setuptools.packages.find]
+include = ["lego_rocm", "lego_rocm.*"]

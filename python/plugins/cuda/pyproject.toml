@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lego-layout-cuda"
+version = "0.2.2"
+description = "CUDA (NVPTX) backend plugin for lego-layout"
+requires-python = ">=3.12"
+dependencies = ["lego-layout>=0.2.2"]
+
+[project.entry-points."lego.backends"]
+cuda = "lego_cuda:register"
+
+[tool.setuptools.packages.find]
+include = ["lego_cuda", "lego_cuda.*"]
