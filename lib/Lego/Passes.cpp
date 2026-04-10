@@ -206,7 +206,7 @@ void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format) {
   pm.addPass(createReconcileUnrealizedCastsPass());
 }
 
-void registerLegoPipelines() {
+void registerCorePipelines() {
   PassPipelineRegistration<>("lego-lower",
     "Lego e2e lowering pipeline (LEGO -> Arith)",
     buildLegoLowerPipeline);
@@ -219,27 +219,14 @@ void registerLegoPipelines() {
     "Lower LEGO dialect through GPU to SPIR-V "
     "(LEGO -> Arith -> GPU outlined -> SPIR-V)",
     buildLegoToSPIRVPipeline);
+}
 
 #ifdef LEGO_HAS_SPIRV
+void registerSPIRVPluginPipelines() {
   PassPipelineRegistration<LegoToLLVMSPIRVPipelineOptions>("lego-to-llvmspirv",
     "Lower LEGO dialect through GPU to LLVM SPIR-V "
     "(LEGO -> Arith -> GPU outlined -> LLVM SPIR-V -> binary)",
     buildLegoToLLVMSPIRVPipeline);
-#endif
-
-#ifdef LEGO_HAS_NVPTX
-  PassPipelineRegistration<LegoToNVVMPipelineOptions>("lego-to-nvvm",
-    "Lower LEGO dialect through GPU to NVVM/CUDA "
-    "(LEGO -> Arith -> GPU outlined -> NVVM -> PTX/cubin)",
-    buildLegoToNVVMPipeline);
-#endif
-
-#ifdef LEGO_HAS_AMDGPU
-  PassPipelineRegistration<LegoToROCDLPipelineOptions>("lego-to-rocdl",
-    "Lower LEGO dialect through GPU to ROCDL/AMD "
-    "(LEGO -> Arith -> GPU outlined -> ROCDL -> HSACO)",
-    buildLegoToROCDLPipeline);
-#endif
 
 #ifdef LEGO_HAS_XEVM
   PassPipelineRegistration<LegoToXeVMPipelineOptions>("lego-to-xevm",
@@ -247,7 +234,38 @@ void registerLegoPipelines() {
     "(LEGO -> Arith -> GPU outlined -> LLVM SPIR-V + XeVM -> binary)",
     buildLegoToXeVMPipeline);
 #endif
+}
+#endif
 
+#ifdef LEGO_HAS_NVPTX
+void registerNVPTXPipelines() {
+  PassPipelineRegistration<LegoToNVVMPipelineOptions>("lego-to-nvvm",
+    "Lower LEGO dialect through GPU to NVVM/CUDA "
+    "(LEGO -> Arith -> GPU outlined -> NVVM -> PTX/cubin)",
+    buildLegoToNVVMPipeline);
+}
+#endif
+
+#ifdef LEGO_HAS_AMDGPU
+void registerAMDGPUPipelines() {
+  PassPipelineRegistration<LegoToROCDLPipelineOptions>("lego-to-rocdl",
+    "Lower LEGO dialect through GPU to ROCDL/AMD "
+    "(LEGO -> Arith -> GPU outlined -> ROCDL -> HSACO)",
+    buildLegoToROCDLPipeline);
+}
+#endif
+
+void registerLegoPipelines() {
+  registerCorePipelines();
+#ifdef LEGO_HAS_SPIRV
+  registerSPIRVPluginPipelines();
+#endif
+#ifdef LEGO_HAS_NVPTX
+  registerNVPTXPipelines();
+#endif
+#ifdef LEGO_HAS_AMDGPU
+  registerAMDGPUPipelines();
+#endif
 }
 
 } // namespace lego

@@ -98,7 +98,7 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(GPU, gpu, mlir::gpu::GPUDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(SPIRV, spirv, mlir::spirv::SPIRVDialect)
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Math, math, mlir::math::MathDialect)
 
-void legoRegisterPasses() {
+void legoRegisterCorePasses() {
   static bool registered = false;
   if (registered)
     return;
@@ -122,10 +122,45 @@ void legoRegisterPasses() {
   mlir::lego::registerLegoStrengthReductionPass();
   mlir::lego::registerLegoMaterializeAssumeBoundsPass();
 
-  // Named pipelines: "lego-lower", "lego-to-llvm", "lego-to-spirv", "lego-to-llvmspirv"
-  // Internally these create LLVM/SPIR-V/GPU conversion passes via
-  // createXxxPass() — no registration needed for those.
-  mlir::lego::registerLegoPipelines();
+  // Always-available pipelines: lego-lower, lego-to-llvm, lego-to-spirv
+  mlir::lego::registerCorePipelines();
+}
+
+void legoRegisterNVPTXPlugin() {
+  static bool registered = false;
+  if (registered)
+    return;
+  registered = true;
+#ifdef LEGO_HAS_NVPTX
+  mlir::lego::registerNVPTXPipelines();
+#endif
+}
+
+void legoRegisterAMDGPUPlugin() {
+  static bool registered = false;
+  if (registered)
+    return;
+  registered = true;
+#ifdef LEGO_HAS_AMDGPU
+  mlir::lego::registerAMDGPUPipelines();
+#endif
+}
+
+void legoRegisterSPIRVPlugin() {
+  static bool registered = false;
+  if (registered)
+    return;
+  registered = true;
+#ifdef LEGO_HAS_SPIRV
+  mlir::lego::registerSPIRVPluginPipelines();
+#endif
+}
+
+void legoRegisterPasses() {
+  legoRegisterCorePasses();
+  legoRegisterNVPTXPlugin();
+  legoRegisterAMDGPUPlugin();
+  legoRegisterSPIRVPlugin();
 }
 
 void legoRegisterLLVMTranslations(MlirContext context) {

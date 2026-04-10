@@ -17,7 +17,25 @@ extern "C" {
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Lego, lego);
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Math, math);
 
-/// Register all LEGO passes and pipelines with the global pass registry.
+/// Register core LEGO passes and always-available pipelines
+/// (lego-lower, lego-to-llvm, lego-to-spirv).
+/// Idempotent — safe to call multiple times.
+MLIR_CAPI_EXPORTED void legoRegisterCorePasses(void);
+
+/// Register NVPTX/CUDA backend plugin (lego-to-nvvm pipeline).
+/// Idempotent — safe to call multiple times.
+MLIR_CAPI_EXPORTED void legoRegisterNVPTXPlugin(void);
+
+/// Register AMDGPU/ROCm backend plugin (lego-to-rocdl pipeline).
+/// Idempotent — safe to call multiple times.
+MLIR_CAPI_EXPORTED void legoRegisterAMDGPUPlugin(void);
+
+/// Register SPIRV/Intel backend plugin (lego-to-llvmspirv + lego-to-xevm pipelines).
+/// Idempotent — safe to call multiple times.
+MLIR_CAPI_EXPORTED void legoRegisterSPIRVPlugin(void);
+
+/// Register all LEGO passes and pipelines (core + all available backends).
+/// Convenience wrapper — calls legoRegisterCorePasses() + all plugin functions.
 /// Idempotent — safe to call multiple times.
 MLIR_CAPI_EXPORTED void legoRegisterPasses(void);
 

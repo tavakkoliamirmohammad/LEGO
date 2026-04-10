@@ -117,7 +117,28 @@ struct LegoToXeVMPipelineOptions
 #endif
 
 
+/// Register always-available pipelines: lego-lower, lego-to-llvm, lego-to-spirv.
+void registerCorePipelines();
+
+#ifdef LEGO_HAS_NVPTX
+/// Register lego-to-nvvm pipeline.
+void registerNVPTXPipelines();
+#endif
+
+#ifdef LEGO_HAS_AMDGPU
+/// Register lego-to-rocdl pipeline.
+void registerAMDGPUPipelines();
+#endif
+
+#ifdef LEGO_HAS_SPIRV
+/// Register lego-to-llvmspirv pipeline (and lego-to-xevm if LEGO_HAS_XEVM).
+void registerSPIRVPluginPipelines();
+#endif
+
+/// Register all pipelines (core + all available backends).
+/// Convenience wrapper — calls registerCorePipelines() + all backend functions.
 void registerLegoPipelines();
+
 void buildLegoLowerPipeline(OpPassManager &pm);
 void buildLegoToLLVMPipeline(OpPassManager &pm);
 void buildLegoToSPIRVPipeline(OpPassManager &pm,
