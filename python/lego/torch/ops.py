@@ -75,6 +75,37 @@ lego_bmm.register_autograd(_bmm_backward, setup_context=_bmm_setup_ctx)
 
 
 # ============================================================================
+# lego::addmm  (bias + a @ b — used by nn.Linear)
+# ============================================================================
+
+@torch.library.custom_op("lego::addmm", mutates_args=())
+def lego_addmm(bias: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Layout-aware addmm (eager fallback)."""
+    return torch.addmm(bias, a, b)
+
+
+@lego_addmm.register_fake
+def _addmm_fake(bias: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return torch.empty(a.shape[0], b.shape[1], dtype=a.dtype, device=a.device)
+
+
+def _addmm_setup_ctx(ctx, inputs, output):
+    bias, a, b = inputs
+    ctx.save_for_backward(a, b)
+
+
+def _addmm_backward(ctx, grad):
+    a, b = ctx.saved_tensors
+    grad_bias = grad.sum(0) if ctx.needs_input_grad[0] else None
+    grad_a = grad @ b.t() if ctx.needs_input_grad[1] else None
+    grad_b = a.t() @ grad if ctx.needs_input_grad[2] else None
+    return grad_bias, grad_a, grad_b
+
+
+lego_addmm.register_autograd(_addmm_backward, setup_context=_addmm_setup_ctx)
+
+
+# ============================================================================
 # lego::permute — general layout permutation (torch.compile-safe)
 # ============================================================================
 

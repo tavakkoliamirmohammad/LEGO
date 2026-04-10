@@ -136,6 +136,34 @@ class TestLegoPermute:
             assert y.shape == (4,)
 
 
+class TestLegoAddMM:
+    def test_eager_cpu(self):
+        bias = torch.randn(3)
+        a = torch.randn(4, 8)
+        b = torch.randn(8, 3)
+        result = torch.ops.lego.addmm(bias, a, b)
+        expected = torch.addmm(bias, a, b)
+        torch.testing.assert_close(result, expected)
+
+    def test_autograd(self):
+        bias = torch.randn(3, requires_grad=True)
+        a = torch.randn(4, 8, requires_grad=True)
+        b = torch.randn(8, 3, requires_grad=True)
+        torch.ops.lego.addmm(bias, a, b).sum().backward()
+        assert bias.grad is not None
+        assert a.grad is not None
+        assert b.grad is not None
+
+    def test_fake_tensor(self):
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        with FakeTensorMode():
+            bias = torch.randn(3)
+            a = torch.randn(4, 8)
+            b = torch.randn(8, 3)
+            c = torch.ops.lego.addmm(bias, a, b)
+            assert c.shape == (4, 3)
+
+
 class TestTorchOp:
     def test_register_custom_op(self):
         """@lego.torch_op registers a callable custom op."""

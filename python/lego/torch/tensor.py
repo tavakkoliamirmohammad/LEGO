@@ -287,7 +287,7 @@ def _populate_tier4_map():
     aten = torch.ops.aten
     _TIER4_MAP[aten.mm.default] = torch.ops.lego.mm
     _TIER4_MAP[aten.bmm.default] = torch.ops.lego.bmm
-    _TIER4_MAP[aten.addmm.default] = None  # no lego:: equivalent yet
+    _TIER4_MAP[aten.addmm.default] = torch.ops.lego.addmm
 
 
 # ============================================================================
