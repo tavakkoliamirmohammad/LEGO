@@ -118,8 +118,7 @@ void legoRegisterPasses() {
   mlir::lego::registerLegoGenerateBoundsChecksPass();
   mlir::lego::registerLegoExternalSMTVerifierPass();
   mlir::lego::registerLegoVerifyBijectivityPass();
-  mlir::lego::registerLegoVerifyCoalescingPass();
-  mlir::lego::registerLegoVerifyBankConflictsPass();
+  mlir::lego::registerLegoVerifyPass();
   mlir::lego::registerLegoStrengthReductionPass();
   mlir::lego::registerLegoMaterializeAssumeBoundsPass();
 

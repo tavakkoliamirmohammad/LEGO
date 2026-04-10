@@ -1,4 +1,5 @@
 #include "Lego/LegoOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 
 using namespace mlir;
 using namespace mlir::lego;
@@ -269,6 +270,32 @@ LogicalResult CastViewOp::verify() {
     }
 
     return success();
+}
+
+// ============================================================================
+// CheckOp Verification
+// ============================================================================
+
+LogicalResult CheckOp::verify() {
+  if (!getCoalescing() && !getBankConflictFree())
+    return emitOpError("must request at least one property "
+                       "(coalescing or bank_conflict_free)");
+
+  auto parentFunc = (*this)->getParentOfType<func::FuncOp>();
+  if (!parentFunc)
+    return emitOpError("must be inside a function");
+
+  bool hasThreadId = false;
+  for (unsigned i = 0; i < parentFunc.getNumArguments(); ++i) {
+    if (parentFunc.getArgAttr(i, "lego.thread_id")) {
+      hasThreadId = true;
+      break;
+    }
+  }
+  if (!hasThreadId)
+    return emitOpError("parent function must have a {lego.thread_id} argument");
+
+  return success();
 }
 
 namespace {

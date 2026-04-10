@@ -83,37 +83,18 @@ def LegoVerifyBijectivityPass : Pass<"lego-verify-bijectivity", "mlir::ModuleOp"
   let constructor = "mlir::lego::createLegoVerifyBijectivityPass()";
 }
 
-def LegoVerifyCoalescingPass : Pass<"lego-verify-coalescing", "mlir::ModuleOp"> {
-  let summary = "Verify that layouts produce coalesced memory access patterns";
+def LegoVerifyPass : Pass<"lego-verify", "mlir::ModuleOp"> {
+  let summary = "Verify memory access properties marked by lego.check ops";
   let description = [{
-    This pass verifies that for a warp of threads, the layout
-    transformation produces memory addresses within a 128-byte cache line
-    (coalesced access). Uses Z3 to verify the property.
-  }];
-  let constructor = "mlir::lego::createLegoVerifyCoalescingPass()";
-  let options = [
-    Option<"warpSize", "warp-size", "int", "32",
-           "Number of threads in a warp">
-  ];
-}
+    Finds all lego.check ops in the module, encodes their operand's arith
+    def-use chain to SMT, verifies the requested properties (coalescing,
+    bank-conflict freedom) with Z3, emits diagnostics, and erases the ops.
 
-def LegoVerifyBankConflictsPass : Pass<"lego-verify-bank-conflicts", "mlir::ModuleOp"> {
-  let summary = "Verify freedom from shared memory bank conflicts";
-  let description = [{
-    This pass verifies that for a warp of threads accessing shared memory,
-    no two threads access different addresses in the same bank.
-    By default, verifies 32 threads, 32 banks, and 4-byte elements.
-    Uses Z3 to verify conflict-freedom.
+    This pass should run after arith optimization (canonicalize + CSE) so
+    that Z3 gets the smallest possible formula. It runs as part of the
+    lego-lower pipeline, before strength reduction.
   }];
-  let constructor = "mlir::lego::createLegoVerifyBankConflictsPass()";
-  let options = [
-    Option<"warpSize", "warp-size", "int", "32",
-           "Number of threads in a warp">,
-    Option<"numBanks", "num-banks", "int", "32",
-           "Number of shared memory banks">,
-    Option<"elementSize", "element-size", "int", "4",
-           "Size of each element in bytes (used to compute bank indices)">
-  ];
+  let constructor = "mlir::lego::createLegoVerifyPass()";
 }
 
 def LegoStrengthReductionPass : Pass<"lego-strength-reduction", "mlir::ModuleOp"> {

@@ -85,9 +85,34 @@ func.func @test_gen_p_view(%mem: memref<16xf32>, %i: index, %j: index) -> f32 {
     } : !lego.layout
     
   %view = lego.cast_view %mem, %layout : memref<16xf32>, !lego.layout -> !lego.view<f32>
-  
+
   // CHECK: %[[FLAT:.*]] = arith.addi {{.*}} : index
   // CHECK: %[[RET:.*]] = memref.load %[[MEM]][%[[FLAT]]]
   %val = lego.load %view[%i, %j] : !lego.view<f32>, index, index
+  return %val : f32
+}
+
+// -----
+
+// Test: View passed as function argument
+// The callee receives a !lego.view argument; the pass should resolve
+// the CastViewOp from the call site by cloning layout ops and adding
+// a memref argument.
+
+// CHECK-LABEL: func @callee_view_arg
+// CHECK-SAME: (%{{.*}}: !lego.view<f32>, %{{.*}}: index, %{{.*}}: index, %[[MEM:.*]]: memref<100xf32>)
+func.func @callee_view_arg(%view: !lego.view<f32>, %i: index, %j: index) -> f32 {
+  // CHECK: memref.load %[[MEM]]
+  %val = lego.load %view[%i, %j] : !lego.view<f32>, index, index
+  return %val : f32
+}
+
+func.func @caller_passes_view(%mem: memref<100xf32>, %i: index, %j: index) -> f32 {
+  %c10 = arith.constant 10 : index
+  %row = lego.row [%c10, %c10] : !lego.layout
+  %ob = lego.order_by (%row) : !lego.layout
+  %tiled = lego.tile_by %ob tile_dims [[%c10, %c10]] : !lego.layout
+  %view = lego.cast_view %mem, %tiled : memref<100xf32>, !lego.layout -> !lego.view<f32>
+  %val = func.call @callee_view_arg(%view, %i, %j) : (!lego.view<f32>, index, index) -> f32
   return %val : f32
 }

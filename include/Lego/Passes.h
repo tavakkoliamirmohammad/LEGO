@@ -21,8 +21,7 @@ std::unique_ptr<Pass> createLegoMaterializeAssumeBoundsPass(bool cleanup = false
 std::unique_ptr<Pass> createLegoGenerateBoundsChecksPass();
 std::unique_ptr<Pass> createLegoExternalSMTVerifierPass();
 std::unique_ptr<Pass> createLegoVerifyBijectivityPass();
-std::unique_ptr<Pass> createLegoVerifyCoalescingPass();
-std::unique_ptr<Pass> createLegoVerifyBankConflictsPass();
+std::unique_ptr<Pass> createLegoVerifyPass();
 std::unique_ptr<Pass> createLegoStrengthReductionPass();
 
 /// Options for the lego-to-spirv pipeline.
@@ -178,8 +177,7 @@ void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format);
 #define GEN_PASS_DECL_LEGOGENERATEBOUNDSCHECKSPASS
 #define GEN_PASS_DECL_LEGOEXTERNALSMTVERIFIERPASS
 #define GEN_PASS_DECL_LEGOVERIFYBIJECTIVITYPASS
-#define GEN_PASS_DECL_LEGOVERIFYCOALESCINGPASS
-#define GEN_PASS_DECL_LEGOVERIFYBANKCONFLICTSPASS
+#define GEN_PASS_DECL_LEGOVERIFYPASS
 #define GEN_PASS_DECL_LEGOSTRENGTHREDUCTIONPASS
 #define GEN_PASS_REGISTRATION
 #include "Lego/Passes.h.inc"

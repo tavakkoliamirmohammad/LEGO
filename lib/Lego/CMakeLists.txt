@@ -106,8 +106,7 @@ add_mlir_dialect_library(MLIRLego
   LegoGenerateBoundsChecks.cpp
   LegoExternalSMTVerifier.cpp
   LegoVerifyBijectivity.cpp
-  LegoVerifyCoalescing.cpp
-  LegoVerifyBankConflicts.cpp
+  LegoVerify.cpp
   SMTUtils.cpp
   # JIT (excluded for Emscripten)
   ${_JIT_SOURCES}
