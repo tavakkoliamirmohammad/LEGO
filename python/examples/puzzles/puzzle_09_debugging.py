@@ -58,6 +58,6 @@ if __name__ == "__main__":
     print("Running CORRECT version (with barrier):", file=sys.stderr)
     run_benchmark(
         correct_barrier, compute_expected,
-        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
         label=f"N={N}",
     )

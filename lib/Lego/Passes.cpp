@@ -237,6 +237,13 @@ void registerLegoPipelines() {
     buildLegoToROCDLPipeline);
 #endif
 
+#ifdef LEGO_HAS_XEVM
+  PassPipelineRegistration<LegoToXeVMPipelineOptions>("lego-to-xevm",
+    "Lower LEGO dialect through GPU to XeVM/Intel "
+    "(LEGO -> Arith -> GPU outlined -> LLVM SPIR-V + XeVM -> binary)",
+    buildLegoToXeVMPipeline);
+#endif
+
 }
 
 } // namespace lego

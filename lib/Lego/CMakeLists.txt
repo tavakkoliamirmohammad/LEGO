@@ -33,6 +33,7 @@ set(_GPU_BACKEND_SOURCES
   LegoLLVMSPIRVPipeline.cpp
   LegoNVVMPipeline.cpp
   LegoROCDLPipeline.cpp
+  LegoXeVMPipeline.cpp
 )
 set(_GPU_BACKEND_LIBS)
 
@@ -59,6 +60,14 @@ if(LEGO_HAS_AMDGPU)
     MLIRROCDLDialect
     MLIRROCDLTarget
     MLIRROCDLToLLVMIRTranslation
+  )
+endif()
+
+if(LEGO_HAS_XEVM)
+  list(APPEND _GPU_BACKEND_LIBS
+    MLIRXeVMDialect
+    MLIRXeVMTarget
+    MLIRXeVMToLLVMIRTranslation
   )
 endif()
 

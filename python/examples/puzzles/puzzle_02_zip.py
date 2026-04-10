@@ -40,6 +40,6 @@ if __name__ == "__main__":
 
     run_benchmark(
         zip_add, compute_expected,
-        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
         label=f"N={N}",
     )

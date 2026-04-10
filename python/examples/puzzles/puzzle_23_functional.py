@@ -88,6 +88,6 @@ if __name__ == "__main__":
         print(f"{'='*60}", file=sys.stderr)
         run_benchmark(
             kernel, compute_expected,
-            targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+            targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
             label=f"{name} N={N}",
         )

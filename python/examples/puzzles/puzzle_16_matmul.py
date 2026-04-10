@@ -130,7 +130,7 @@ if __name__ == "__main__":
     print("Sub-test 1: naive matmul (global memory only)", file=sys.stderr)
     run_benchmark(
         naive_matmul, compute_expected_small,
-        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
         label=f"naive {S}x{S}",
         init_mod=10, atol=1e-2,
     )
@@ -138,7 +138,7 @@ if __name__ == "__main__":
     print("Sub-test 2: shared memory matmul (single block)", file=sys.stderr)
     run_benchmark(
         smem_matmul, compute_expected_small,
-        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
         label=f"smem {S}x{S}",
         init_mod=10, atol=1e-2,
     )
@@ -146,7 +146,7 @@ if __name__ == "__main__":
     print("Sub-test 3: tiled matmul (multi-block)", file=sys.stderr)
     run_benchmark(
         tiled_matmul, compute_expected_tiled,
-        targets=["cuda", "rocm", "llvmspirv", "vulkan", "webgpu", "webgl", "metal"],
+        targets=["cuda", "rocm", "llvmspirv", "intel", "vulkan", "webgpu", "webgl", "metal"],
         label=f"tiled {M}x{N}x{K}",
         init_mod=10, atol=1e-2,
     )
