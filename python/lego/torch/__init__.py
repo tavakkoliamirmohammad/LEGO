@@ -21,6 +21,13 @@ from .tensor import LegoTensor, _warned_ops  # noqa: F401
 from . import ops as _ops  # noqa: F401  — registers lego::mm, lego::bmm
 from .ops import torch_op  # noqa: F401
 
+__all__ = [
+    "annotate",
+    "rearrange",
+    "LegoTensor",
+    "torch_op",
+]
+
 
 # ============================================================================
 # annotate — virtual layout (metadata only)

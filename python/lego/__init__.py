@@ -84,4 +84,13 @@ def __getattr__(name):
             raise AttributeError(
                 f"lego.{name} requires PyTorch. Install it with: pip install torch"
             ) from None
+    if name == "autotune":
+        try:
+            from .torch.autotune import autotune
+            globals()["autotune"] = autotune
+            return autotune
+        except ImportError:
+            raise AttributeError(
+                "lego.autotune requires PyTorch. Install it with: pip install torch"
+            ) from None
     raise AttributeError(f"module 'lego' has no attribute {name!r}")
