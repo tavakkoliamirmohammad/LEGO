@@ -167,3 +167,4 @@ add_mlir_dialect_library(MLIRLego
 )
 
 add_subdirectory(CAPI)
+add_subdirectory(plugin)
