@@ -49,6 +49,49 @@ def _first_lego(args):
     return None
 
 
+def _inverse_rearrange(lt):
+    """Convert physical LegoTensor data back to logical order."""
+    from lego.backend.compiler import LayoutCompiler
+    import numpy as np
+    layout = lt._layout
+    base = layout._base if hasattr(layout, "_base") else layout
+    compiler = LayoutCompiler(base._layout, base._shape, "i64")
+    _, inv = compiler.get_permutation_table()
+    inv_t = torch.from_numpy(np.ascontiguousarray(inv)).to(lt._data.device)
+    return lt._data.reshape(-1)[inv_t].reshape(lt._data.shape)
+
+
+def _flat_lego_args(args):
+    """Yield all tensor-like leaf elements from args."""
+    if isinstance(args, (tuple, list)):
+        for a in args:
+            yield from _flat_lego_args(a)
+    elif isinstance(args, (LegoTensor, torch.Tensor)):
+        yield args
+
+
+def _apply_to_args(args, fn):
+    """Apply fn to each element in a nested args structure."""
+    if isinstance(args, tuple):
+        return tuple(_apply_to_args(a, fn) for a in args)
+    if isinstance(args, list):
+        return [_apply_to_args(a, fn) for a in args]
+    return fn(args)
+
+
+def _has_dim_arg(args, kwargs):
+    """Check if a reduction op has a dim argument (non-empty)."""
+    if "dim" in kwargs and kwargs["dim"]:
+        return True
+    # For aten ops, dim is usually the second positional arg
+    if len(args) >= 2 and isinstance(args[1], (int, list, tuple)):
+        if isinstance(args[1], (list, tuple)) and len(args[1]) > 0:
+            return True
+        if isinstance(args[1], int):
+            return True
+    return False
+
+
 # ============================================================================
 # Op classification tables  (populated at end of module)
 # ============================================================================
@@ -179,7 +222,10 @@ class LegoTensor(torch.Tensor):
             return _dispatch_tier2(func, args, kwargs)
 
         # Full reductions (no dim arg) — safe on physical data, returns scalar
+        # amax/amin can take a dim arg — route to dim-reduction handler if so
         if func in _FULL_REDUCTIONS:
+            if _has_dim_arg(args, kwargs):
+                return _dispatch_dim_reduction(func, args, kwargs)
             return func(*_unwrap_args(args), **{k: _unwrap(v) for k, v in kwargs.items()})
 
         # Dim-reductions: must inverse-rearrange physical data first
@@ -205,6 +251,30 @@ def _dispatch_tier1(func, args, kwargs):
     lt = _first_lego(args)
     layout = lt._layout
     phys = lt._is_physical
+
+    # If physical data is being mixed with plain/virtual tensors in a binary op,
+    # we must inverse-rearrange the physical data to logical order first.
+    if phys:
+        has_non_physical = False
+        for a in _flat_lego_args(args):
+            if isinstance(a, LegoTensor):
+                if not a._is_physical:
+                    has_non_physical = True
+                    break
+            elif isinstance(a, torch.Tensor):
+                has_non_physical = True
+                break
+
+        if has_non_physical:
+            # Mixed: inverse-rearrange physical operands to logical order
+            def _to_logical(x):
+                if isinstance(x, LegoTensor) and x._is_physical:
+                    return _inverse_rearrange(x)
+                return _unwrap(x)
+            logical_args = _apply_to_args(args, _to_logical)
+            logical_kwargs = {k: _to_logical(v) for k, v in kwargs.items()}
+            return func(*logical_args, **logical_kwargs)
+
     result = func(*_unwrap_args(args), **{k: _unwrap(v) for k, v in kwargs.items()})
     # Only propagate layout when output shape matches input (pointwise).
     # Dim-reductions change shape, so layout doesn't propagate, but
@@ -220,14 +290,7 @@ def _dispatch_dim_reduction(func, args, kwargs):
     if lt is not None and lt._is_physical:
         # Physical data is in layout order — inverse-rearrange to logical
         # order before reducing along a dimension.
-        from lego.backend.compiler import LayoutCompiler
-        import numpy as np
-        layout = lt._layout
-        base = layout._base if hasattr(layout, "_base") else layout
-        compiler = LayoutCompiler(base._layout, base._shape, "i64")
-        _, inv = compiler.get_permutation_table()
-        inv_t = torch.from_numpy(np.ascontiguousarray(inv)).to(lt._data.device)
-        logical = lt._data.reshape(-1)[inv_t].reshape(lt._data.shape)
+        logical = _inverse_rearrange(lt)
         new_args = list(args)
         new_args[0] = logical
         return func(*new_args, **{k: _unwrap(v) for k, v in kwargs.items()})
@@ -261,7 +324,17 @@ def _dispatch_tier3(func, args, kwargs):
     if name not in _warned_ops:
         _warned_ops.add(name)
         warnings.warn(f"'{name}' is not layout-aware. Layout metadata dropped.", stacklevel=4)
-    return func(*_unwrap_args(args), **{k: _unwrap(v) for k, v in kwargs.items()})
+
+    # If any arg is physical, inverse-rearrange to logical order before
+    # stripping layout, so the caller gets correct logical-order data.
+    def _maybe_to_logical(x):
+        if isinstance(x, LegoTensor) and x._is_physical:
+            return _inverse_rearrange(x)
+        return _unwrap(x)
+
+    logical_args = _apply_to_args(args, _maybe_to_logical)
+    logical_kwargs = {k: _maybe_to_logical(v) for k, v in kwargs.items()}
+    return func(*logical_args, **logical_kwargs)
 
 
 _TIER4_MAP: dict = {}
@@ -336,6 +409,7 @@ def _populate():
         aten._to_copy.default,
         aten.dropout.default,
         aten.native_dropout.default,
+        aten.detach.default,
     ])
 
     _TIER2.update([

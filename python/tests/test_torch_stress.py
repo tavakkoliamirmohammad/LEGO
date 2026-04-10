@@ -200,3 +200,55 @@ class TestEndToEndTraining:
             optimizer.step()
 
         assert model.weight.grad is not None
+
+
+class TestPhysicalMixedOps:
+    """Tests for physical data mixed with plain tensors (correctness bug fixes)."""
+
+    def test_physical_plus_plain(self):
+        """Physical tensor + plain tensor must give correct result."""
+        layout = ColMajor((4, 4))
+        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        rx = rearrange(x, layout)
+        y = torch.ones(4, 4) * 10
+        result = rx + y
+        expected = x + y
+        # Result should NOT be LegoTensor since one operand was plain
+        if isinstance(result, LegoTensor):
+            result = result._data
+        torch.testing.assert_close(result, expected, atol=1e-6, rtol=1e-6)
+
+    def test_physical_mul_plain(self):
+        """Physical tensor * plain tensor must give correct result."""
+        layout = ColMajor((4, 4))
+        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        rx = rearrange(x, layout)
+        y = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        result = rx * y
+        expected = x * y
+        if isinstance(result, LegoTensor):
+            result = result._data
+        torch.testing.assert_close(result, expected)
+
+    def test_tier3_on_physical_returns_logical_order(self):
+        """Tier 3 op on physical data should return data in logical order."""
+        layout = ColMajor((4, 4))
+        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        rx = rearrange(x, layout)
+        import warnings
+        from lego.torch.tensor import _warned_ops
+        _warned_ops.clear()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = rx.reshape(2, 8)
+        # Result should be in logical order (same as x.reshape(2,8))
+        torch.testing.assert_close(result, x.reshape(2, 8))
+
+    def test_amax_dim_on_physical(self):
+        """amax with dim on physical data must give correct result."""
+        layout = ColMajor((4, 4))
+        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        rx = rearrange(x, layout)
+        result = torch.amax(rx, dim=0)
+        expected = torch.amax(x, dim=0)
+        torch.testing.assert_close(result, expected)
