@@ -219,9 +219,13 @@ add_definitions(-DLEGO_HAS_GPU)
 message(STATUS "GPU + SPIR-V dialect support enabled")
 
 # --- LLVM target detection helper ---
+# A target is enabled only if LLVM provides it AND the user requested it.
+# In decoupled builds, LLVM_TARGETS_TO_BUILD may include targets the user
+# doesn't want in this particular wheel (e.g. core-only build).
 macro(detect_llvm_target _target _msg)
   set(LEGO_HAS_${_target} OFF)
-  if("${LLVM_TARGETS_TO_BUILD}" MATCHES "${_target}")
+  if("${LLVM_TARGETS_TO_BUILD}" MATCHES "${_target}" AND
+     "${LEGO_LLVM_TARGETS}" MATCHES "${_target}")
     set(LEGO_HAS_${_target} ON)
     add_definitions(-DLEGO_HAS_${_target})
     message(STATUS "${_msg}")

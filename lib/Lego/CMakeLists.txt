@@ -50,7 +50,6 @@ if(LEGO_HAS_NVPTX)
     MLIRNVVMTarget
     MLIRNVVMToLLVM
     MLIRNVVMToLLVMIRTranslation
-    MLIRGPUToLLVMIRTranslation
   )
 endif()
 
@@ -140,9 +139,11 @@ add_mlir_dialect_library(MLIRLego
   MLIRTargetLLVMIRExport
   MLIRLLVMToLLVMIRTranslation
   MLIRBuiltinToLLVMIRTranslation
-  # GPU dialect (always available)
+  # GPU dialect + shared GPU-to-LLVM conversion (always available)
   MLIRGPUDialect
   MLIRGPUTransforms
+  MLIRGPUToGPURuntimeTransforms
+  MLIRGPUToLLVMIRTranslation
   # SPIR-V backend (always available)
   MLIRSPIRVDialect
   MLIRSPIRVConversion
