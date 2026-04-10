@@ -379,6 +379,39 @@ class TestDimReductions:
 
 
 # ============================================================================
+# Physical dim-reductions (C1 correctness fix)
+# ============================================================================
+
+class TestPhysicalDimReductions:
+    def test_sum_dim_on_physical_data(self):
+        """sum(dim=k) on physically-rearranged data must be correct."""
+        layout = ColMajor((4, 4))
+        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        rx = rearrange(x, layout)
+        result = torch.sum(rx, dim=1)
+        expected = torch.sum(x, dim=1)
+        torch.testing.assert_close(result, expected)
+
+    def test_mean_dim_on_physical_data(self):
+        """mean(dim=k) on physically-rearranged data must be correct."""
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4)
+        rx = rearrange(x, layout)
+        result = torch.mean(rx, dim=0)
+        expected = torch.mean(x, dim=0)
+        torch.testing.assert_close(result, expected)
+
+    def test_sum_dim_on_virtual_still_works(self):
+        """sum(dim=k) on virtual annotations still gives correct results."""
+        layout = ColMajor((4, 4))
+        x = torch.randn(4, 4)
+        ax = annotate(x, layout)
+        result = torch.sum(ax, dim=1)
+        expected = torch.sum(x, dim=1)
+        torch.testing.assert_close(result, expected)
+
+
+# ============================================================================
 # Hardening: edge cases
 # ============================================================================
 

@@ -56,6 +56,7 @@ _TIER1: set = set()
 _TIER2: set = set()
 _TIER4: set = set()
 _FULL_REDUCTIONS: set = set()
+_DIM_REDUCTIONS: set = set()
 
 
 # ============================================================================
@@ -176,6 +177,10 @@ class LegoTensor(torch.Tensor):
         if func in _FULL_REDUCTIONS:
             return func(*_unwrap_args(args), **{k: _unwrap(v) for k, v in kwargs.items()})
 
+        # Dim-reductions: must inverse-rearrange physical data first
+        if func in _DIM_REDUCTIONS:
+            return _dispatch_dim_reduction(func, args, kwargs)
+
         if func in _TIER4:
             return _dispatch_tier4(func, args, kwargs)
 
@@ -202,6 +207,27 @@ def _dispatch_tier1(func, args, kwargs):
     if isinstance(result, torch.Tensor) and result.shape == lt.shape:
         return LegoTensor(result, layout, phys)
     return result
+
+
+def _dispatch_dim_reduction(func, args, kwargs):
+    """Dim-reductions: correct on virtual data, need inverse on physical."""
+    lt = _first_lego(args)
+    if lt is not None and lt._is_physical:
+        # Physical data is in layout order — inverse-rearrange to logical
+        # order before reducing along a dimension.
+        from lego.backend.compiler import LayoutCompiler
+        import numpy as np
+        layout = lt._layout
+        base = layout._base if hasattr(layout, "_base") else layout
+        compiler = LayoutCompiler(base._layout, base._shape, "i64")
+        _, inv = compiler.get_permutation_table()
+        inv_t = torch.from_numpy(np.ascontiguousarray(inv)).to(lt._data.device)
+        logical = lt._data.reshape(-1)[inv_t].reshape(lt._data.shape)
+        new_args = list(args)
+        new_args[0] = logical
+        return func(*new_args, **{k: _unwrap(v) for k, v in kwargs.items()})
+    # Virtual data: data is still in logical order, safe to reduce directly
+    return func(*_unwrap_args(args), **{k: _unwrap(v) for k, v in kwargs.items()})
 
 
 def _dispatch_tier2(func, args, kwargs):
@@ -290,11 +316,6 @@ def _populate():
         aten._to_copy.default,
         aten.dropout.default,
         aten.native_dropout.default,
-        # Dim-reductions: correct on physical data; layout won't propagate
-        # because output shape changes (handled by shape check in _dispatch_tier1).
-        aten.sum.dim_IntList,
-        aten.mean.dim,
-        aten.prod.dim_int,
     ])
 
     _TIER2.update([
@@ -315,6 +336,12 @@ def _populate():
         aten.prod.default,
         aten.amax.default,
         aten.amin.default,
+    ])
+
+    _DIM_REDUCTIONS.update([
+        aten.sum.dim_IntList,
+        aten.mean.dim,
+        aten.prod.dim_int,
     ])
 
 
