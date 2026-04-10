@@ -17,10 +17,11 @@
 #include "Lego/CAPI/Dialects.h"
 
 int main(int argc, char **argv) {
-  // Register all passes and pipelines via the shared CAPI function.
-  // This is the single source of truth — both lego-opt and the Python
-  // bindings call the same function, preventing registration drift.
-  legoRegisterPasses();
+  // Register core passes + all available backend plugins (monolithic build).
+  legoRegisterCorePasses();
+  legoRegisterNVPTXPlugin();
+  legoRegisterAMDGPUPlugin();
+  legoRegisterSPIRVPlugin();
 
   mlir::DialectRegistry registry;
   registry.insert<mlir::func::FuncDialect, mlir::arith::ArithDialect,

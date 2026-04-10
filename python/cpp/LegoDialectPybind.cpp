@@ -93,8 +93,13 @@ NB_MODULE(_legoDialects, m) {
   m.def(
       "register_lego_dialect",
       [](MlirContext ctx) {
-        // Register LEGO passes and pipelines (idempotent)
-        legoRegisterPasses();
+        // Register core passes + all available backend plugins.
+        // In monolithic dev builds, all backends are linked in.
+        // In split-wheel builds, GPU backends register via dlopen plugins.
+        legoRegisterCorePasses();
+        legoRegisterNVPTXPlugin();
+        legoRegisterAMDGPUPlugin();
+        legoRegisterSPIRVPlugin();
 
         // Register ConvertToLLVMPatternInterface extensions BEFORE loading
         // dialects. This enables GPU→ROCDL/NVVM passes to discover LLVM
