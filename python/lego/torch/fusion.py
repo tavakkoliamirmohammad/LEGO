@@ -62,13 +62,10 @@ def materialize_layouts(example_inputs, layout_map, placeholders):
     for inp in example_inputs:
         if isinstance(inp, LegoTensor) and not inp._is_physical:
             layout = inp.lego_layout
-            try:
-                fwd, _ = make_index_function(layout)
-                fwd_t = torch.from_numpy(fwd).to(inp.device)
-                rearranged = inp._data.reshape(-1)[fwd_t].reshape(inp.shape)
-                result.append(rearranged)
-            except Exception:
-                result.append(inp._data)
+            fwd, _ = make_index_function(layout)
+            fwd_t = torch.from_numpy(fwd).to(inp.device)
+            rearranged = inp._data.reshape(-1)[fwd_t].reshape(inp.shape)
+            result.append(rearranged)
         elif isinstance(inp, LegoTensor):
             result.append(inp._data)
         else:
