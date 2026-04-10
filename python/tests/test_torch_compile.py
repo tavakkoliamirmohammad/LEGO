@@ -266,3 +266,53 @@ class TestSpecEndToEnd:
         expected = fn(A_data, B)
         result = compiled(A, B)
         torch.testing.assert_close(result, expected)
+
+
+# ============================================================================
+# Planner insertion / propagation
+# ============================================================================
+
+class TestPlannerInsertion:
+    def test_planner_propagates_tier1_and_drops_at_tier3(self):
+        """Planner propagates through Tier 1, layout drops at Tier 3 (reshape)."""
+        from lego.torch.planner import plan_layouts
+
+        layout = ColMajor((4, 4))
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu_node = graph.call_function(torch.ops.aten.relu.default, (x,))
+        reshape_node = graph.call_function(
+            torch.ops.aten.reshape.default, (relu_node, [2, 8])
+        )
+        graph.output(reshape_node)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        layout_map = {"x": layout}
+        plan_layouts(gm, layout_map)
+        assert relu_node.name in layout_map
+        assert reshape_node.name not in layout_map
+
+    def test_planner_uses_cost_model(self):
+        """Cost model returns 0 for identity, positive for non-identity."""
+        from lego.torch.planner import layout_cost
+        assert layout_cost(RowMajor((4, 4))) == 0
+        assert layout_cost(ColMajor((4, 4))) > 0
+        assert layout_cost(TiledPermute((8, 8), tile_shape=(4, 4))) > 0
+
+    def test_planner_propagates_through_tier4(self):
+        """Layout propagates through Tier 4 (mm) ops."""
+        from lego.torch.planner import plan_layouts
+
+        layout = ColMajor((4, 4))
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        y = graph.placeholder("y")
+        mm_node = graph.call_function(torch.ops.aten.mm.default, (x, y))
+        relu_node = graph.call_function(torch.ops.aten.relu.default, (mm_node,))
+        graph.output(relu_node)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        layout_map = {"x": layout}
+        plan_layouts(gm, layout_map)
+        assert mm_node.name in layout_map
+        assert relu_node.name in layout_map
