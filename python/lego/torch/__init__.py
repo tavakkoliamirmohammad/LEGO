@@ -46,32 +46,17 @@ def annotate(tensor, layout):
 # rearrange — physical layout (data movement + annotate)
 # ============================================================================
 
-class _Rearrange(torch.autograd.Function):
-    """Autograd: backward applies the inverse rearrangement."""
-
-    @staticmethod
-    def forward(ctx, tensor, fwd_idx, inv_idx):
-        ctx.save_for_backward(inv_idx)
-        ctx.shape = tensor.shape
-        return tensor.reshape(-1)[fwd_idx].reshape(tensor.shape)
-
-    @staticmethod
-    def backward(ctx, grad):
-        (inv_idx,) = ctx.saved_tensors
-        return grad.reshape(-1)[inv_idx].reshape(ctx.shape), None, None
-
-
 def rearrange(tensor, layout):
     """Physically rearrange tensor data according to *layout*, then annotate.
 
-    The inverse rearrangement is recorded for autograd.
+    Uses ``lego::permute`` custom op so rearrangements survive torch.compile.
     """
     from lego.backend.compiler import LayoutCompiler
 
-    compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
-    fwd, inv = compiler.get_permutation_table()
+    base = layout._base if hasattr(layout, "_base") else layout
+    compiler = LayoutCompiler(base._layout, base._shape, "i64")
+    fwd, _ = compiler.get_permutation_table()
     fwd_idx = torch.from_numpy(np.ascontiguousarray(fwd)).to(tensor.device)
-    inv_idx = torch.from_numpy(np.ascontiguousarray(inv)).to(tensor.device)
 
-    rearranged = _Rearrange.apply(tensor, fwd_idx, inv_idx)
+    rearranged = torch.ops.lego.permute(tensor.reshape(-1), fwd_idx).reshape(tensor.shape)
     return LegoTensor(rearranged, layout, is_physical=True)

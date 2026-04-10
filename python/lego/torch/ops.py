@@ -75,6 +75,37 @@ lego_bmm.register_autograd(_bmm_backward, setup_context=_bmm_setup_ctx)
 
 
 # ============================================================================
+# lego::permute — general layout permutation (torch.compile-safe)
+# ============================================================================
+
+@torch.library.custom_op("lego::permute", mutates_args=())
+def lego_permute(x: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    """Apply gather-based permutation: output[i] = input[perm[i]]."""
+    return x.contiguous().view(-1)[perm].view(x.shape)
+
+
+@lego_permute.register_fake
+def _permute_fake(x: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+def _permute_setup_ctx(ctx, inputs, output):
+    x, perm = inputs
+    inv_perm = torch.empty_like(perm)
+    inv_perm[perm] = torch.arange(perm.shape[0], device=perm.device)
+    ctx.save_for_backward(inv_perm)
+
+
+def _permute_backward(ctx, grad):
+    (inv_perm,) = ctx.saved_tensors
+    grad_x = grad.contiguous().view(-1)[inv_perm].view(grad.shape)
+    return grad_x, None
+
+
+lego_permute.register_autograd(_permute_backward, setup_context=_permute_setup_ctx)
+
+
+# ============================================================================
 # User-facing decorator
 # ============================================================================
 

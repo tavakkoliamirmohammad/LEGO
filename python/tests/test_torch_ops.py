@@ -104,6 +104,38 @@ class TestLegoBMM:
             assert c.shape == (2, 4, 3)
 
 
+class TestLegoPermute:
+    def test_eager_cpu(self):
+        perm = torch.tensor([3, 2, 1, 0], dtype=torch.long)
+        x = torch.tensor([10.0, 20.0, 30.0, 40.0])
+        result = torch.ops.lego.permute(x, perm)
+        expected = torch.tensor([40.0, 30.0, 20.0, 10.0])
+        torch.testing.assert_close(result, expected)
+
+    @requires_cuda
+    def test_eager_cuda(self):
+        perm = torch.tensor([3, 2, 1, 0], dtype=torch.long, device="cuda")
+        x = torch.tensor([10.0, 20.0, 30.0, 40.0], device="cuda")
+        result = torch.ops.lego.permute(x, perm)
+        expected = torch.tensor([40.0, 30.0, 20.0, 10.0], device="cuda")
+        torch.testing.assert_close(result, expected)
+
+    def test_autograd(self):
+        perm = torch.tensor([3, 2, 1, 0], dtype=torch.long)
+        x = torch.randn(4, requires_grad=True)
+        y = torch.ops.lego.permute(x.view(-1), perm)
+        y.sum().backward()
+        assert x.grad is not None
+
+    def test_fake_tensor(self):
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        with FakeTensorMode():
+            perm = torch.tensor([3, 2, 1, 0], dtype=torch.long)
+            x = torch.randn(4)
+            y = torch.ops.lego.permute(x, perm)
+            assert y.shape == (4,)
+
+
 class TestTorchOp:
     def test_register_custom_op(self):
         """@lego.torch_op registers a callable custom op."""
