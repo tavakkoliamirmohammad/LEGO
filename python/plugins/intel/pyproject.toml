@@ -14,3 +14,6 @@ intel = "lego_intel:register"
 
 [tool.setuptools.packages.find]
 include = ["lego_intel", "lego_intel.*"]
+
+[tool.setuptools.package-data]
+"lego_intel" = ["_mlir_libs/*"]

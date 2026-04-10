@@ -27,4 +27,9 @@ print("[check-lego-imports] Testing GPU builder + SPIR-V backend imports...")
 from lego.backend.gpu_builder import KernelBuilder, KernelContext, LayoutBuffer, CompileResult, make_permutation_kernel
 from lego.backend.spirv import GPUIRBuilder, compile_to_spirv, compile_to_target, compile_all
 from lego.backend.naga import convert, spv_to_wgsl, spv_to_metal, spv_to_glsl, spv_bytes_to_file, validate
+print("[check-lego-imports] Testing GPU target registration...")
+from lego.backend.gpu_builder import _GPU_TARGETS
+registered = sorted(_GPU_TARGETS.keys())
+print(f"[check-lego-imports] Registered GPU targets: {registered}")
+assert len(registered) >= 1, "No GPU targets registered — plugin discovery or fallback failed"
 print("[check-lego-imports] All imports OK")

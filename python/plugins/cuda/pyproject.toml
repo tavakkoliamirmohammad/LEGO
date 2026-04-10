@@ -14,3 +14,6 @@ cuda = "lego_cuda:register"
 
 [tool.setuptools.packages.find]
 include = ["lego_cuda", "lego_cuda.*"]
+
+[tool.setuptools.package-data]
+"lego_cuda" = ["_mlir_libs/*"]

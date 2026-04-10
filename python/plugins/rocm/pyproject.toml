@@ -14,3 +14,6 @@ rocm = "lego_rocm:register"
 
 [tool.setuptools.packages.find]
 include = ["lego_rocm", "lego_rocm.*"]
+
+[tool.setuptools.package-data]
+"lego_rocm" = ["_mlir_libs/*"]

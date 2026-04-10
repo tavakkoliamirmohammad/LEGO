@@ -533,6 +533,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
         "$<TARGET_FILE:LegoNVPTXPlugin>" "${_CUDA_WHEEL_DIR}/lego_cuda/_mlir_libs/"
       COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_SOURCE_DIR}/python/plugins/cuda/pyproject.toml" "${_CUDA_WHEEL_DIR}/pyproject.toml"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/python/plugins/setup_wheel.py" "${_CUDA_WHEEL_DIR}/setup.py"
       COMMENT "Preparing CUDA plugin wheel directory"
     )
   endif()
@@ -548,6 +550,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
         "$<TARGET_FILE:LegoAMDGPUPlugin>" "${_ROCM_WHEEL_DIR}/lego_rocm/_mlir_libs/"
       COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_SOURCE_DIR}/python/plugins/rocm/pyproject.toml" "${_ROCM_WHEEL_DIR}/pyproject.toml"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/python/plugins/setup_wheel.py" "${_ROCM_WHEEL_DIR}/setup.py"
       COMMENT "Preparing ROCm plugin wheel directory"
     )
   endif()
@@ -563,6 +567,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
         "$<TARGET_FILE:LegoSPIRVPlugin>" "${_INTEL_WHEEL_DIR}/lego_intel/_mlir_libs/"
       COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_SOURCE_DIR}/python/plugins/intel/pyproject.toml" "${_INTEL_WHEEL_DIR}/pyproject.toml"
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_SOURCE_DIR}/python/plugins/setup_wheel.py" "${_INTEL_WHEEL_DIR}/setup.py"
       COMMENT "Preparing Intel plugin wheel directory"
     )
   endif()
