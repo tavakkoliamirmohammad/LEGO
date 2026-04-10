@@ -18,7 +18,13 @@ import torch
 
 @torch.library.custom_op("lego::mm", mutates_args=())
 def lego_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Layout-aware matrix multiply (eager fallback)."""
+    """Layout-aware matrix multiply. Uses Triton on CUDA, torch.mm on CPU."""
+    if a.is_cuda:
+        try:
+            from .triton_kernels import triton_lego_mm
+            return triton_lego_mm(a, b)
+        except ImportError:
+            pass
     return torch.mm(a, b)
 
 
@@ -48,7 +54,13 @@ lego_mm.register_autograd(_mm_backward, setup_context=_mm_setup_ctx)
 
 @torch.library.custom_op("lego::bmm", mutates_args=())
 def lego_bmm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Layout-aware batched matrix multiply (eager fallback)."""
+    """Layout-aware batched matmul. Uses Triton on CUDA, torch.bmm on CPU."""
+    if a.is_cuda:
+        try:
+            from .triton_kernels import triton_lego_bmm
+            return triton_lego_bmm(a, b)
+        except ImportError:
+            pass
     return torch.bmm(a, b)
 
 

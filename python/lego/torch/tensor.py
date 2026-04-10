@@ -269,7 +269,7 @@ _TIER4_LOCK = threading.Lock()
 
 
 def _dispatch_tier4(func, args, kwargs):
-    """Tier 4: redirect to lego::* op if registered, else standard op."""
+    """Tier 4: redirect to lego::* op with layout awareness."""
     if not _TIER4_MAP:
         with _TIER4_LOCK:
             if not _TIER4_MAP:
@@ -278,6 +278,18 @@ def _dispatch_tier4(func, args, kwargs):
     raw_args = _unwrap_args(args)
     raw_kwargs = {k: _unwrap(v) for k, v in kwargs.items()}
     if lego_op is not None:
+        # Pass layout info for layout-aware Triton dispatch
+        lt = _first_lego(args)
+        if lt is not None and lt._is_physical and lt._data.is_cuda:
+            try:
+                from .triton_kernels import triton_lego_mm, triton_lego_bmm
+                aten = torch.ops.aten
+                if func == aten.mm.default:
+                    return triton_lego_mm(raw_args[0], raw_args[1], a_layout=lt._layout)
+                elif func == aten.bmm.default:
+                    return triton_lego_bmm(raw_args[0], raw_args[1], a_layout=lt._layout)
+            except ImportError:
+                pass
         return lego_op(*raw_args, **raw_kwargs)
     return func(*raw_args, **raw_kwargs)
 

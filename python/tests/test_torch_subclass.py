@@ -522,7 +522,8 @@ class TestCUDA:
         b = torch.randn(8, 3, device="cuda")
         c = torch.mm(a, b)
         expected = torch.mm(a._data, b)
-        torch.testing.assert_close(c, expected, atol=1e-5, rtol=1e-5)
+        # Triton kernel uses tiled accumulation with different rounding order
+        torch.testing.assert_close(c, expected, atol=5e-3, rtol=5e-3)
 
     def test_rearrange_autograd_cuda(self):
         layout = ColMajor((4, 4))
