@@ -69,10 +69,19 @@ def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
     if target in _SPIRV_TARGETS:
         return _compile_gpu(layout_or_builder, shape=shape, target=target,
                             dtype=dtype, **kwargs)
-    raise ValueError(
+    _install_hints = {
+        "cuda": 'pip install "lego-layout[cuda]"',
+        "rocm": 'pip install "lego-layout[rocm]"',
+        "intel": 'pip install "lego-layout[intel]"',
+    }
+    hint = _install_hints.get(target, "")
+    msg = (
         f"Unknown target '{target}'. "
-        f"Supported: {', '.join(sorted(_all_targets()))}"
+        f"Installed: {', '.join(sorted(_all_targets()))}."
     )
+    if hint:
+        msg += f"\nInstall with: {hint}"
+    raise ValueError(msg)
 
 
 # Register torch.compile "lego" backend — only if torch is already

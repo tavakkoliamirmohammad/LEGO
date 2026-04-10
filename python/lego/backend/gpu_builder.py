@@ -144,7 +144,7 @@ class GPUTarget:
         return self
 
 
-# --- Built-in targets ---------------------------------------------------
+# --- Built-in targets (monolithic fallback) --------------------------------
 
 def _detect_cuda_target():
     """Auto-detect GPU compute capability → (chip, features).
@@ -177,38 +177,64 @@ def _get_cuda_target():
         _cuda_target_cache = _detect_cuda_target()
     return _cuda_target_cache
 
-GPUTarget(
-    name="cuda",
-    pipeline="lego-to-nvvm",
-    default_chip=None,
-    default_format="fatbin",
-    default_features=None,
-    tmp_prefix="lego_cuda_",
-).register()
 
-GPUTarget(
-    name="rocm",
-    pipeline="lego-to-rocdl",
-    default_chip="gfx900",
-    default_format="assembly",
-    tmp_prefix="lego_rocm_",
-).register()
+def _register_builtin_targets():
+    """Register all GPU targets for monolithic (non-plugin) builds."""
+    GPUTarget(
+        name="cuda",
+        pipeline="lego-to-nvvm",
+        default_chip=None,
+        default_format="fatbin",
+        default_features=None,
+        tmp_prefix="lego_cuda_",
+    ).register()
 
-GPUTarget(
-    name="llvmspirv",
-    pipeline="lego-to-llvmspirv",
-    default_chip="generic",
-    default_format="assembly",
-    tmp_prefix="lego_llvmspirv_",
-).register()
+    GPUTarget(
+        name="rocm",
+        pipeline="lego-to-rocdl",
+        default_chip="gfx900",
+        default_format="assembly",
+        tmp_prefix="lego_rocm_",
+    ).register()
 
-GPUTarget(
-    name="intel",
-    pipeline="lego-to-xevm",
-    default_chip="bmg",
-    default_format="assembly",
-    tmp_prefix="lego_intel_",
-).register()
+    GPUTarget(
+        name="llvmspirv",
+        pipeline="lego-to-llvmspirv",
+        default_chip="generic",
+        default_format="assembly",
+        tmp_prefix="lego_llvmspirv_",
+    ).register()
+
+    GPUTarget(
+        name="intel",
+        pipeline="lego-to-xevm",
+        default_chip="bmg",
+        default_format="assembly",
+        tmp_prefix="lego_intel_",
+    ).register()
+
+
+def _load_backend_plugins():
+    """Discover and load GPU backend plugins via entry points.
+
+    If no plugins are installed (monolithic dev build), falls back to
+    registering all built-in targets directly.
+    """
+    from importlib.metadata import entry_points
+    eps = list(entry_points(group="lego.backends"))
+    if eps:
+        for ep in eps:
+            try:
+                register_fn = ep.load()
+                register_fn()
+            except Exception:
+                pass  # plugin installed but native lib missing — skip silently
+    else:
+        # No plugins installed — monolithic development build.
+        _register_builtin_targets()
+
+
+_load_backend_plugins()
 
 
 # ============================================================================
