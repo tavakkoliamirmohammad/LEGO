@@ -82,16 +82,17 @@ class TestRearrange:
         assert not torch.equal(rx._data, x)
 
     def test_round_trip_via_inverse(self):
-        """rearrange then inverse permutation recovers original."""
+        """rearrange then fwd permutation recovers original."""
         layout = ColMajor((4, 4))
         x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
         rx = rearrange(x, layout)
-        # Inverse: apply inv permutation
+        # rearrange uses scatter: physical[i] = logical[inv[i]]
+        # inverse: logical[i] = physical[fwd[i]]
         from lego.backend.compiler import LayoutCompiler
         compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
-        _, inv = compiler.get_permutation_table()
-        inv_idx = torch.from_numpy(np.ascontiguousarray(inv))
-        back = rx._data.reshape(-1)[inv_idx].reshape(4, 4)
+        fwd, _ = compiler.get_permutation_table()
+        fwd_idx = torch.from_numpy(np.ascontiguousarray(fwd))
+        back = rx._data.reshape(-1)[fwd_idx].reshape(4, 4)
         torch.testing.assert_close(back, x)
 
     def test_autograd(self):
@@ -449,10 +450,12 @@ class TestEdgeCases:
             x = torch.arange(layout.numel, dtype=torch.float32).reshape(layout.shape)
             rx = rearrange(x, layout)
             assert rx._is_physical, f"{name}: not physical"
+            # rearrange uses scatter: physical[i] = logical[inv[i]]
+            # inverse: logical[i] = physical[fwd[i]]
             compiler = LayoutCompiler(layout._layout, layout._shape, "i64")
-            _, inv = compiler.get_permutation_table()
-            inv_t = torch.from_numpy(np.ascontiguousarray(inv))
-            back = rx._data.reshape(-1)[inv_t].reshape(layout.shape)
+            fwd, _ = compiler.get_permutation_table()
+            fwd_t = torch.from_numpy(np.ascontiguousarray(fwd))
+            back = rx._data.reshape(-1)[fwd_t].reshape(layout.shape)
             torch.testing.assert_close(back, x, msg=f"{name}: round-trip failed")
 
     def test_chain_annotate_relu_transpose_relu_sum(self):

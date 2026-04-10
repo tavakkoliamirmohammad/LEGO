@@ -56,14 +56,19 @@ def annotate(tensor, layout):
 def rearrange(tensor, layout):
     """Physically rearrange tensor data according to *layout*, then annotate.
 
+    Uses scatter semantics so the physical data matches the layout algebra:
+    ``physical[i] = logical[inv[i]]``.  This means a kernel using
+    ``OrderBy(Col(M, K))`` can read the correct logical element by computing
+    the layout's flat index directly — no permutation table lookup at runtime.
+
     Uses ``lego::permute`` custom op so rearrangements survive torch.compile.
     """
     from lego.backend.compiler import LayoutCompiler
 
     base = layout._base if hasattr(layout, "_base") else layout
     compiler = LayoutCompiler(base._layout, base._shape, "i64")
-    fwd, _ = compiler.get_permutation_table()
-    fwd_idx = torch.from_numpy(np.ascontiguousarray(fwd)).to(tensor.device)
+    _, inv = compiler.get_permutation_table()
+    inv_idx = torch.from_numpy(np.ascontiguousarray(inv)).to(tensor.device)
 
-    rearranged = torch.ops.lego.permute(tensor.reshape(-1), fwd_idx).reshape(tensor.shape)
+    rearranged = torch.ops.lego.permute(tensor.reshape(-1), inv_idx).reshape(tensor.shape)
     return LegoTensor(rearranged, layout, is_physical=True)

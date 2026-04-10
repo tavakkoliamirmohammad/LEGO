@@ -50,15 +50,19 @@ def _first_lego(args):
 
 
 def _inverse_rearrange(lt):
-    """Convert physical LegoTensor data back to logical order."""
+    """Convert physical LegoTensor data back to logical order.
+
+    rearrange() uses scatter semantics: physical[i] = logical[inv[i]].
+    To invert: logical[i] = physical[fwd[i]].
+    """
     from lego.backend.compiler import LayoutCompiler
     import numpy as np
     layout = lt._layout
     base = layout._base if hasattr(layout, "_base") else layout
     compiler = LayoutCompiler(base._layout, base._shape, "i64")
-    _, inv = compiler.get_permutation_table()
-    inv_t = torch.from_numpy(np.ascontiguousarray(inv)).to(lt._data.device)
-    return lt._data.reshape(-1)[inv_t].reshape(lt._data.shape)
+    fwd, _ = compiler.get_permutation_table()
+    fwd_t = torch.from_numpy(np.ascontiguousarray(fwd)).to(lt._data.device)
+    return lt._data.reshape(-1)[fwd_t].reshape(lt._data.shape)
 
 
 def _flat_lego_args(args):
