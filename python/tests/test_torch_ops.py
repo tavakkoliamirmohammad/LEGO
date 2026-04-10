@@ -129,3 +129,34 @@ class TestTorchOp:
             x = torch.randn(3, 4)
             y = torch.ops.lego.test_scale(x)
             assert y.shape == (3, 4)
+
+
+class TestTorchOpFake:
+    def test_torch_op_with_explicit_fake(self):
+        """@torch_op with explicit fake= parameter."""
+        from lego.torch import torch_op
+
+        @torch_op("lego::test_custom_fake", fake=lambda x: torch.empty_like(x))
+        def test_custom_fake(x: torch.Tensor) -> torch.Tensor:
+            return x * 2.0 + 1.0
+
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        with FakeTensorMode():
+            x = torch.randn(3, 4)
+            y = torch.ops.lego.test_custom_fake(x)
+            assert y.shape == (3, 4)
+
+    def test_torch_op_default_fake_still_works(self):
+        """@torch_op without fake= still works for simple ops."""
+        from lego.torch import torch_op
+
+        @torch_op("lego::test_simple_default2")
+        def test_simple_default2(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            return a + b
+
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        with FakeTensorMode():
+            a = torch.randn(2, 3)
+            b = torch.randn(2, 3)
+            c = torch.ops.lego.test_simple_default2(a, b)
+            assert c.shape == (2, 3)

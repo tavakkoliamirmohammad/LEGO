@@ -78,7 +78,7 @@ lego_bmm.register_autograd(_bmm_backward, setup_context=_bmm_setup_ctx)
 # User-facing decorator
 # ============================================================================
 
-def torch_op(qualname, *, mutates_args=()):
+def torch_op(qualname, *, mutates_args=(), fake=None):
     """Register a LEGO custom op via torch.library.
 
     Usage::
@@ -87,15 +87,19 @@ def torch_op(qualname, *, mutates_args=()):
         def my_kernel(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             ...
 
-    The decorated function serves as both the eager implementation and
-    (via shape inference from the annotations) the fake-tensor impl.
+        # With explicit fake-tensor impl for ops with custom shape logic:
+        @lego.torch_op("lego::my_kernel", fake=lambda a, b: torch.empty(a.shape[0], b.shape[1]))
+        def my_kernel(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            ...
     """
     def decorator(fn):
         op = torch.library.custom_op(qualname, mutates_args=mutates_args)(fn)
 
+        fake_fn = fake if fake is not None else fn
+
         @op.register_fake
         def _fake(*args, **kwargs):
-            return fn(*args, **kwargs)
+            return fake_fn(*args, **kwargs)
 
         return op
     return decorator

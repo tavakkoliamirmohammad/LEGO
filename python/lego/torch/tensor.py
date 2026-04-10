@@ -11,6 +11,7 @@ Tier 3 — Drop+warn:  unsupported ops strip layout with one-time warning
 Tier 4 — LEGO kernel: dispatched to lego::* ops (Phase 1)
 """
 
+import threading
 import warnings
 import torch
 
@@ -264,12 +265,15 @@ def _dispatch_tier3(func, args, kwargs):
 
 
 _TIER4_MAP: dict = {}
+_TIER4_LOCK = threading.Lock()
 
 
 def _dispatch_tier4(func, args, kwargs):
     """Tier 4: redirect to lego::* op if registered, else standard op."""
     if not _TIER4_MAP:
-        _populate_tier4_map()
+        with _TIER4_LOCK:
+            if not _TIER4_MAP:
+                _populate_tier4_map()
     lego_op = _TIER4_MAP.get(func)
     raw_args = _unwrap_args(args)
     raw_kwargs = {k: _unwrap(v) for k, v in kwargs.items()}
