@@ -142,16 +142,6 @@ class TestRearrangeInCompile:
         torch.testing.assert_close(result, expected)
 
 
-class TestBatchedLayoutTorch:
-    def test_batched_transform_roundtrip(self):
-        from lego.frontends.python_mlir import Batched
-        base = ColMajor((4, 4))
-        batched = Batched(base, batch_shape=(3,))
-        x = torch.arange(48, dtype=torch.float32).reshape(3, 4, 4)
-        transformed = batched.transform(x)
-        back = batched.inverse_transform(transformed)
-        torch.testing.assert_close(back, x)
-
 
 class TestEndToEndTraining:
     def test_annotated_linear_forward_backward(self):

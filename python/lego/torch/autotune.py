@@ -27,29 +27,26 @@ def _default_tile_candidates(shape):
 
 
 def _benchmark_tile(shape, tile_shape, n_iters, device):
-    """Benchmark a single tile configuration. Returns mean time in seconds."""
+    """Benchmark a single tile configuration. Returns mean time in seconds.
+
+    Benchmarks using numpy (layout permutation cost is device-independent).
+    For GPU, the actual kernel execution uses Triton with layout-aware indexing,
+    so the tile selection is about finding the best data locality pattern.
+    """
     from lego.frontends.python_mlir import TiledPermute
 
     layout = TiledPermute(shape, tile_shape=tile_shape)
+    data = np.random.randn(*shape).astype(np.float32)
 
-    if device == "cpu":
-        data = np.random.randn(*shape).astype(np.float32)
-        for _ in range(3):
-            layout.transform(data)
-        start = time.perf_counter()
-        for _ in range(n_iters):
-            layout.transform(data)
-        elapsed = time.perf_counter() - start
-    else:
-        data = torch.randn(*shape, device=device)
-        for _ in range(3):
-            layout.transform(data)
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        for _ in range(n_iters):
-            layout.transform(data)
-        torch.cuda.synchronize()
-        elapsed = time.perf_counter() - start
+    # Warmup
+    for _ in range(3):
+        layout.transform(data)
+
+    # Timed
+    start = time.perf_counter()
+    for _ in range(n_iters):
+        layout.transform(data)
+    elapsed = time.perf_counter() - start
 
     return elapsed / n_iters
 
