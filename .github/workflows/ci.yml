@@ -311,6 +311,21 @@ jobs:
       - name: Extract build artifacts
         run: tar xzf build-artifacts.tar.gz
 
+      - name: Resolve Python symlinks
+        run: |
+          cd build/python_packages/lego
+          # Replace symlinks with copies (pip wheel can't handle symlinks).
+          # .so dedup was already done by lego-prepare-wheel in the build stage.
+          find . -type l | while read link; do
+            target=$(python -c "import os; print(os.path.realpath('$link'))")
+            if [ -f "$target" ]; then
+              rm "$link"
+              cp "$target" "$link"
+            else
+              rm "$link"
+            fi
+          done
+
       - name: Build wheel
         run: |
           pip install wheel setuptools build
@@ -324,6 +339,7 @@ jobs:
               rm "$whl"
             done
           fi
+          echo "=== Wheel sizes ==="
           ls -lh dist/
 
       - name: Verify wheel installs
