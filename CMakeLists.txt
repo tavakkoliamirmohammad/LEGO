@@ -515,6 +515,15 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       "${CMAKE_SOURCE_DIR}/README.md" "${LEGO_WHEEL_DIR}/README.md"
     COMMAND ${CMAKE_COMMAND} -E copy
       "${CMAKE_SOURCE_DIR}/python/setup_wheel.py" "${LEGO_WHEEL_DIR}/setup.py"
+    # Strip debug symbols and deduplicate versioned .so copies.
+    # Without this, versioned soname symlinks (libFoo.so.23.0git) and pip
+    # artifacts (libFoo.so..) get expanded into full copies, tripling
+    # the wheel size (175 MB -> 52 MB with dedup).
+    COMMAND ${Python_EXECUTABLE} "${CMAKE_SOURCE_DIR}/python/dedup_libs.py"
+      "${LEGO_WHEEL_DIR}/lego/mlir/_mlir_libs"
+    COMMAND ${Python_EXECUTABLE} "${CMAKE_SOURCE_DIR}/python/dedup_libs.py"
+      "${CMAKE_BINARY_DIR}/python_packages/lego/mlir/_mlir_libs"
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${LEGO_WHEEL_DIR}/build"
     COMMENT "Preparing wheel directory"
   )
 

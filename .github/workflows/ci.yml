@@ -145,27 +145,7 @@ jobs:
       - name: Run all tests (lit + pytest + imports + wheel)
         run: cmake --build build --target check-lego-all
 
-      - name: Resolve symlinks and strip binaries
-        run: |
-          cd build/python_packages/lego
-          # Resolve symlinks
-          find . -type l | while read link; do
-            target=$(python -c "import os; print(os.path.realpath('$link'))")
-            if [ -e "$target" ]; then
-              rm "$link"
-              cp -a "$target" "$link"
-            else
-              rm "$link"
-            fi
-          done
-          # Strip debug symbols from .so/.dylib — shrinks wheel significantly
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            find . -name '*.so' -o -name '*.so.*' | xargs strip --strip-unneeded 2>/dev/null || true
-          else
-            find . -name '*.dylib' -o -name '*.so' | xargs strip -x 2>/dev/null || true
-          fi
-
-      - name: Prepare wheel
+      - name: Prepare wheel (includes strip + dedup)
         run: cmake --build build --target lego-prepare-wheel
 
       - name: Bundle naga into wheel
