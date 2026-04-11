@@ -98,29 +98,33 @@ lower the dialect all the way to machine code:
   | cuTile         |  | code     |    |     |     |
   +----------------+  +----------+    |     |     |
                                       |     |     |
-    +-------+-------+-------+-------+-------+
-    |       |       |       |       |       |
-  +-+----+  |  +----+-+  +--+---+  |  +----+-------+
-  | lego |  |  | lego |  | lego |  |  | lego-to-   |
-  | -to- |  |  | -to- |  | -to- |  |  | spirv      |
-  | llvm |  |  | nvvm |  | rocdl|  |  +----+-------+
-  +-+----+  |  +----+-+  +--+---+  |       |
-    |       |       |        |      |  +----+------+
-  +-+----+  |  +----+-+  +--+---+  |  |  SPIR-V   |
-  | CPU  |  |  | CUDA |  |  AMD |  |  |  (Vulkan) |
-  | X86  |  |  | PTX  |  | HSACO|  |  +----+------+
-  +------+  |  +------+  +------+  |       |
-            |                       |  +----+------+----+----+
-   +--------+--------+    +--------+--+    |       |    |    |
-   | lego-to-        |    | lego-to-  | +--+--+ +--+--+ | +--+--+
-   | llvmspirv       |    | xevm      | |naga | |naga | | |naga |
-   +--------+--------+    +--------+--+ +--+--+ +--+--+ | +--+--+
-            |                      |        |       |    |    |
-   +--------+--------+    +-------+---+ +--+--+ +--+--+ | +--+--+
-   |   LLVM SPIR-V   |    | Intel GPU | |WGSL | |MSL  | | |GLSL |
-   |   (OpenCL)      |    | binary    | +-----+ +-----+ | +-----+
-   +------------------+    +-----------+                  |
-                                                     (WebGL)
+    +------------------+------------------+------------------+---------------------+---------------------+
+    |                  |                  |                  |                     |                     |
++---+------------+ +---+------------+ +---+------------+ +---+---------------+ +---+---------------+   |
+| lego-to-llvm   | | lego-to-nvvm   | | lego-to-rocdl  | | lego-to-xevm    | | lego-to-spirv     |   |
++---+------------+ +---+------------+ +---+------------+ +---+---------------+ +---+---------------+   |
+    |                  |                  |                  |                     |                     |
++---+------------+ +---+------------+ +---+------------+ +---+---------------+ +---+---------------+   |
+|   CPU          | |   CUDA         | |   AMD          | |   Intel GPU      | |   SPIR-V          |   |
+|   X86, ARM     | |   PTX/cubin    | |   HSACO        | |   binary         | |   (Vulkan)        |   |
++----------------+ +----------------+ +----------------+ +------------------+ +---+---+---+---+---+   |
+                                                                                  |   |   |   |       |
+                   +------------------+                              +--------+   |   |   |   |       |
+                   | lego-to-llvmspirv |                             |  naga  +---+   |   |   |       |
+                   +---+--------------+                              +--------+       |   |   |       |
+                       |                                             +--------+       |   |   |       |
+                   +---+--------------+                              |  naga  +-------+   |   |       |
+                   |   LLVM SPIR-V    |                              +--------+           |   |       |
+                   |   (OpenCL)       |                              +--------+           |   |       |
+                   +------------------+                              |  naga  +-----------+   |       |
+                                                                     +--------+               |       |
+                                                                     +--------+               |       |
+                                                                     |  naga  +---------------+       |
+                                                                     +---+----+                       |
+                                                                         |                            |
+                                                            +------+  +--+---+  +-------+  +---------++
+                                                            | WGSL |  | MSL  |  | GLSL  |  |  WebGL   |
+                                                            +------+  +------+  +-------+  +----------+
 ```
 
 ### Frontends
@@ -244,7 +248,7 @@ Seven lowering pipelines target different backends:
 | `lego-to-nvvm` | CUDA | PTX/cubin via NVPTX | Yes |
 | `lego-to-rocdl` | AMD | HSACO via AMDGPU | Yes |
 | `lego-to-xevm` | Intel GPU | LLVM SPIR-V + XeVM binary | Yes |
-| `lego-to-spirv` | Vulkan/WebGPU/Metal/WebGL | SPIR-V binary �� naga → WGSL/MSL/GLSL | Yes (workgroup) |
+| `lego-to-spirv` | Vulkan/WebGPU/Metal/WebGL | SPIR-V binary; naga converts to WGSL/MSL/GLSL | Yes (workgroup) |
 | `lego-to-llvmspirv` | SPIR-V (OpenCL) | LLVM dialect with SPIR-V calling conventions | Yes |
 | WASM (Emscripten) | Browser | `lego_driver.wasm` — full compiler in the browser | N/A |
 
