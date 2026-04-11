@@ -145,28 +145,23 @@ jobs:
       - name: Run all tests (lit + pytest + imports + wheel)
         run: cmake --build build --target check-lego-all
 
-      - name: Resolve symlinks and strip binaries
+      - name: Prepare wheel (includes strip + dedup of .so files)
+        run: cmake --build build --target lego-prepare-wheel
+
+      - name: Resolve remaining symlinks
         run: |
           cd build/python_packages/lego
-          # Resolve symlinks
+          # Replace Python file symlinks with copies (pip can't package symlinks).
+          # .so dedup was already handled by dedup_libs.py in lego-prepare-wheel.
           find . -type l | while read link; do
             target=$(python -c "import os; print(os.path.realpath('$link'))")
-            if [ -e "$target" ]; then
+            if [ -f "$target" ]; then
               rm "$link"
-              cp -a "$target" "$link"
+              cp "$target" "$link"
             else
               rm "$link"
             fi
           done
-          # Strip debug symbols from .so/.dylib — shrinks wheel significantly
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            find . -name '*.so' -o -name '*.so.*' | xargs strip --strip-unneeded 2>/dev/null || true
-          else
-            find . -name '*.dylib' -o -name '*.so' | xargs strip -x 2>/dev/null || true
-          fi
-
-      - name: Prepare wheel
-        run: cmake --build build --target lego-prepare-wheel
 
       - name: Bundle naga into wheel
         run: |
@@ -344,6 +339,7 @@ jobs:
               rm "$whl"
             done
           fi
+          echo "=== Wheel sizes ==="
           ls -lh dist/
 
       - name: Verify wheel installs
