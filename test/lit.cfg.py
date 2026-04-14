@@ -53,6 +53,8 @@ if 'AMDGPU' in config.targets_to_build.split(' '):
     config.available_features.add('amdgpu')
 if 'SPIRV' in config.targets_to_build.split(' '):
     config.available_features.add('spirv')
+if 'RISCV' in config.targets_to_build.split(' '):
+    config.available_features.add('riscv')
 
 # cuda-runner: available when mlir-runner + CUDA runtime libs exist
 mlir_runner = os.path.join(config.llvm_tools_dir, 'mlir-runner')
