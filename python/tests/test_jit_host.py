@@ -27,13 +27,14 @@ from lego.backend.compiler import LayoutCompiler
 # ---------------------------------------------------------------------------
 
 def _roundtrip(layout, shape, dtype="f32"):
-    """Compile, apply forward, apply inverse, check identity."""
+    """Compile, apply forward, apply inverse, check identity. Returns (fwd, data)."""
     compiler = LayoutCompiler(layout, shape, dtype)
     data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
     fwd = compiler.transform_numpy(data)
     back = compiler.inverse_transform_numpy(fwd)
     np.testing.assert_array_equal(back, data,
                                   err_msg=f"Round-trip failed for {layout}")
+    return fwd, data
 
 
 def _check_permutation(layout, shape):
@@ -46,6 +47,18 @@ def _check_permutation(layout, shape):
     # fwd and inv are mutual inverses
     np.testing.assert_array_equal(inv[fwd], np.arange(n))
     np.testing.assert_array_equal(fwd[inv], np.arange(n))
+
+
+def _expected_regp(shape, perm):
+    """Compute expected forward transform output for RegP(shape, perm).
+
+    RegP reinterprets flat memory with permuted axis ordering:
+    reshape flat data as permuted_shape, then transpose back.
+    """
+    n = int(np.prod(shape))
+    perm_shape = tuple(shape[p] for p in perm)
+    inv_perm = list(np.argsort(perm))
+    return np.arange(n, dtype=np.float32).reshape(perm_shape).transpose(inv_perm)
 
 
 # ===========================================================================
@@ -62,24 +75,42 @@ class TestRowCol:
         np.testing.assert_array_equal(result, data)
 
     def test_col_roundtrip_values(self):
-        """Col-major forward + inverse should preserve all values."""
+        """Col(3,4) forward should produce column-major layout."""
         layout = OrderBy(Col(3, 4))
         compiler = LayoutCompiler(layout, (3, 4), "f32")
         data = np.arange(12, dtype=np.float32).reshape(3, 4)
         fwd = compiler.transform_numpy(data)
+        expected = _expected_regp((3, 4), [1, 0])
+        np.testing.assert_array_equal(fwd, expected)
         back = compiler.inverse_transform_numpy(fwd)
         np.testing.assert_array_equal(back, data)
-        # Forward should differ from row-major (unless trivially 1D)
-        assert not np.array_equal(fwd, data), "Col should permute data"
 
     def test_col_roundtrip(self):
-        _roundtrip(OrderBy(Col(4, 8)), (4, 8))
+        """Col(4,8) should produce column-major layout."""
+        layout = OrderBy(Col(4, 8))
+        compiler = LayoutCompiler(layout, (4, 8), "f32")
+        data = np.arange(32, dtype=np.float32).reshape(4, 8)
+        fwd = compiler.transform_numpy(data)
+        expected = _expected_regp((4, 8), [1, 0])
+        np.testing.assert_array_equal(fwd, expected)
+        back = compiler.inverse_transform_numpy(fwd)
+        np.testing.assert_array_equal(back, data)
 
     def test_row_3d(self):
-        _roundtrip(OrderBy(Row(2, 3, 4)), (2, 3, 4))
+        """Row-major 3D should be identity."""
+        fwd, data = _roundtrip(OrderBy(Row(2, 3, 4)), (2, 3, 4))
+        np.testing.assert_array_equal(fwd, data)
 
     def test_col_3d(self):
-        _roundtrip(OrderBy(Col(2, 3, 4)), (2, 3, 4))
+        """Col(2,3,4) should produce reversed-axis layout."""
+        layout = OrderBy(Col(2, 3, 4))
+        compiler = LayoutCompiler(layout, (2, 3, 4), "f32")
+        data = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        fwd = compiler.transform_numpy(data)
+        expected = _expected_regp((2, 3, 4), [2, 1, 0])
+        np.testing.assert_array_equal(fwd, expected)
+        back = compiler.inverse_transform_numpy(fwd)
+        np.testing.assert_array_equal(back, data)
 
 
 # ===========================================================================
@@ -96,12 +127,26 @@ class TestRegP:
         np.testing.assert_array_equal(result, data)
 
     def test_reversed_perm(self):
-        """RegP with reversed permutation == Col."""
-        _roundtrip(OrderBy(RegP((3, 5), [1, 0])), (3, 5))
+        """RegP [1,0] on (3,5) should produce column-major order."""
+        layout = OrderBy(RegP((3, 5), [1, 0]))
+        compiler = LayoutCompiler(layout, (3, 5), "f32")
+        data = np.arange(15, dtype=np.float32).reshape(3, 5)
+        fwd = compiler.transform_numpy(data)
+        expected = _expected_regp((3, 5), [1, 0])
+        np.testing.assert_array_equal(fwd, expected)
+        back = compiler.inverse_transform_numpy(fwd)
+        np.testing.assert_array_equal(back, data)
 
     def test_3d_perm(self):
-        """RegP with 3D permutation."""
-        _roundtrip(OrderBy(RegP((2, 3, 4), [2, 0, 1])), (2, 3, 4))
+        """RegP [2,0,1] on (2,3,4) should reorder axes."""
+        layout = OrderBy(RegP((2, 3, 4), [2, 0, 1]))
+        compiler = LayoutCompiler(layout, (2, 3, 4), "f32")
+        data = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        fwd = compiler.transform_numpy(data)
+        expected = _expected_regp((2, 3, 4), [2, 0, 1])
+        np.testing.assert_array_equal(fwd, expected)
+        back = compiler.inverse_transform_numpy(fwd)
+        np.testing.assert_array_equal(back, data)
 
     def test_permutation_table(self):
         _check_permutation(OrderBy(RegP((4, 6), [1, 0])), (4, 6))
@@ -113,7 +158,7 @@ class TestRegP:
 
 class TestGenP:
     def test_genp_identity_2d(self):
-        """GenP with row-major mapping should match Row."""
+        """GenP with row-major mapping should match Row (identity)."""
         def f_apply(idx):
             return idx[0] * 8 + idx[1]
 
@@ -121,7 +166,8 @@ class TestGenP:
             return (sp.floor(flat / 8), sp.Mod(flat, 8))
 
         layout = OrderBy(GenP((4, 8), f_apply, f_inv))
-        _roundtrip(layout, (4, 8))
+        fwd, data = _roundtrip(layout, (4, 8))
+        np.testing.assert_array_equal(fwd, data)
 
     def test_genp_permutation(self):
         def f_apply(idx):
@@ -140,14 +186,17 @@ class TestGenP:
 
 class TestTileBy:
     def test_1d_tile(self):
-        """1D tiling: 16 elements tiled into 4 blocks of 4."""
+        """1D tiling: 16 elements in 4 blocks of 4 (identity for row-major)."""
         layout = OrderBy(Row(16)).TileBy([4], [4])
-        _roundtrip(layout, (16,))
+        fwd, data = _roundtrip(layout, (16,))
+        np.testing.assert_array_equal(fwd, data)
 
     def test_2d_tile(self):
         """2D tiling: 8x8 tiled into 2x2 blocks of 4x4."""
         layout = OrderBy(Row(8, 8)).TileBy([2, 2], [4, 4])
-        _roundtrip(layout, (8, 8))
+        fwd, data = _roundtrip(layout, (8, 8))
+        assert not np.array_equal(fwd, data), "2D tiling should permute data"
+        _check_permutation(layout, (8, 8))
 
     def test_2d_tile_permutation(self):
         layout = OrderBy(Row(8, 8)).TileBy([2, 2], [4, 4])
@@ -165,12 +214,16 @@ class TestTileBy:
     def test_2d_tile_larger(self):
         """2D tiling on a larger matrix: 16x16 with 4x4 tiles."""
         layout = OrderBy(Row(16, 16)).TileBy([4, 4], [4, 4])
-        _roundtrip(layout, (16, 16))
+        fwd, data = _roundtrip(layout, (16, 16))
+        assert not np.array_equal(fwd, data), "Larger 2D tiling should permute data"
+        _check_permutation(layout, (16, 16))
 
     def test_non_power_of_two(self):
         """TileBy with non-power-of-two sizes."""
         layout = OrderBy(Row(12, 15)).TileBy([4, 5], [3, 3])
-        _roundtrip(layout, (12, 15))
+        fwd, data = _roundtrip(layout, (12, 15))
+        assert not np.array_equal(fwd, data), "Non-power-of-two tiling should permute data"
+        _check_permutation(layout, (12, 15))
 
 
 # ===========================================================================
@@ -179,14 +232,17 @@ class TestTileBy:
 
 class TestOrderByComposition:
     def test_two_layouts(self):
-        """OrderBy with two sub-layouts."""
+        """OrderBy with two Row sub-layouts should be identity."""
         layout = OrderBy(Row(4), Row(8))
-        _roundtrip(layout, (4, 8))
+        fwd, data = _roundtrip(layout, (4, 8))
+        np.testing.assert_array_equal(fwd, data)
 
     def test_mixed_row_col(self):
-        """OrderBy mixing Row and Col sub-layouts."""
+        """OrderBy mixing Row and Col sub-layouts should permute."""
         layout = OrderBy(Row(4), Col(2, 3))
-        _roundtrip(layout, (4, 2, 3))
+        fwd, data = _roundtrip(layout, (4, 2, 3))
+        assert not np.array_equal(fwd, data), "Mixed Row/Col should permute data"
+        _check_permutation(layout, (4, 2, 3))
 
 
 # ===========================================================================
@@ -195,24 +251,24 @@ class TestOrderByComposition:
 
 class TestEdgeCases:
     def test_single_element(self):
-        """1-element layout."""
-        layout = OrderBy(Row(1))
-        _roundtrip(layout, (1,))
+        """1-element layout should be identity."""
+        fwd, data = _roundtrip(OrderBy(Row(1)), (1,))
+        np.testing.assert_array_equal(fwd, data)
 
     def test_1d(self):
-        """Simple 1D layout."""
-        layout = OrderBy(Row(32))
-        _roundtrip(layout, (32,))
+        """1D Row layout should be identity."""
+        fwd, data = _roundtrip(OrderBy(Row(32)), (32,))
+        np.testing.assert_array_equal(fwd, data)
 
     def test_large_2d(self):
-        """Larger 2D layout."""
-        layout = OrderBy(Row(64, 64))
-        _roundtrip(layout, (64, 64))
+        """Large 2D Row layout should be identity."""
+        fwd, data = _roundtrip(OrderBy(Row(64, 64)), (64, 64))
+        np.testing.assert_array_equal(fwd, data)
 
     def test_4d(self):
-        """4D layout."""
-        layout = OrderBy(Row(2, 3, 4, 5))
-        _roundtrip(layout, (2, 3, 4, 5))
+        """4D Row layout should be identity."""
+        fwd, data = _roundtrip(OrderBy(Row(2, 3, 4, 5)), (2, 3, 4, 5))
+        np.testing.assert_array_equal(fwd, data)
 
 
 # ===========================================================================
@@ -247,20 +303,26 @@ class TestSymbolic:
 
 class TestDtypes:
     def test_f32(self):
-        _roundtrip(OrderBy(Row(4, 8)), (4, 8), dtype="f32")
+        """f32 Row should be identity."""
+        fwd, data = _roundtrip(OrderBy(Row(4, 8)), (4, 8), dtype="f32")
+        np.testing.assert_array_equal(fwd, data)
 
     def test_f64(self):
+        """f64 Col should permute and round-trip."""
         layout = OrderBy(Col(3, 5))
         compiler = LayoutCompiler(layout, (3, 5), "f64")
         data = np.arange(15, dtype=np.float64).reshape(3, 5)
         fwd = compiler.transform_numpy(data)
         back = compiler.inverse_transform_numpy(fwd)
         np.testing.assert_array_equal(back, data)
+        assert not np.array_equal(fwd, data), "Col f64 should permute data"
 
     def test_i64(self):
+        """i64 Row should be identity."""
         layout = OrderBy(Row(4, 4))
         compiler = LayoutCompiler(layout, (4, 4), "i64")
         data = np.arange(16, dtype=np.int64).reshape(4, 4)
         fwd = compiler.transform_numpy(data)
         back = compiler.inverse_transform_numpy(fwd)
         np.testing.assert_array_equal(back, data)
+        np.testing.assert_array_equal(fwd, data)
