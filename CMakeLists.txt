@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(LEGO_MONOLITHIC_LLVM "Build LLVM/MLIR as part of the project" OFF)
 option(LEGO_ENABLE_CCACHE "Enable ccache for faster recompilation" ON)
 option(LEGO_BUILD_TESTS "Build LEGO tests" ON)
-set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;SPIRV;AArch64)")
+set(LEGO_LLVM_TARGETS "X86;NVPTX;AMDGPU;SPIRV;RISCV" CACHE STRING "Semicolon-separated list of LLVM targets to build (e.g. X86;NVPTX;AMDGPU;SPIRV;AArch64;RISCV)")
 
 # --- Python & Venv Support ---
 if(NOT EMSCRIPTEN)
@@ -231,6 +231,7 @@ endmacro()
 detect_llvm_target(NVPTX  "NVPTX backend enabled — NVVM compilation support available")
 detect_llvm_target(SPIRV  "SPIRV backend enabled — LLVM SPIR-V compilation support available")
 detect_llvm_target(AMDGPU "AMDGPU backend enabled")
+detect_llvm_target(RISCV  "RISC-V backend enabled — cross-compilation support available")
 
 # XeVM/Intel GPU backend requires the SPIRV LLVM target for compilation.
 if(LEGO_HAS_SPIRV)
