@@ -87,25 +87,25 @@ def smem_matmul(A: Buffer(A_layout_naive, S, S),
 # ===================================================================
 # Sub-test 3: tiled_matmul — multi-block tiled matmul with shared memory.
 # Each block computes a TILE x TILE tile of C.
+# TileBy on all three matrices lets the layout algebra handle all
+# tiling index arithmetic — no manual row/col computation needed.
 # ===================================================================
-A_layout_tiled = Row(M, K)
-B_layout_tiled = Row(K, N)
-smem_layout = Row(TILE, TILE)
+A_tiled_layout = OrderBy(Row(M, K)).TileBy([M // TILE, K // TILE], [TILE, TILE])
+B_tiled_layout = OrderBy(Row(K, N)).TileBy([K // TILE, N // TILE], [TILE, TILE])
 C_tiled_layout = OrderBy(Row(M, N)).TileBy([M // TILE, N // TILE], [TILE, TILE])
+smem_layout = Row(TILE, TILE)
 
 
 @gpu_kernel(grid=(N // TILE, M // TILE), block=(TILE, TILE))
-def tiled_matmul(A: Buffer(A_layout_tiled, M, K),
-                 B: Buffer(B_layout_tiled, K, N),
+def tiled_matmul(A: Buffer(A_tiled_layout, M, K),
+                 B: Buffer(B_tiled_layout, K, N),
                  C: Buffer(C_tiled_layout, M, N),
                  sA: Shared(smem_layout, TILE, TILE),
                  sB: Shared(smem_layout, TILE, TILE)):
-    row = block_id.y * TILE + thread_id.y
-    col = block_id.x * TILE + thread_id.x
     acc = 0.0
     for t in range(K // TILE):
-        sA[thread_id.y, thread_id.x] = A[row, t * TILE + thread_id.x]
-        sB[thread_id.y, thread_id.x] = B[t * TILE + thread_id.y, col]
+        sA[thread_id.y, thread_id.x] = A[block_id.y, t, thread_id.y, thread_id.x]
+        sB[thread_id.y, thread_id.x] = B[t, block_id.x, thread_id.y, thread_id.x]
         barrier()
         for kk in range(TILE):
             acc += sA[thread_id.y, kk] * sB[kk, thread_id.x]
