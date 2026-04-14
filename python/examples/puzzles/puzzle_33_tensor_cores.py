@@ -33,8 +33,10 @@ TILE = 16
 WARP_SIZE = 32
 
 # --- Sub-test 1: Tiled matmul (baseline) ---
-A_layout = Row(M, K)
-B_layout = Row(K, N)
+# TileBy on all three matrices lets the layout algebra handle tiling
+# index arithmetic — no manual row/col computation needed.
+A_layout = OrderBy(Row(M, K)).TileBy([M // TILE, K // TILE], [TILE, TILE])
+B_layout = OrderBy(Row(K, N)).TileBy([K // TILE, N // TILE], [TILE, TILE])
 C_layout = OrderBy(Row(M, N)).TileBy([M // TILE, N // TILE], [TILE, TILE])
 smem_layout = Row(TILE, TILE)
 
@@ -44,12 +46,10 @@ def matmul_tiled(A: Buffer(A_layout, M, K), B: Buffer(B_layout, K, N),
                  C: Buffer(C_layout, M, N),
                  sA: Shared(smem_layout, TILE, TILE),
                  sB: Shared(smem_layout, TILE, TILE)):
-    row = block_id.y * TILE + thread_id.y
-    col = block_id.x * TILE + thread_id.x
     acc = 0.0
     for t in range(K // TILE):
-        sA[thread_id.y, thread_id.x] = A[row, t * TILE + thread_id.x]
-        sB[thread_id.y, thread_id.x] = B[t * TILE + thread_id.y, col]
+        sA[thread_id.y, thread_id.x] = A[block_id.y, t, thread_id.y, thread_id.x]
+        sB[thread_id.y, thread_id.x] = B[t, block_id.x, thread_id.y, thread_id.x]
         barrier()
         for kk in range(TILE):
             acc += sA[thread_id.y, kk] * sB[kk, thread_id.x]
