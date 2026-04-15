@@ -3,25 +3,19 @@ LEGO: Layout Expression Language for Code Generation
 
   Backend:   lego.backend (symbolic, codegen, compiler, dialects)
   Frontends: lego.frontends.triton_jit, .cutile_jit, .python_mlir
+  PyTorch:   lego.torch (annotate, rearrange, LegoTensor, torch.compile)
 """
 from .core import *
 from .frontends.triton_jit import jit, get_kernel_source
 from .frontends.cutile_jit import cutile_jit, get_cutile_kernel_source
 from .frontends.python_mlir import (
-    LegoLayout, RowMajor, ColMajor, Tiled, TiledPermute, TiledView, Custom,
+    LegoLayout, RowMajor, ColMajor, TiledPermute, Custom,
     Transposed, ZCurve, Swizzle, BlockCyclic,
     Batched, BatchedLayout, LegoArray,
     row, col, reg_p, order_by, tile_by, group_by, gen_p,
 )
-# LegoTensor / as_lego_tensor require torch. Import conditionally to
-# avoid pulling torch (~4s) for non-torch workflows.
-import sys as _sys2
-if 'torch' in _sys2.modules:
-    from .backend.torch_tensor import LegoTensor, as_lego_tensor
-del _sys2
 from .frontends import rust_gen, fortran_gen, cxx_gen
 from .frontends import julia_gen, cuda_c_gen, js_gen, glsl_gen
-from .autotune import autotune
 
 # Unified compile API — dispatches to CPU JIT, GPU pipeline, or SPIR-V
 from .backend.gpu_builder import (
@@ -75,12 +69,28 @@ def compile(layout_or_builder, shape=None, target="cpu", dtype="f32", **kwargs):
     )
 
 
-# Register torch.compile "lego" backend — only if torch is already
-# loaded, to avoid a ~4s import penalty for non-torch workflows.
-import sys as _sys
-if 'torch' in _sys.modules:
-    try:
-        from .backend import fx_backend as _fx_backend  # noqa: F401
-    except ImportError:
-        pass
-del _sys
+# PyTorch integration — import torch on demand to avoid ~4s penalty
+# for non-torch workflows, but don't fail silently when torch IS needed.
+def __getattr__(name):
+    _TORCH_NAMES = ("annotate", "rearrange", "LegoTensor")
+    if name in _TORCH_NAMES:
+        try:
+            from .torch import annotate, rearrange, LegoTensor  # noqa: F811
+            globals()["annotate"] = annotate
+            globals()["rearrange"] = rearrange
+            globals()["LegoTensor"] = LegoTensor
+            return globals()[name]
+        except ImportError:
+            raise AttributeError(
+                f"lego.{name} requires PyTorch. Install it with: pip install torch"
+            ) from None
+    if name == "autotune":
+        try:
+            from .torch.autotune import autotune
+            globals()["autotune"] = autotune
+            return autotune
+        except ImportError:
+            raise AttributeError(
+                "lego.autotune requires PyTorch. Install it with: pip install torch"
+            ) from None
+    raise AttributeError(f"module 'lego' has no attribute {name!r}")

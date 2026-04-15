@@ -3,15 +3,14 @@ Tests for the LEGO Tensor API.
 
 Tests the user-facing tensor API including:
   - Round-trip correctness (transform then inverse == identity)
-  - RowMajor/ColMajor/Tiled convenience constructors
+  - RowMajor/ColMajor convenience constructors
   - Composable descriptor API (row, col, order_by, tile_by)
   - NumPy integration
-  - PyTorch integration (if available)
   - Permutation tables
   - Ergonomics: __call__, __repr__, rank, is_identity, compose, __eq__
   - Batched transforms
   - New constructors: Transposed, ZCurve, Swizzle, BlockCyclic
-  - LegoTensor, LegoArray
+  - LegoArray
 """
 
 import pytest
@@ -24,21 +23,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lego.backend.compiler import LayoutCompiler
 from lego.core import Row, Col, RegP, OrderBy, GroupBy, TileByLayout
 from lego.frontends.python_mlir import (
-    LegoLayout, RowMajor, ColMajor, Tiled, TiledView, Custom,
+    LegoLayout, RowMajor, ColMajor, Custom,
     row, col, reg_p, order_by, tile_by, group_by,
     Transposed, ZCurve, Swizzle, BlockCyclic,
     Batched, BatchedLayout, LegoArray,
 )
-
-try:
-    import torch
-    _HAS_TORCH = True
-    _HAS_CUDA = torch.cuda.is_available()
-except ImportError:
-    _HAS_TORCH = False
-    _HAS_CUDA = False
-
-requires_cuda = pytest.mark.skipif(not _HAS_CUDA, reason="CUDA not available")
 
 
 class TestLayoutCompiler:
@@ -96,15 +85,6 @@ class TestConvenienceConstructors:
         layout = ColMajor((4, 8))
         assert layout._shape == (4, 8)
 
-    def test_tiled_import(self):
-        """Tiled is importable from lego and returns TiledView."""
-        layout = Tiled((8, 8), tile_shape=(4, 4))
-        assert isinstance(layout, TiledView)
-        assert layout.original_shape == (8, 8)
-        assert layout.tile_grid == (2, 2)
-        assert layout.tile_shape == (4, 4)
-        assert layout.shape == (2, 2, 4, 4)
-
     def test_custom_import(self):
         """Custom wraps a descriptor layout."""
         from lego.frontends.python_mlir import Custom
@@ -112,12 +92,6 @@ class TestConvenienceConstructors:
         desc = group_by(shape, order_by(row(*shape)))
         layout = Custom(desc, shape)
         assert layout._shape == shape
-
-    def test_tiled_rank_mismatch(self):
-        """Tiled should raise on rank mismatch."""
-        with pytest.raises(ValueError, match="same rank"):
-            Tiled((8, 8), tile_shape=(4,))
-
 
 class TestLegoLayout:
     """Test LegoLayout wrapper class."""
@@ -298,25 +272,6 @@ class TestDescriptorAPI:
         np.testing.assert_array_equal(result, expected)
         assert result[0, 1] == 4  # j=1, i=0 -> flat[1*4+0] = flat[4] = 4
 
-    def test_tiled_round_trip(self):
-        """Tiled transform + inverse == identity."""
-        layout = Tiled((8, 8), tile_shape=(4, 4))
-        arr = np.arange(64, dtype=np.float32).reshape(8, 8)
-        tiled = layout.transform(arr)
-        assert tiled.shape == (2, 2, 4, 4)
-        back = layout.inverse_transform(tiled)
-        np.testing.assert_array_equal(back, arr)
-
-    def test_tiled_values_preserved(self):
-        """Tiled view preserves values — tiled[tr,tc,lr,lc] == original[tr*th+lr, tc*tw+lc]."""
-        layout = Tiled((8, 8), tile_shape=(4, 4))
-        arr = np.arange(64, dtype=np.float32).reshape(8, 8)
-        tiled = layout.transform(arr)
-        for tr in range(2):
-            for tc in range(2):
-                expected_tile = arr[tr*4:(tr+1)*4, tc*4:(tc+1)*4]
-                np.testing.assert_array_equal(tiled[tr, tc], expected_tile)
-
     def test_composable_api_col_tile(self):
         """order_by(col(...)).tile_by(...) composes correctly."""
         layout = LegoLayout(order_by(col(4, 8)).TileBy((2, 4), (2, 2)))
@@ -384,16 +339,6 @@ class TestPyTorchIntegration:
         expected_back = np.arange(32, dtype=np.float32).reshape(4, 8)
         np.testing.assert_array_almost_equal(back, expected_back)
 
-    def test_torch_tiled(self):
-        """PyTorch tiled layout round-trip."""
-        import torch
-        layout = Tiled((8, 8), tile_shape=(4, 4))
-        x = torch.arange(64, dtype=torch.float32).reshape(8, 8)
-        tiled = layout.transform(x)
-        assert tiled.shape == (2, 2, 4, 4)
-        back = layout.inverse_transform(tiled)
-        torch.testing.assert_close(back, x)
-
 
 # ============================================================================
 # Permutation Table Tests
@@ -418,16 +363,6 @@ class TestPermutationTable:
         perm_result = arr[fwd].reshape(8, 8)
         np.testing.assert_array_equal(jit_result, perm_result)
 
-    @requires_cuda
-    def test_cuda_transform_no_cpu_roundtrip(self):
-        """CUDA tensors should transform without CPU copy."""
-        import torch
-        layout = ColMajor((8, 8))
-        x = torch.randn(8, 8, device="cuda")
-        result = layout.transform(x)
-        assert result.device.type == "cuda"
-        back = layout.inverse_transform(result)
-        torch.testing.assert_close(back, x)
 
 
 # ============================================================================
@@ -441,13 +376,13 @@ class TestErgonomics:
         np.testing.assert_array_equal(layout(arr), layout.transform(arr))
 
     def test_repr(self):
-        layout = Tiled((8, 8), tile_shape=(4, 4))
-        assert "TiledView" in repr(layout)
-        assert "(8, 8)" in repr(layout)
+        layout = ColMajor((4, 8))
+        assert "LegoLayout" in repr(layout)
+        assert "(4, 8)" in repr(layout)
 
     def test_rank(self):
-        assert Tiled((8, 8), tile_shape=(4, 4)).rank == 4
         assert RowMajor((2, 3, 4)).rank == 3
+        assert ColMajor((4, 8)).rank == 2
 
     def test_identity(self):
         assert RowMajor((4, 8)).is_identity
@@ -613,44 +548,8 @@ class TestBlockCyclic:
 
 
 # ============================================================================
-# LegoTensor & LegoArray Tests
+# LegoArray Tests
 # ============================================================================
-
-class TestLegoTensor:
-    @pytest.fixture(autouse=True)
-    def check_torch(self):
-        try:
-            import torch
-        except ImportError:
-            pytest.skip("PyTorch not available")
-
-    def test_as_lego_tensor_to_logical(self):
-        import torch
-        from lego.backend.torch_tensor import as_lego_tensor
-        layout = ColMajor((4, 4))
-        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
-        lx = as_lego_tensor(x, layout)
-        back = lx.to_logical()
-        torch.testing.assert_close(back, x)
-
-    def test_lego_tensor_repr(self):
-        import torch
-        from lego.backend.torch_tensor import as_lego_tensor
-        layout = ColMajor((4, 4))
-        x = torch.randn(4, 4)
-        lx = as_lego_tensor(x, layout)
-        assert "LegoTensor" in repr(lx)
-
-    def test_torch_function_fallback(self):
-        """Ops on LegoTensor auto-convert to logical order."""
-        import torch
-        from lego.backend.torch_tensor import as_lego_tensor
-        layout = RowMajor((4, 4))
-        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
-        lx = as_lego_tensor(x, layout)
-        result = lx + 1  # should trigger __torch_function__
-        assert isinstance(result, torch.Tensor)
-
 
 class TestLegoArray:
     def test_array_protocol(self):
@@ -685,83 +584,7 @@ class TestDLPack:
         restored = np.from_dlpack(transformed)
         np.testing.assert_array_equal(restored, transformed)
 
-    @pytest.fixture(autouse=False)
-    def check_torch(self):
-        try:
-            import torch
-        except ImportError:
-            pytest.skip("PyTorch not available")
 
-    def test_to_dlpack_torch(self, check_torch):
-        """to_dlpack on a torch tensor returns a DLPack capsule."""
-        import torch
-        layout = ColMajor((4, 4))
-        x = torch.arange(16, dtype=torch.float32).reshape(4, 4)
-        capsule = layout.to_dlpack(x)
-        restored = torch.from_dlpack(capsule)
-        expected = layout.transform(x)
-        torch.testing.assert_close(restored, expected)
-
-    def test_from_dlpack_round_trip(self, check_torch):
-        """from_dlpack imports a tensor as a LegoArray with correct inverse."""
-        import torch
-        layout = ColMajor((3, 4))
-        x = torch.arange(12, dtype=torch.float32).reshape(3, 4)
-        transformed = layout.transform(x)
-        # Pass the tensor directly (has __dlpack__)
-        la = layout.from_dlpack(transformed)
-        assert isinstance(la, LegoArray)
-        back = la.to_logical()
-        np.testing.assert_array_almost_equal(back, x.numpy())
-
-
-# ============================================================================
-# torch.library Custom Op Tests
-# ============================================================================
-
-class TestCustomOp:
-    @pytest.fixture(autouse=True)
-    def check_torch(self):
-        try:
-            import torch
-        except ImportError:
-            pytest.skip("PyTorch not available")
-
-    def test_permute_op_cpu(self):
-        """torch.ops.lego.permute works on CPU."""
-        import torch
-        from lego.backend import torch_ops  # ensure registration
-        x = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-        perm = torch.tensor([5, 4, 3, 2, 1, 0])
-        result = torch.ops.lego.permute(x, perm)
-        expected = x.view(-1)[perm].view(2, 3)
-        torch.testing.assert_close(result, expected)
-
-    @requires_cuda
-    def test_permute_op_cuda(self):
-        """torch.ops.lego.permute works on CUDA."""
-        import torch
-        from lego.backend import torch_ops
-        x = torch.arange(6, dtype=torch.float32, device="cuda").reshape(2, 3)
-        perm = torch.tensor([5, 4, 3, 2, 1, 0], device="cuda")
-        result = torch.ops.lego.permute(x, perm)
-        expected = x.view(-1)[perm].view(2, 3)
-        torch.testing.assert_close(result, expected)
-
-    def test_permute_op_torch_compile(self):
-        """torch.ops.lego.permute is compatible with torch.compile."""
-        import torch
-        from lego.backend import torch_ops
-
-        @torch.compile(fullgraph=True)
-        def compiled_permute(x, p):
-            return torch.ops.lego.permute(x, p)
-
-        x = torch.arange(6, dtype=torch.float32).reshape(2, 3)
-        perm = torch.tensor([5, 4, 3, 2, 1, 0])
-        result = compiled_permute(x, perm)
-        expected = x.view(-1)[perm].view(2, 3)
-        torch.testing.assert_close(result, expected)
 
 
 # ============================================================================
