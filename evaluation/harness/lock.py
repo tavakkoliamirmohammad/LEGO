@@ -26,13 +26,14 @@ def acquire(lock_path: Path | None = None) -> Iterator[None]:
     """
     path = Path(lock_path) if lock_path is not None else DEFAULT_LOCK_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.touch(exist_ok=True)
-    fd = open(path, "w")
+    fd = None
     try:
+        fd = open(path, "a")
         fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
             fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
     finally:
-        fd.close()
+        if fd is not None:
+            fd.close()
