@@ -48,6 +48,17 @@ the suite's as-shipped source. Eligible layout classes:
 - AoSoA / interleaved struct packing for vectorization.
 - Block-cyclic distribution for thread-level locality.
 - Padding to break power-of-two stride associativity conflicts.
+- **Power-of-two-restricted optimizations applied to non-power-of-two
+  problem sizes.** Many published layout optimizations (swizzle masks,
+  bit-trick index arithmetic, bank-count assumptions, fixed-tile-size
+  CUTLASS-style GEMM kernels) are restricted to power-of-two dimensions
+  in their original implementation. CASTLE's algebra has no such
+  restriction: `RegP` / `GenP` / `OrderBy` / `TileBy` work over arbitrary
+  dims and the strength-reduction pass simply does not fire when shifts
+  cannot replace divisions. A candidate that reproduces a published
+  pow-2-only optimization on a non-pow-2 problem size — and beats the
+  best generally-applicable baseline at that size — is itself a paper-
+  grade contribution.
 
 Each must be expressible using only the LEGO primitives `Row`, `Col`,
 `RegP`, `GenP`, `OrderBy`, `TileBy`. **`GroupBy` is forbidden in
@@ -113,8 +124,14 @@ end of the round.
 
 ## 6. Coding conventions enforced by the harness
 
-- **OrderBy + TileBy only** in user-facing layouts. `verify.py` greps each
-  `kernel_lego.py` for `GroupBy(` and fails the candidate if matched.
+- **Prefer `OrderBy` + `TileBy`** in user-facing layouts. `GroupBy` is
+  allowed when no clean `TileBy` expression exists (e.g. asymmetric
+  grouping that doesn't reduce to a tile-size pair, or grouping over a
+  non-contiguous dim subset). Each `GroupBy` use must be accompanied by a
+  one-sentence justification in `report.md` under the `groupby_usage`
+  field. `verify.py` does not fail on `GroupBy`; it counts occurrences
+  and surfaces them in the dashboard so we can see how often the
+  exception was needed across the round.
 - **Identical compiler flags** for baseline and LEGO version. The flag
   string per language is fixed in `harness/build_flags.json`:
   - C / C++: `-O3 -march=native -fopenmp`
@@ -172,6 +189,10 @@ predicted_win:
   value: "1.3x – 2.0x"
   source: frigo1999cacheoblivious
   type: published                 # one of: published | extrapolated | unknown
+power_of_two_restriction:
+  baseline_assumes_pow2: true     # original published win restricted to pow-2 dims?
+  test_at_non_pow2_size: true     # if true, builder also runs at a deliberately
+                                  # non-pow-2 size to demonstrate CASTLE's generality
 measurement_protocol: |
   Median of 50 runs after 10 warmup; taskset core pinning; turbo and
   governor as observed.
@@ -311,6 +332,8 @@ results:
 layouts_tried:
   - "OrderBy(Row(M,N)).TileBy(...)": LOSS at 0.93x
   - "OrderBy(Row).TileBy(...) + GenP(morton)": WIN at 1.25x
+groupby_usage: []                    # list of {expression, justification}
+                                     # if empty, layout used only OrderBy+TileBy
 citations_used: [frigo1999cacheoblivious]
 notes: |
   Free-form: anything the orchestrator should see — odd findings,
