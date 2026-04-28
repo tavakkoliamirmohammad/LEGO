@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "raw timing record",
+  "description": "Schema for evaluation/candidates/<id>/raw/{baseline,lego}.json",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "version",
+    "size",
+    "build",
+    "repro_setup",
+    "warmup_iterations",
+    "timed_iterations",
+    "per_iteration_ns",
+    "median_ns",
+    "iqr_ns"
+  ],
+  "properties": {
+    "candidate_id": {"type": "string"},
+    "version": {"enum": ["baseline", "lego"]},
+    "size": {"type": "string", "description": "small | medium | large or specific size tag"},
+    "build": {
+      "type": "object",
+      "required": ["language", "compiler_version", "flags"],
+      "properties": {
+        "language": {"type": "string"},
+        "compiler_version": {"type": "string"},
+        "flags": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "repro_setup": {
+      "type": "object",
+      "description": "Best-effort reproducibility settings as actually applied. Fields are 'unknown' when not modifiable.",
+      "required": ["taskset_cores", "numactl_membind", "governor", "turbo"],
+      "properties": {
+        "taskset_cores": {"type": "string"},
+        "numactl_membind": {"type": "string"},
+        "governor": {"type": "string"},
+        "turbo": {"type": "string"}
+      }
+    },
+    "warmup_iterations": {"type": "integer", "minimum": 0},
+    "timed_iterations": {"type": "integer", "minimum": 1},
+    "per_iteration_ns": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "median_ns": {"type": "integer", "minimum": 0},
+    "iqr_ns": {"type": "integer", "minimum": 0},
+    "machine_fingerprint_sha256": {
+      "type": "string",
+      "description": "sha256 of evaluation/harness/machine.md at the time of measurement, so we can detect node drift"
+    }
+  }
+}
