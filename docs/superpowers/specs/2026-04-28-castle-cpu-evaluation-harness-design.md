@@ -100,7 +100,7 @@ evaluation/
 │   ├── verify.py               # output-hashing reference comparator
 │   ├── lock.py                 # flock-based global mutex (N=1)
 │   ├── dashboard.py            # regenerates evaluation/dashboard.md
-│   └── stats.py                # median, MAD, bootstrap CI
+│   └── stats.py                # median, IQR, speedup classification
 ├── references.bib              # BibTeX, scout-owned, builders append
 ├── survey.md                   # scout's deliverable
 ├── survey_summary.md           # scout's drop-list summary
@@ -194,7 +194,7 @@ power_of_two_restriction:
   test_at_non_pow2_size: true     # if true, builder also runs at a deliberately
                                   # non-pow-2 size to demonstrate CASTLE's generality
 measurement_protocol: |
-  Median of 50 runs after 10 warmup; taskset core pinning; turbo and
+  Median of 100 runs after 25 warmup; taskset core pinning; turbo and
   governor as observed.
 estimated_builder_effort: 1-2 days
 risk_flags:
@@ -273,18 +273,23 @@ git worktree remove ../LEGO-eval-<id>
    - Apply `taskset -c <core>` for thread pinning (always works).
    - Apply `numactl --membind`, governor=performance, turbo-disable
      **if available**; record the actual state in `repro_setup`.
-   - **10 warmup → 50 timed iterations**, record per-iteration ns.
+   - **25 warmup → 100 timed iterations**, record per-iteration ns.
    - Sweep at minimum **3 problem sizes** (small / medium / large
      suite-defined).
    - Same protocol for baseline and LEGO under identical conditions.
    - Output: `raw/baseline.json`, `raw/lego.json`.
 7. **Release the lock.**
-8. **Classify.** Compute median, MAD, 95% bootstrap CI for each.
-   Compare:
-   - `lego_median ≤ 0.90 × baseline_median` and CIs disjoint → **WIN**.
-   - CIs overlap or `0.90 < lego/baseline < 1.10` → **PARITY**.
-   - `lego_median > 1.10 × baseline_median` with CIs disjoint → **LOSS**.
+8. **Classify.** Compute median and IQR for each timing distribution.
+   Speedup = `baseline_median / lego_median`. Compare on the median
+   ratio alone:
+   - `speedup ≥ 1.02` → **WIN**.
+   - `0.98 < speedup < 1.02` → **PARITY**.
+   - `speedup ≤ 0.98` → **LOSS**.
    - Compile or runtime crash on LEGO side → **DROPPED-build**.
+
+   IQR is recorded for sanity-checking but does not gate the verdict.
+   Suspiciously high variance (IQR > 20% of median) is flagged in the
+   dashboard for re-run review; it does not auto-disqualify.
 9. **Iterate within scope.** If LOSS or unconvincing PARITY, builder may
    try other layouts (Z-Morton, RFP, deeper tiling) for the same kernel,
    sweep tile sizes, retry. Each attempt logged in `report.md`. **Hard
@@ -324,10 +329,10 @@ sizes_swept: [small, medium, large]
 results:
   - size: medium
     baseline_median_ns: 1234567
+    baseline_iqr_ns: 18000
     lego_median_ns: 987654
+    lego_iqr_ns: 14000
     speedup: 1.25
-    ci_baseline_95: [1230000, 1240000]
-    ci_lego_95: [985000, 991000]
     verification: PASS (sha256 match)
 layouts_tried:
   - "OrderBy(Row(M,N)).TileBy(...)": LOSS at 0.93x
@@ -354,11 +359,15 @@ commits, and dashboard regeneration happen outside the lock.
 
 **Wall-clock estimate:**
 
-- Per candidate: build + verify + warmup + 50 timed × 3 sizes × 2
-  versions + ~3 layout retry attempts = ~12 min.
-- 50 candidates × 12 min = ~10 hours measurement-critical-path.
+- Per candidate: build + verify + 25 warmup + 100 timed × 3 sizes × 2
+  versions + ~3 layout retry attempts. Roughly 2× the iteration cost of
+  the earlier 10/50 protocol, so per-candidate wall-clock is dominated
+  by measurement and ranges ~5–25 min depending on kernel size.
+- 50 candidates × ~15 min average = ~12 hours measurement-critical-path.
+  Larger kernels (LULESH-class) push the upper bound to ~25 min each.
 - Survey + distillation ~1.5 hours.
-- **Total ~10–12 hours unattended.**
+- **Total ~12–20 hours unattended** for a 30–50 candidate round, larger
+  for full-stencil-suite kernels.
 
 ## 11. Hardware target
 
@@ -426,14 +435,14 @@ at any time. No /loop, no cron — work is finite and terminates.
 
 ## 13. Result classification thresholds (recap)
 
-| Class                  | Condition                                                              | Paper treatment                                          |
-|------------------------|------------------------------------------------------------------------|----------------------------------------------------------|
-| WIN                    | `lego ≤ 0.90 × baseline` and 95% CIs disjoint                          | Reported as speedup row in Section 7.5 matrix            |
-| PARITY                 | CIs overlap or `0.90 < lego/baseline < 1.10`                           | Reported as "no slowdown despite portability"            |
-| LOSS                   | `lego > 1.10 × baseline` and 95% CIs disjoint                          | Reported honestly with hypothesis about cause            |
-| DROPPED-verification   | LEGO output fails reference comparison                                 | Excluded from matrix; mentioned in caveats               |
-| DROPPED-build          | LEGO source fails to compile or run on this node                       | Excluded from matrix; mentioned in caveats               |
-| DROPPED-needs-lowering | Candidate cannot be expressed without modifying CASTLE source          | Excluded from matrix; logged in dashboard for re-open    |
+| Class                  | Condition                                                       | Paper treatment                                          |
+|------------------------|-----------------------------------------------------------------|----------------------------------------------------------|
+| WIN                    | `speedup ≥ 1.02` (i.e. lego ≤ 0.98 × baseline)                  | Reported as speedup row in Section 7.5 matrix            |
+| PARITY                 | `0.98 < speedup < 1.02`                                         | Reported as "no slowdown despite portability"            |
+| LOSS                   | `speedup ≤ 0.98` (i.e. lego ≥ 1.02 × baseline)                  | Reported honestly with hypothesis about cause            |
+| DROPPED-verification   | LEGO output fails reference comparison                          | Excluded from matrix; mentioned in caveats               |
+| DROPPED-build          | LEGO source fails to compile or run on this node                | Excluded from matrix; mentioned in caveats               |
+| DROPPED-needs-lowering | Candidate cannot be expressed without modifying CASTLE source   | Excluded from matrix; logged in dashboard for re-open    |
 
 ## 14. Risks & mitigations
 
@@ -441,7 +450,7 @@ at any time. No /loop, no cron — work is finite and terminates.
 |-------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
 | `gcc -O3` already simplifies LEGO-emitted index arithmetic to be equivalent to baseline   | Scout's `why_compiler_cant` field forces specific articulation; layouts that are no-ops for the compiler get dropped before builder runs |
 | Many candidates need new lowering features                                                | Single tally in dashboard; if >30% drop with `DROPPED-needs-lowering`, surface to user as a signal to re-open the escape hatch |
-| Measurement noise on a non-frequency-locked node                                          | 50 timed iterations + bootstrap CI + thresholds gated on disjoint CIs                       |
+| Measurement noise on a non-frequency-locked node                                          | 25 warmup + 100 timed iterations per (size, version); IQR > 20% of median flags re-run; serial measurement under global mutex |
 | 30–50 builder worktrees fill scratch                                                      | Worktree path under `/scratch/general/vast/u1419116/LEGO-eval-<id>`; 1 GB ceiling per worktree enforced by the builder prompt |
 | Builders silently fabricate numbers                                                       | Every reported number must point to a `raw/*.json` it was computed from; verify.py grep-checks reports for orphaned numbers |
 | Compiler version drift between scout's predictions and builder's measurements             | `report.md` records actual compiler version; predicted-vs-measured discrepancy logged in `notes` |
@@ -462,9 +471,9 @@ at any time. No /loop, no cron — work is finite and terminates.
 The design is accepted when the user:
 
 1. Confirms the directory layout matches their working preference.
-2. Confirms the result classification thresholds (10% / disjoint CIs).
+2. Confirms the result classification thresholds (2% effect size on the median ratio; no CI/bootstrap gate).
 3. Confirms the scout's `candidate_schema.md` covers what they need.
-4. Confirms the wall-clock estimate (~10–12 hours unattended) is
+4. Confirms the wall-clock estimate (~12–20 hours unattended) is
    acceptable.
 5. Confirms `OrderBy` + `TileBy` is sufficient and `GroupBy` should
    indeed be banned.
