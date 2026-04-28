@@ -3,3 +3,181 @@
 % additional sources during their layout attempts. Every entry MUST
 % have a DOI or arXiv eprint field. No "personal communication" or
 % unverifiable references.
+
+% ── Layout-theory foundations ─────────────────────────────────────────────────
+
+@inproceedings{frigo1999cacheoblivious,
+  author    = {Frigo, Matteo and Leiserson, Charles E. and Prokop, Harald and Ramachandran, Sridhar},
+  title     = {Cache-Oblivious Algorithms},
+  booktitle = {40th Annual Symposium on Foundations of Computer Science (FOCS 1999)},
+  year      = {1999},
+  pages     = {285--298},
+  doi       = {10.1109/SFFCS.1999.814600}
+}
+
+@article{goto2008anatomy,
+  author    = {Goto, Kazushige and van de Geijn, Robert A.},
+  title     = {Anatomy of High-Performance Matrix Multiplication},
+  journal   = {ACM Transactions on Mathematical Software},
+  volume    = {34},
+  number    = {3},
+  year      = {2008},
+  pages     = {12:1--12:25},
+  doi       = {10.1145/1356052.1356053}
+}
+
+@article{gustavson2010rfpcholesky,
+  author    = {Gustavson, Fred G. and Wa\'{s}niewski, Jerzy and Dongarra, Jack J. and Langou, Julie},
+  title     = {Rectangular Full Packed Format for {Cholesky's} Algorithm: Factorization, Solution, and Inversion},
+  journal   = {ACM Transactions on Mathematical Software},
+  volume    = {37},
+  number    = {2},
+  year      = {2010},
+  pages     = {18:1--18:21},
+  doi       = {10.1145/1731022.1731028}
+}
+
+@article{walker2018morton,
+  author    = {Walker, David W.},
+  title     = {Morton ordering of 2D arrays for efficient access to hierarchical memory},
+  journal   = {International Journal of High Performance Computing Applications},
+  volume    = {32},
+  number    = {2},
+  year      = {2018},
+  pages     = {189--203},
+  doi       = {10.1177/1094342017725568}
+}
+
+@inproceedings{perdacher2020mortonlu,
+  author    = {Perdacher, Martin and Plant, Claudia and B\"{o}hm, Christian},
+  title     = {Improved Data Locality Using Morton-order Curve on the Example of {LU} Decomposition},
+  booktitle = {2020 IEEE International Conference on Big Data (Big Data)},
+  year      = {2020},
+  pages     = {351--360},
+  doi       = {10.1109/BigData50022.2020.9378385}
+}
+
+@article{hong2016padding,
+  author    = {Hong, Changwan and Bao, Wenlei and Cohen, Albert and Lee, Jinseong and Sadayappan, Ponnuswamy and Verdoolaege, Sven},
+  title     = {Effective Padding of Multidimensional Arrays to Avoid Cache Conflict Misses},
+  journal   = {ACM SIGPLAN Notices},
+  volume    = {51},
+  number    = {6},
+  year      = {2016},
+  pages     = {129--144},
+  doi       = {10.1145/2908080.2908123}
+}
+
+% ── Brick / recursive-blocking layouts ────────────────────────────────────────
+
+@inproceedings{zhao2019bricks,
+  author    = {Zhao, Tuowen and Basu, Protonu and Williams, Samuel and Hall, Mary and Johansen, Hans},
+  title     = {Exploiting Reuse and Vectorization in Blocked Stencil Computations on {CPUs} and {GPUs}},
+  booktitle = {Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC 2019)},
+  year      = {2019},
+  pages     = {52:1--52:44},
+  doi       = {10.1145/3295500.3356210}
+}
+
+@article{bricks2024ijhpca,
+  author    = {Lakshminarasimhan, Mahesh and Antepara, Oscar and Zhao, Tuowen and Sepanski, Benjamin and Basu, Protonu and Johansen, Hans and Hall, Mary and Williams, Samuel},
+  title     = {Bricks: A high-performance portability layer for computations on block-structured grids},
+  journal   = {International Journal of High Performance Computing Applications},
+  year      = {2024},
+  doi       = {10.1177/10943420241268288}
+}
+
+% ── Triangular / symmetric packing (RFP) ──────────────────────────────────────
+
+% gustavson2010rfpcholesky is already above.
+
+% ── Skewed / shifted layouts (dynamic programming) ────────────────────────────
+
+@inproceedings{palkowski2018nw,
+  author    = {Pa{\l}kowski, Marek and Siedlecki, Krzysztof and Bielecki, W{\l}odzimierz},
+  title     = {Parallel Cache Efficient Algorithm and Implementation of {Needleman-Wunsch} Global Sequence Alignment},
+  booktitle = {Artificial Intelligence and Soft Computing (ICAISC 2018), Lecture Notes in Computer Science, vol.\ 10842},
+  year      = {2018},
+  pages     = {196--206},
+  doi       = {10.1007/978-3-319-91262-2_19}
+}
+
+@article{palkowski2017nussinov,
+  author    = {Pa{\l}kowski, Marek and Bielecki, W{\l}odzimierz},
+  title     = {Parallel tiled {Nussinov} {RNA} folding loop nest generated using both dependence graph transitive closure and loop skewing},
+  journal   = {BMC Bioinformatics},
+  volume    = {18},
+  number    = {1},
+  year      = {2017},
+  pages     = {290},
+  doi       = {10.1186/s12859-017-1707-8}
+}
+
+@article{palkowski2019zuker,
+  author    = {Pa{\l}kowski, Marek and Bielecki, W{\l}odzimierz},
+  title     = {Tiling {Nussinov's} {RNA} folding loop nest with a space-time approach},
+  journal   = {BMC Bioinformatics},
+  volume    = {20},
+  number    = {1},
+  year      = {2019},
+  pages     = {213},
+  doi       = {10.1186/s12859-019-2785-6}
+}
+
+% ── AoSoA / interleaved struct packing ────────────────────────────────────────
+
+@article{vecdualspHysics2022,
+  author    = {Gonz\'{a}lez-Cao, Jos\'{e} and Altomare, Corrado and Dur\'{a}n, In\'{e}s and Crespo, Alejandro J. C.},
+  title     = {{VecDualSPHysics}: A vectorized implementation of {Smoothed Particle Hydrodynamics} method for simulating fluid flows on multi-core processors},
+  journal   = {Journal of Computational Physics},
+  volume    = {460},
+  year      = {2022},
+  pages     = {111158},
+  doi       = {10.1016/j.jcp.2022.111158}
+}
+
+% ── Multi-level cache-conscious tiling (matmul / stencil) ─────────────────────
+
+@inproceedings{salvado2023pack,
+  author    = {Salvado, Cyril and Grosser, Tobias and Zinenko, Oleksandr and Doerfert, Johannes},
+  title     = {To Pack or Not to Pack: A Generalized Packing Analysis and Transformation},
+  booktitle = {Proceedings of the 21st ACM/IEEE International Symposium on Code Generation and Optimization (CGO 2023)},
+  year      = {2023},
+  pages     = {48--60},
+  doi       = {10.1145/3579990.3580024}
+}
+
+% ── Tensor contractions ───────────────────────────────────────────────────────
+
+@article{springer2018gett,
+  author    = {Springer, Paul and Bientinesi, Paolo},
+  title     = {Design of a High-Performance {GEMM}-like Tensor--Tensor Multiplication},
+  journal   = {ACM Transactions on Mathematical Software},
+  volume    = {44},
+  number    = {3},
+  year      = {2018},
+  pages     = {28:1--28:29},
+  doi       = {10.1145/3157733}
+}
+
+@article{matthews2018tblis,
+  author    = {Matthews, Devin A.},
+  title     = {High-Performance Tensor Contraction without Transposition},
+  journal   = {SIAM Journal on Scientific Computing},
+  volume    = {40},
+  number    = {1},
+  year      = {2018},
+  pages     = {C1--C24},
+  doi       = {10.1137/16M108968X}
+}
+
+% ── Image processing (Halide) ─────────────────────────────────────────────────
+
+@inproceedings{ragankelley2013halide,
+  author    = {Ragan-Kelley, Jonathan and Barnes, Connelly and Adams, Andrew and Paris, Sylvain and Durand, Fr\'{e}do and Amarasinghe, Saman},
+  title     = {Halide: A Language and Compiler for Optimizing Parallelism, Locality, and Recomputation in Image Processing Pipelines},
+  booktitle = {Proceedings of the 34th ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI 2013)},
+  year      = {2013},
+  pages     = {519--530},
+  doi       = {10.1145/2499370.2462176}
+}
