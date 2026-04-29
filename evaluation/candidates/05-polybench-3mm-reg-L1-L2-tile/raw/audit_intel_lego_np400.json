@@ -1,0 +1,57 @@
+{
+  "candidate_id": "05-polybench-3mm-reg-L1-L2-tile",
+  "version": "lego",
+  "size": "np400",
+  "build": {
+    "language": "c",
+    "compiler_version": "gcc (GCC) 8.5.0 20210514 (Red Hat 8.5.0-28)",
+    "flags": [
+      "-O3",
+      "-march=native",
+      "-fopenmp"
+    ]
+  },
+  "repro_setup": {
+    "taskset_cores": "4",
+    "numactl_membind": "0",
+    "governor": "performance",
+    "turbo": "enabled"
+  },
+  "warmup_iterations": 10,
+  "timed_iterations": 30,
+  "per_iteration_ns": [
+    77916854,
+    78009288,
+    78796500,
+    78256173,
+    78034974,
+    78026125,
+    77987235,
+    78030609,
+    78027258,
+    77941664,
+    77915986,
+    77951822,
+    77964915,
+    77930163,
+    77952706,
+    78123078,
+    77952327,
+    78010160,
+    77916894,
+    77953323,
+    77915093,
+    77953235,
+    77906888,
+    77915232,
+    77926328,
+    77952885,
+    77933151,
+    77983568,
+    78299625,
+    78040906
+  ],
+  "median_ns": 77953279,
+  "iqr_ns": 98891,
+  "machine_fingerprint_sha256": "842a1d8fa97a8fab9c2c826dbd532eb35e778086562ed7241b9d788f6ac3c293"
+}

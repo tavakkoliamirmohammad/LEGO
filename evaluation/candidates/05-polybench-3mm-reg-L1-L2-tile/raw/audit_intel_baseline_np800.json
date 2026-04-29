@@ -1,0 +1,57 @@
+{
+  "candidate_id": "05-polybench-3mm-reg-L1-L2-tile",
+  "version": "baseline",
+  "size": "np800",
+  "build": {
+    "language": "c",
+    "compiler_version": "gcc (GCC) 8.5.0 20210514 (Red Hat 8.5.0-28)",
+    "flags": [
+      "-O3",
+      "-march=native",
+      "-fopenmp"
+    ]
+  },
+  "repro_setup": {
+    "taskset_cores": "4",
+    "numactl_membind": "0",
+    "governor": "performance",
+    "turbo": "enabled"
+  },
+  "warmup_iterations": 10,
+  "timed_iterations": 30,
+  "per_iteration_ns": [
+    2743050139,
+    2744400659,
+    2744512966,
+    2744682052,
+    2743413325,
+    2744301195,
+    2744694630,
+    2746234973,
+    2744495435,
+    2746266711,
+    2745163375,
+    2746465207,
+    2744503340,
+    2744189501,
+    2747800694,
+    2741883168,
+    2743003925,
+    2745267160,
+    2745906608,
+    2743232245,
+    2744039969,
+    2743431561,
+    2742325963,
+    2741822941,
+    2746583352,
+    2744417187,
+    2745131933,
+    2748825097,
+    2744577897,
+    2745038477
+  ],
+  "median_ns": 2744508153,
+  "iqr_ns": 2000020,
+  "machine_fingerprint_sha256": "842a1d8fa97a8fab9c2c826dbd532eb35e778086562ed7241b9d788f6ac3c293"
+}
