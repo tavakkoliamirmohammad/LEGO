@@ -14,11 +14,18 @@
 
 **Severity:** high. Affects the entire stencil/brick layout class.
 
+**Cross-architecture confirmation (Intel Xeon Gold 6330 audit, 2026-04-29):**
+brick LOSSes reproduce on **both** AMD AVX2 and Intel AVX-512 (11, 14, 29 LOSS
+on both). Candidate 12 (3d13pt-brick) flips marginally to Intel WIN 1.06× via
+AVX-512 gathers — wider vectors *partially* close the gap but the intrinsic-
+codegen lift is still needed. **R1 is confirmed not arch-specific.**
+
 **Motivating evidence:**
-- Builder 11 (`bricklib-3d7pt-brick`) → LOSS 0.93×.
-- Builder 12 (`bricklib-3d13pt-brick`) → LOSS 0.91×.
-- Builder 14 (`polybench-jacobi2d-brick`) → LOSS 0.67×.
-- Builder 29 (`bricklib-stencil-nonpow2-brick`) → LOSS 0.75×.
+- Builder 11 (`bricklib-3d7pt-brick`) → LOSS 0.93× AMD / LOSS 0.86× Intel.
+- Builder 12 (`bricklib-3d13pt-brick`) → PARITY AMD / **marginal WIN 1.06× Intel** (AVX-512 gathers help 13-point stencil).
+- Builder 13 (`polybench-heat3d-brick`) → MIXED AMD / LOSS 0.80× Intel.
+- Builder 14 (`polybench-jacobi2d-brick`) → LOSS 0.67× AMD / LOSS 0.19× Intel (severe).
+- Builder 29 (`bricklib-stencil-nonpow2-brick`) → LOSS 0.75× AMD / LOSS 0.61× Intel.
 
 **Root cause cluster.** BrickLib's published 1.9×–4.9× wins depend on
 register-level dimension folding (the `brick()` macro folds the
@@ -99,18 +106,26 @@ read per cell, antidiag layout is unlikely to win), or
 scout's prediction model can drop these candidates upfront. 17/20
 remain LOSSes in the paper but the *survey* methodology improves.
 
-## R3 — AoSoA scope: indirect-connectivity detection
+## R3 — AoSoA scope: indirect-connectivity + scatter/gather microarch
 
 **Severity:** medium. Affects AoSoA layout class.
 
+**Cross-architecture finding (2026-04-29 Intel audit):** AoSoA results are
+**architecture-sensitive**. Cand 21 (particlefilter) flipped LOSS (AMD 0.51×)
+→ PARITY (Intel ~1.0×) because Intel's wider SIMD lanes and different gather
+implementation reduce the AoSoA index overhead. Cand 23 (hpccg) went MIXED
+(AMD) → uniform LOSS (Intel) because Intel's prefetcher handles the strided
+pattern poorly. So R3 needs *both* "is the field array the bottleneck" AND
+"does this microarchitecture's scatter/gather amortize the AoSoA index cost".
+
 **Motivating evidence:**
-- Builder 22 (`lulesh-elem-aosoA`) → LOSS 0.94×. AoSoA reorders
-  element-field arrays (volo, v, delv, dxx/dyy/dzz) but LULESH's
-  bandwidth is dominated by irregular gather/scatter through the
-  `nodelist[k*8+i]` connectivity, not the field arrays.
-- Builder 23 (`hpccg-cg-aosoA`) → WIN 1.19×. Regular dense access — AoSoA
-  pays off.
-- Builder 21 (`rodinia-particlefilter-aosoA`) → DROPPED-build (raw incomplete).
+- Builder 22 (`lulesh-elem-aosoA`) → LOSS 0.94× AMD / LOSS 0.90× Intel.
+  Bandwidth dominated by `nodelist[k*8+i]` indirect connectivity, not fields.
+- Builder 23 (`hpccg-cg-aosoA`) → MIXED AMD (medium WIN 1.19×, small/large
+  LOSS) → uniformly LOSS Intel (0.69×–0.75×). Intel prefetcher doesn't
+  amortize AoSoA strided access.
+- Builder 21 (`rodinia-particlefilter-aosoA`) → LOSS 0.51× AMD → PARITY
+  ~1.0× Intel. Wider SIMD + better gathers reduce overhead but no win.
 
 **Root cause.** AoSoA helps *only* when the bottleneck is the SoA
 access pattern — i.e., when the bandwidth is dominated by the field
@@ -257,6 +272,93 @@ the absolute path.
 **Status:** done. No re-test needed — Step 3.5 orchestrator already
 re-measured everything under the correct lock.
 
+## R9 — Cache-topology-aware tile-size autotuning (NEW from Intel audit)
+
+**Severity:** medium-high. Affects layout-class portability across CPUs with
+different L3 sizes.
+
+**Motivating evidence (2026-04-29 Intel audit):**
+- Builder 19 (`npdp-zuker-skew-tile`) → WIN 1.17× AMD → **LOSS 0.67× Intel**.
+  Zuker skew-tile sized for AMD's 256 MB L3; Intel's 43 MB L3 (~6× smaller)
+  thrashes at medium and large sizes.
+- Builder 26 (`polybench-gemm-pow2-pad`) → WIN 1.14× AMD → **LOSS 0.96× Intel**.
+  Pow-2 padding strategy targeted AMD's L3 set-associativity pattern; Intel's
+  43 MB L3 has different set stride and the padding lands in different cache
+  sets, no longer avoiding the hot-set collision.
+
+**Root cause cluster.** LEGO layouts today take tile sizes as compile-time
+constants. When the deployment hardware has different L3 capacity / associa-
+tivity / set-stride, the carefully-chosen tile size lands in the wrong cache
+regime.
+
+**Proposed feature.** A `lego.autotile` runtime helper that:
+
+1. Queries `sysfs` for `cache_size`, `ways_of_associativity`,
+   `coherency_line_size` per cache level at compile time.
+2. Parametrizes `TileBy`'s `(BM, BN)` sizes as a function of cache topology
+   instead of hardcoded constants.
+3. Optionally: a one-time autotune sweep that runs at several tile-size
+   choices, picks the best for the current machine, caches the result in
+   `~/.lego/autotile.json`.
+
+**Implementation sketch.** Python helper `lego.autotile.cache_aware_tile_size
+(matrix_dims, element_size, level=2)` returning `(BM, BN)` sized for detected
+L1/L2. Update existing benchmarks to use it.
+
+**Effort:** 3–4 days (cache-aware sizing helper); +1 week (autotuning sweep).
+
+**Re-test list when closed:** 19, 26 — expect WIN on both AMD and Intel.
+
+## R10 — Multi-thread Intel re-measurement of candidate 24 (NEW)
+
+**Severity:** low. Operational gap.
+
+**Motivating evidence.** Builder 24 (`polybench-fdtd-2d-block-cyclic`) was a
+4-thread WIN on AMD (3.78×). The 2026-04-29 Intel audit measured single-
+threaded only — Intel verdict came back LOSS. Protocol mismatch, not real
+architecture-portability story.
+
+**Proposed action.** Re-run cand 24 on Intel with `OMP_NUM_THREADS=4`, update
+`audit_report_intel.md` row 24.
+
+**Effort:** 30 minutes once the lock is free.
+
+**Re-test list when closed:** 24.
+
+## R11 — Architecture-portability framing in Section 7.5 (NEW)
+
+**Severity:** documentation. The Intel audit produced 68% verdict agreement
+across architectures — paper finding worth its own subsection.
+
+**Cross-architecture summary** (from `evaluation/audit_report_intel.md`):
+
+| Layout Class | AMD WIN | Intel WIN | Verdict |
+|---|---|---|---|
+| Register + L1 + L2 tile | 6/6 | 6/6 | **fully portable** |
+| L1 tile | 2/2 | 2/2 | fully portable |
+| GETT tile | 1/1 | 1/1 | fully portable |
+| Z-Morton | 2/3 | 2/3 | mostly (Chol LOSS on both) |
+| Brick | 0/5 | 0/5 (1 marginal) | **portable LOSS** — confirms R1 |
+| Skew tile | 1/3 | 1/3 | partial (Zuker fails on Intel L3) |
+| RFP | 1/2 | 1/2 | partial |
+| Block-cyclic | 1/2 | 1/2 | partial (24 needs 4T re-run) |
+| Pow-2 pad | 2/2 | 1/2 | partial (26 L3-specific) |
+| AoSoA | 0/3 | 0/3 (1 PARITY) | weak — 21 improves on Intel |
+| Antidiag tile | 0/1 | 0/1 | not portable |
+| Morton + non-pow-2 | 1/1 | 1/1 | fully portable |
+
+**AVX-512 amplifies register-kernel wins.** Several candidates show *bigger*
+wins on Intel: 05 (3mm) 3.09× → 4.25× (+37%); 06 (2mm) p512 3.79× → 7.03×
+(+85%); 16 (syrk-rfp) p1024 → 5.52×. Strong paper-grade story: LEGO's `TileBy
++ OrderBy` naturally exploits wider SIMD without code changes.
+
+**Proposed Section 7.5 framing:**
+- AMD canonical results (Round 1).
+- Intel cross-arch validation (Round 1.5 / audit).
+- Per-class portability paragraphs: fully-portable, R9-blocked, R1-blocked.
+
+**Effort:** included in Section 7.5 writing.
+
 ## R8 — PolyBench cache-flush utility amplifies tile-friendly kernels
 
 **Severity:** methodology caveat. Affects WIN magnitudes, not classifications.
@@ -288,14 +390,17 @@ include this effect.
 
 | ID | Severity | Effort | Affected candidates | Status |
 |---|---|---|---|---|
-| R1 SIMD intrinsics | high | 4–6 wk | 11, 12, 14, 29 | open |
+| R1 SIMD intrinsics | high | 4–6 wk | 11, 12, 13, 14, 29 | open (confirmed cross-arch) |
 | R2 Anti-diagonal scoping | medium | 1–2 wk | 17, 20 | open |
-| R3 AoSoA scoping | medium | 0.5 day | 22, 21 | open |
+| R3 AoSoA scoping | medium | 0.5 day | 22, 21, 23 | open (cross-arch nuance added) |
 | R4 Z-Morton triangular | medium | 1 wk (a) / 0.5 day (b) | 03 | open |
 | R5 Baseline-class matching | medium | 0.5 day | 15 | open |
 | R6 Measurement uniformity | low | 1 day | (refactor only) | open |
 | R7 Absolute lock path | closed | done | — | closed |
 | R8 PolyBench flush caveat | methodology | (paper) | 07, 08, 16, 34 | open |
+| **R9 Cache-topology autotune** | **medium-high** | **3–4 days** | **19, 26** | **open (NEW)** |
+| **R10 Cand-24 4T Intel re-run** | **low** | **30 min** | **24** | **open (NEW)** |
+| **R11 §7.5 portability framing** | **doc** | **(paper)** | **all** | **open (NEW)** |
 
 **Recommended order to attack:**
 
