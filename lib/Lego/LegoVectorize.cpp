@@ -21,6 +21,9 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Pass/Pass.h"
 
+#include <limits>
+#include <numeric>  // std::gcd (C++17)
+
 using namespace mlir;
 
 // ---------------------------------------------------------------------------
@@ -217,11 +220,40 @@ AccessClassification solveAccessTierA(Operation *memrefOp, Value iv,
 // ---------------------------------------------------------------------------
 namespace {
 
+// ---------------------------------------------------------------------------
+// Target → register-lane helpers (Task 7)
+// ---------------------------------------------------------------------------
+
+// Maps target identifier to vector-register lanes per element of given byte
+// width. AVX-512: 64-byte registers. AVX2: 32-byte. NEON: 16-byte.
+static int64_t getRegisterLanesForType(llvm::StringRef target,
+                                       int64_t elementBytes) {
+  if (elementBytes <= 0) return 1;
+  if (target == "avx512") return 64 / elementBytes;
+  if (target == "avx2")   return 32 / elementBytes;
+  if (target == "neon")   return 16 / elementBytes;
+  // Conservative default: AVX2.
+  return 32 / elementBytes;
+}
+
+// Safe lcm for int64_t.  Uses std::gcd to avoid signed-overflow that
+// std::lcm can produce on some libstdc++ versions.
+static int64_t lcm_i64(int64_t a, int64_t b) {
+  if (a == 0 || b == 0) return 0;
+  int64_t g = std::gcd(a, b);
+  return (a / g) * b;
+}
+
+// ---------------------------------------------------------------------------
+// Per-loop analysis state
+// ---------------------------------------------------------------------------
+
 struct LoopAnalysis {
   scf::ForOp forOp;
   llvm::SmallVector<Operation *, 4> accesses;
   llvm::SmallVector<lego::AccessClassification, 4> classes;
-  // Phase-B Task 7+ will add: int64_t L_strip; double score;
+  int64_t L_strip = 1;  // strip-mine factor (Task 7); rewrite lands in Task 8.
+  // Future: double score (Task 8).
 };
 
 static llvm::SmallVector<LoopAnalysis>
@@ -237,6 +269,58 @@ collectCandidateLoops(func::FuncOp func) {
     if (!a.accesses.empty()) result.push_back(std::move(a));
   });
   return result;
+}
+
+// Compute the strip-mine factor L_strip for a single LoopAnalysis.
+//
+// L_strip = lcm(Ln_access) over all constraining accesses, where:
+//   Ln_access = min(R_T, T, Ld)  for Unit accesses.
+//   Broadcast accesses are skipped (they don't constrain).
+//   Strided / NonAffine / CrossBlock → L_strip = 1 (not vectorizable in v1).
+//
+// Dep distance Ld is INT64_MAX for now — Task 16 will implement memref base
+// distinctness analysis to establish finite Ld where appropriate.
+// NOTE: LoopAnalysis is taken by non-const reference because scf::ForOp
+// accessors (getLowerBound, getUpperBound, getStep) are non-const in this
+// MLIR version.  The function does not mutate `a`.
+static int64_t computeStripMineFactor(LoopAnalysis &a,
+                                      llvm::StringRef target) {
+  // Trip count: extract (upper - lower) / step if all three are
+  // arith.constant index; otherwise treat as unbounded.
+  int64_t T = std::numeric_limits<int64_t>::max();
+  scf::ForOp &forOp = a.forOp;
+  if (auto lb = forOp.getLowerBound().getDefiningOp<arith::ConstantIndexOp>())
+    if (auto ub =
+            forOp.getUpperBound().getDefiningOp<arith::ConstantIndexOp>())
+      if (auto st = forOp.getStep().getDefiningOp<arith::ConstantIndexOp>())
+        if (st.value() > 0)
+          T = (ub.value() - lb.value()) / st.value();
+
+  // Dependence distance — Task 7 placeholder. Task 16 will implement memref
+  // base distinctness analysis. For now: assume infinite (no dep).
+  int64_t Ld = std::numeric_limits<int64_t>::max();
+
+  int64_t L_strip = 1;
+  bool sawConstraining = false;
+  for (const auto &cls : a.classes) {
+    int64_t R_T = getRegisterLanesForType(target, cls.elementBytes);
+    int64_t Ln;
+    if (cls.kind == lego::AccessKind::Unit) {
+      Ln = std::min({R_T, T, Ld});
+      sawConstraining = true;
+    } else if (cls.kind == lego::AccessKind::Broadcast) {
+      // Doesn't constrain L_strip; skip.
+      continue;
+    } else {
+      // Strided / NonAffine / CrossBlock — not handled in Task 7.
+      // Tasks 14-15 will handle gather/strided emission.
+      return 1;
+    }
+    if (Ln <= 1) return 1;
+    L_strip = (L_strip == 1) ? Ln : lcm_i64(L_strip, Ln);
+  }
+  if (!sawConstraining) return 1;  // all Broadcasts — nothing to vectorize.
+  return L_strip;
 }
 
 class LegoVectorizePass
@@ -262,10 +346,17 @@ class LegoVectorizePass
         if (t && t.isIntOrFloat()) elemBytes = t.getIntOrFloatBitWidth() / 8;
         a.classes.push_back(lego::solveAccessTierA(op, iv, elemBytes));
       }
+
+      // Task 4 didn't expose a TableGen `target` option (GCC brace-init issue),
+      // so we hard-code "avx512" here. When Task 17 adds the
+      // LegoX86VectorPipeline, it can override via pipeline options if needed;
+      // for the v1 pass-only path, AVX-512 is the default.
+      llvm::StringRef target = "avx512";
+      a.L_strip = computeStripMineFactor(a, target);
     }
 
-    // Phase-B Task 7-9 will use `loops` for strip-mine factor + scoring + rewrite.
-    // Task 6 stops here — the analysis is collected but not yet used.
+    // Phase-B Task 8-9 will use `loops` for scoring + rewrite.
+    // Task 7 stops here — L_strip is computed but IR is not yet mutated.
   }
 };
 
