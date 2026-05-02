@@ -378,6 +378,34 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
   IRMapping mapping;
   mapping.map(origLoop.getInductionVar(), newIv);
 
+  // Pre-pass: identify loop-invariant scalar SSA values used in the body and
+  // pre-broadcast them to vector<L_strip x T>.
+  DenseMap<Value, Value> broadcastMap;
+  auto isOutsideLoop = [&](Value v) {
+    Operation *defOp = v.getDefiningOp();
+    if (!defOp) {
+      // Block argument. If it's the loop's IV, it's not "outside" — skip.
+      if (v == origLoop.getInductionVar()) return false;
+      return true;  // function argument or outer block arg.
+    }
+    return !origLoop->isAncestor(defOp);
+  };
+
+  for (Operation &op : origLoop.getBody()->getOperations()) {
+    for (Value operand : op.getOperands()) {
+      if (!isOutsideLoop(operand)) continue;
+      if (broadcastMap.contains(operand)) continue;
+      Type t = operand.getType();
+      if (!t.isIntOrFloat()) continue;  // only broadcast scalars
+      auto vecTy = VectorType::get({L_strip}, t);
+      Value bc = vector::BroadcastOp::create(builder, loc, vecTy, operand);
+      broadcastMap[operand] = bc;
+    }
+  }
+
+  // Apply broadcasts via the IRMapping so cloned operands resolve to vectors.
+  for (auto &[scalar, vec] : broadcastMap) mapping.map(scalar, vec);
+
   for (Operation &op : origLoop.getBody()->getOperations()) {
     if (isa<scf::YieldOp>(op))
       continue;  // vecLoop already has its own yield
@@ -409,7 +437,7 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
                                                clonedLoad->getResult(0));
         mapping.map(load.getResult(), bc);
       } else {
-        // Shouldn't reach here — caller filters on hasNonAccessNonYield.
+        // Shouldn't reach here for vectorizable loops.
         Operation *cloned = builder.clone(*load.getOperation(), mapping);
         mapping.map(load.getResult(), cloned->getResult(0));
       }
@@ -432,9 +460,20 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
         builder.clone(*store.getOperation(), mapping);
       }
     } else {
-      // Pass-through for arith and any other scalar ops.
-      // Task 9 will vectorize arith operations.
-      builder.clone(op, mapping);
+      // Pass-through cloning, with vector type promotion for arith ops.
+      Operation *cloned = builder.clone(op, mapping);
+      // Promote scalar result types to vector<L_strip x T>.
+      for (OpResult res : cloned->getResults()) {
+        Type t = res.getType();
+        if (dyn_cast<VectorType>(t)) continue;  // already a vector
+        if (!t.isIntOrFloat()) continue;         // skip index, memref, etc.
+        res.setType(VectorType::get({L_strip}, t));
+      }
+      // Map original results to cloned results (now vector-typed).
+      for (auto [origRes, newRes] :
+           llvm::zip(op.getResults(), cloned->getResults())) {
+        mapping.map(origRes, newRes);
+      }
     }
   }
 }
@@ -493,15 +532,17 @@ class LegoVectorizePass
       // Task 8: strip-mine + emit vector.transfer_read/write.
       if (a.L_strip <= 1) continue;
 
-      // Task 8 only handles pure load/store kernels. If the body has arith
-      // or other ops beyond load/store/yield, skip (Task 9 handles those).
-      bool hasNonAccessNonYield = false;
+      // Body must contain only memref.load/store, arith ops, and scf.yield.
+      // Anything else → skip (future tasks will widen the allowlist).
+      bool bodyOK = true;
       for (Operation &op : a.forOp.getBody()->getOperations()) {
         if (isa<memref::LoadOp, memref::StoreOp, scf::YieldOp>(op)) continue;
-        hasNonAccessNonYield = true;
+        if (op.getDialect() &&
+            isa<arith::ArithDialect>(op.getDialect())) continue;
+        bodyOK = false;
         break;
       }
-      if (hasNonAccessNonYield) continue;
+      if (!bodyOK) continue;
 
       OpBuilder builder(a.forOp);
       StripMineResult mined = stripMineForOp(a.forOp, a.L_strip, builder);

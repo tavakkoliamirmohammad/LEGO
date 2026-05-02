@@ -27,3 +27,25 @@ func.func @row_major_unit_stride(%A: memref<1024xf64>, %B: memref<1024xf64>) {
   }
   return
 }
+
+// -----
+
+// SAXPY-style kernel: y[i] = a*x[i] + y[i]. Vectorized at L=8 for AVX-512 f64.
+// CHECK-LABEL: func.func @saxpy
+// CHECK: vector.broadcast {{.*}} : f64 to vector<8xf64>
+// CHECK: vector.transfer_read {{.*}} : memref<?xf64>, vector<8xf64>
+// CHECK: arith.mulf {{.*}} : vector<8xf64>
+// CHECK: arith.addf {{.*}} : vector<8xf64>
+// CHECK: vector.transfer_write {{.*}} : vector<8xf64>, memref<?xf64>
+func.func @saxpy(%a: f64, %X: memref<?xf64>, %Y: memref<?xf64>, %N: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %N step %c1 {
+    %xi = memref.load %X[%i] : memref<?xf64>
+    %yi = memref.load %Y[%i] : memref<?xf64>
+    %p  = arith.mulf %a, %xi : f64
+    %s  = arith.addf %p, %yi : f64
+    memref.store %s, %Y[%i] : memref<?xf64>
+  }
+  return
+}
