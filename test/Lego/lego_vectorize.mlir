@@ -49,3 +49,33 @@ func.func @saxpy(%a: f64, %X: memref<?xf64>, %Y: memref<?xf64>, %N: index) {
   }
   return
 }
+
+// -----
+
+// Mixed precision: load f32, extf to f64, accumulate into f64.
+// L_strip = lcm(16, 8) = 16. f32 load at width 16, extf produces TWO f64
+// sub-vectors at width 8 each, then two f64 stores.
+// CHECK-LABEL: func.func @mixed_precision
+// CHECK: vector.transfer_read {{.*}} : memref<?xf32>, vector<16xf32>
+// CHECK: vector.extract_strided_slice {{.*}} {offsets = [0]
+// CHECK: vector.extract_strided_slice {{.*}} {offsets = [8]
+// CHECK: arith.extf {{.*}} : vector<8xf32> to vector<8xf64>
+// CHECK: arith.extf {{.*}} : vector<8xf32> to vector<8xf64>
+// CHECK: vector.transfer_read {{.*}} : memref<?xf64>, vector<8xf64>
+// CHECK: vector.transfer_read {{.*}} : memref<?xf64>, vector<8xf64>
+// CHECK: arith.addf {{.*}} : vector<8xf64>
+// CHECK: arith.addf {{.*}} : vector<8xf64>
+// CHECK: vector.transfer_write {{.*}} : vector<8xf64>, memref<?xf64>
+// CHECK: vector.transfer_write {{.*}} : vector<8xf64>, memref<?xf64>
+func.func @mixed_precision(%X: memref<?xf32>, %C: memref<?xf64>, %N: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %N step %c1 {
+    %xi32 = memref.load %X[%i] : memref<?xf32>
+    %xi64 = arith.extf %xi32 : f32 to f64
+    %ci = memref.load %C[%i] : memref<?xf64>
+    %s = arith.addf %ci, %xi64 : f64
+    memref.store %s, %C[%i] : memref<?xf64>
+  }
+  return
+}

@@ -365,7 +365,8 @@ static StripMineResult stripMineForOp(scf::ForOp forOp, int64_t L,
 /// For each memref.load/store in the original body that has unit-stride
 /// classification, emit vector.transfer_read / vector.transfer_write.
 /// Broadcast loads get cloned as scalar then vector.broadcast.
-/// Everything else passes through scalar (Task 9 handles arith vectorization).
+/// Mixed-precision: when an access has element width < L_strip, emit
+/// (L_strip / Ln_access) sub-vector ops at sequential offsets.
 static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
                            int64_t L_strip,
                            ArrayRef<Operation *> accesses,
@@ -378,15 +379,47 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
   IRMapping mapping;
   mapping.map(origLoop.getInductionVar(), newIv);
 
+  // Hard-coded target (matches Task 7 / Task 8 behaviour).
+  llvm::StringRef target = "avx512";
+
+  // Per-access natural lane width.
+  auto getLnForAccess = [&](size_t idx) -> int64_t {
+    return getRegisterLanesForType(target, classes[idx].elementBytes);
+  };
+
+  // Sub-vector tracking: for each original Value, store the list of
+  // sub-vectors that cover the L_strip-wide span.  When Ln == L_strip the
+  // list has exactly one element (the full-width vector); when Ln < L_strip
+  // the list has L_strip/Ln elements at offsets 0, Ln, 2*Ln, …
+  DenseMap<Value, SmallVector<Value>> subVectorMap;
+
+  // Helper: return the sub-vector list for an original operand.
+  // Falls back to a 1-element list containing the IRMapping result.
+  auto getSubsFor = [&](Value origOperand) -> SmallVector<Value> {
+    if (auto it = subVectorMap.find(origOperand); it != subVectorMap.end())
+      return it->second;
+    return {mapping.lookupOrDefault(origOperand)};
+  };
+
+  // Helper: build an index Value for (baseIv + j * Ln), or just baseIv if j==0.
+  auto makeOffset = [&](Value baseIv, int64_t j, int64_t Ln) -> Value {
+    if (j == 0) return baseIv;
+    Value addend = arith::ConstantIndexOp::create(builder, loc, j * Ln);
+    return arith::AddIOp::create(builder, loc, baseIv, addend);
+  };
+
   // Pre-pass: identify loop-invariant scalar SSA values used in the body and
-  // pre-broadcast them to vector<L_strip x T>.
+  // pre-broadcast them.  For mixed-precision we broadcast to the *result*
+  // element width; here we only broadcast function-arg scalars that appear
+  // directly as operands to arith ops, before any width-changing op.
+  // We broadcast to L_strip width so that the arith "catch-all" branch can
+  // then slice them down when Ln_result < L_strip.
   DenseMap<Value, Value> broadcastMap;
   auto isOutsideLoop = [&](Value v) {
     Operation *defOp = v.getDefiningOp();
     if (!defOp) {
-      // Block argument. If it's the loop's IV, it's not "outside" — skip.
       if (v == origLoop.getInductionVar()) return false;
-      return true;  // function argument or outer block arg.
+      return true;
     }
     return !origLoop->isAncestor(defOp);
   };
@@ -396,84 +429,187 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
       if (!isOutsideLoop(operand)) continue;
       if (broadcastMap.contains(operand)) continue;
       Type t = operand.getType();
-      if (!t.isIntOrFloat()) continue;  // only broadcast scalars
+      if (!t.isIntOrFloat()) continue;
+      // Broadcast to L_strip; arith catch-all will slice if needed.
       auto vecTy = VectorType::get({L_strip}, t);
       Value bc = vector::BroadcastOp::create(builder, loc, vecTy, operand);
       broadcastMap[operand] = bc;
     }
   }
-
-  // Apply broadcasts via the IRMapping so cloned operands resolve to vectors.
   for (auto &[scalar, vec] : broadcastMap) mapping.map(scalar, vec);
 
   for (Operation &op : origLoop.getBody()->getOperations()) {
     if (isa<scf::YieldOp>(op))
       continue;  // vecLoop already has its own yield
 
+    // -----------------------------------------------------------------------
+    // memref.load
+    // -----------------------------------------------------------------------
     if (auto load = dyn_cast<memref::LoadOp>(&op)) {
       auto it = std::find(accesses.begin(), accesses.end(), &op);
       assert(it != accesses.end() && "load not found in accesses");
-      const auto &cls = classes[it - accesses.begin()];
+      size_t idx = it - accesses.begin();
+      const auto &cls = classes[idx];
 
       if (cls.kind == lego::AccessKind::Unit) {
+        int64_t Ln = getLnForAccess(idx);
+        int64_t numSubOps = L_strip / Ln;
         Type elemTy = load.getType();
-        auto vecTy = VectorType::get({L_strip}, elemTy);
-        SmallVector<Value> indices;
-        for (Value idxv : load.getIndices())
-          indices.push_back(mapping.lookupOrDefault(idxv));
-        // Use builder overload #3: auto-computes minor-identity permMap,
-        // no padding argument needed (defaults to poison), inBounds = true.
-        auto vec = vector::TransferReadOp::create(
-            builder, loc, vecTy, load.getMemRef(), indices,
-            /*padding=*/std::nullopt,
-            /*inBounds=*/ArrayRef<bool>{true});
-        mapping.map(load.getResult(), vec.getVector());
+        auto vecTy = VectorType::get({Ln}, elemTy);
+        Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
+
+        SmallVector<Value> subs;
+        subs.reserve(numSubOps);
+        for (int64_t j = 0; j < numSubOps; ++j) {
+          Value off = makeOffset(baseIv, j, Ln);
+          auto subVec = vector::TransferReadOp::create(
+              builder, loc, vecTy, load.getMemRef(), ValueRange{off},
+              /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
+          subs.push_back(subVec.getVector());
+        }
+        // If numSubOps == 1, we emitted a single vector at Ln == L_strip.
+        // Also map the first sub-vector into IRMapping so that consumers that
+        // look up via mapping (e.g. broadcast loads) still work.
+        mapping.map(load.getResult(), subs[0]);
+        subVectorMap[load.getResult()] = std::move(subs);
       } else if (cls.kind == lego::AccessKind::Broadcast) {
-        // Loop-invariant load — clone as scalar then broadcast.
+        // Loop-invariant load — clone as scalar then broadcast to L_strip.
         Operation *clonedLoad = builder.clone(*load.getOperation(), mapping);
         Type elemTy = load.getType();
         auto vecTy = VectorType::get({L_strip}, elemTy);
         Value bc = vector::BroadcastOp::create(builder, loc, vecTy,
                                                clonedLoad->getResult(0));
         mapping.map(load.getResult(), bc);
+        subVectorMap[load.getResult()] = {bc};
       } else {
         // Shouldn't reach here for vectorizable loops.
         Operation *cloned = builder.clone(*load.getOperation(), mapping);
         mapping.map(load.getResult(), cloned->getResult(0));
       }
+
+    // -----------------------------------------------------------------------
+    // memref.store
+    // -----------------------------------------------------------------------
     } else if (auto store = dyn_cast<memref::StoreOp>(&op)) {
       auto it = std::find(accesses.begin(), accesses.end(), &op);
       assert(it != accesses.end() && "store not found in accesses");
-      const auto &cls = classes[it - accesses.begin()];
+      size_t idx = it - accesses.begin();
+      const auto &cls = classes[idx];
 
       if (cls.kind == lego::AccessKind::Unit) {
-        Value valToStore = mapping.lookupOrDefault(store.getValue());
-        SmallVector<Value> indices;
-        for (Value idxv : store.getIndices())
-          indices.push_back(mapping.lookupOrDefault(idxv));
-        // Use builder overload #4: auto-computes minor-identity permMap,
-        // inBounds = true.
-        vector::TransferWriteOp::create(
-            builder, loc, valToStore, store.getMemRef(), indices,
-            /*inBounds=*/ArrayRef<bool>{true});
+        int64_t Ln = getLnForAccess(idx);
+        int64_t numSubOps = L_strip / Ln;
+        auto subs = getSubsFor(store.getValue());
+
+        if ((int64_t)subs.size() == numSubOps) {
+          Value baseIv = mapping.lookupOrDefault(store.getIndices().front());
+          for (int64_t j = 0; j < numSubOps; ++j) {
+            Value off = makeOffset(baseIv, j, Ln);
+            vector::TransferWriteOp::create(
+                builder, loc, subs[j], store.getMemRef(), ValueRange{off},
+                /*inBounds=*/ArrayRef<bool>{true});
+          }
+        } else {
+          // Sub-vector count mismatch — scalar fallback.
+          builder.clone(*store.getOperation(), mapping);
+        }
       } else {
         builder.clone(*store.getOperation(), mapping);
       }
+
+    // -----------------------------------------------------------------------
+    // arith (and any other) ops — mixed-precision aware pass-through
+    // -----------------------------------------------------------------------
     } else {
-      // Pass-through cloning, with vector type promotion for arith ops.
-      Operation *cloned = builder.clone(op, mapping);
-      // Promote scalar result types to vector<L_strip x T>.
-      for (OpResult res : cloned->getResults()) {
-        Type t = res.getType();
-        if (dyn_cast<VectorType>(t)) continue;  // already a vector
-        if (!t.isIntOrFloat()) continue;         // skip index, memref, etc.
-        res.setType(VectorType::get({L_strip}, t));
+      // For ops with no results or non-scalar/float results: clone unchanged.
+      if (op.getNumResults() != 1) {
+        builder.clone(op, mapping);
+        continue;
       }
-      // Map original results to cloned results (now vector-typed).
-      for (auto [origRes, newRes] :
-           llvm::zip(op.getResults(), cloned->getResults())) {
-        mapping.map(origRes, newRes);
+      Value origResult = op.getResult(0);
+      Type resTy = origResult.getType();
+
+      if (!resTy.isIntOrFloat()) {
+        // Index, memref, etc. — clone with mapping unchanged.
+        Operation *cloned = builder.clone(op, mapping);
+        mapping.map(origResult, cloned->getResult(0));
+        continue;
       }
+
+      // Determine target sub-width for the result.
+      int64_t resBytes = resTy.getIntOrFloatBitWidth() / 8;
+      int64_t Ln_result = getRegisterLanesForType(target, resBytes);
+      int64_t numSubOpsResult = L_strip / Ln_result;
+
+      // Build per-operand sub-vector lists aligned to Ln_result.
+      SmallVector<SmallVector<Value>> operandSubs;
+      bool sizingFailed = false;
+      for (Value operand : op.getOperands()) {
+        auto subs = getSubsFor(operand);
+        SmallVector<Value> sized;
+
+        if ((int64_t)subs.size() == numSubOpsResult) {
+          // Already the right number of pieces.
+          sized = subs;
+        } else if (subs.size() == 1) {
+          Value v = subs[0];
+          auto vecTy = dyn_cast<VectorType>(v.getType());
+          if (!vecTy) {
+            // Scalar — replicate for all sub-ops.
+            for (int64_t j = 0; j < numSubOpsResult; ++j) sized.push_back(v);
+          } else {
+            int64_t srcW = vecTy.getShape()[0];
+            if (srcW == Ln_result) {
+              sized.push_back(v);
+            } else if (srcW > Ln_result) {
+              // Wider vector — slice into Ln_result-wide pieces.
+              for (int64_t j = 0; j < numSubOpsResult; ++j) {
+                Value piece = vector::ExtractStridedSliceOp::create(
+                    builder, loc, v,
+                    /*offsets=*/ArrayRef<int64_t>{j * Ln_result},
+                    /*sizes=*/ArrayRef<int64_t>{Ln_result},
+                    /*strides=*/ArrayRef<int64_t>{1});
+                sized.push_back(piece);
+              }
+            } else {
+              // srcW < Ln_result: narrower than result (should not happen in
+              // well-formed Tier-A kernels; fall back to scalar clone).
+              sizingFailed = true;
+              break;
+            }
+          }
+        } else {
+          // Multi-piece operand list but wrong count: unsupported in v1.
+          sizingFailed = true;
+          break;
+        }
+        operandSubs.push_back(std::move(sized));
+      }
+
+      if (sizingFailed) {
+        // Conservative fallback: clone scalar.
+        Operation *cloned = builder.clone(op, mapping);
+        mapping.map(origResult, cloned->getResult(0));
+        continue;
+      }
+
+      // Emit numSubOpsResult instances of the op, each at sub-vector width.
+      Type subResTy = VectorType::get({Ln_result}, resTy);
+      SmallVector<Value> resultSubs;
+      resultSubs.reserve(numSubOpsResult);
+      for (int64_t j = 0; j < numSubOpsResult; ++j) {
+        SmallVector<Value> opOperands;
+        for (auto &operandList : operandSubs) opOperands.push_back(operandList[j]);
+        OperationState state(loc, op.getName());
+        state.addOperands(opOperands);
+        state.addAttributes(op.getAttrs());
+        state.addTypes(subResTy);
+        Operation *newOp = builder.create(state);
+        resultSubs.push_back(newOp->getResult(0));
+      }
+      // Map first sub-vector for backward compat with scalar consumers.
+      mapping.map(origResult, resultSubs[0]);
+      subVectorMap[origResult] = std::move(resultSubs);
     }
   }
 }
