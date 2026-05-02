@@ -123,3 +123,37 @@ def write_and_exec_temp_file(new_source, tree, original_fn, return_source=False)
         co_filename=temp_file)
 
     return namespace, transformed_fn
+
+
+# ---------------------------------------------------------------------------
+# Decorator-chain unwrap helpers (shared by all DSL adapters)
+# ---------------------------------------------------------------------------
+
+def try_fn_chain_unwrap(fn):
+    """Walk .fn chain (Triton-style). Returns (innermost, wrappers_outer_to_inner)."""
+    wrappers = []
+    while hasattr(fn, 'fn'):
+        wrappers.append(fn)
+        fn = fn.fn
+    return fn, wrappers
+
+
+def try_py_func_unwrap(fn):
+    """Numba-style py_func attribute. Returns (innermost, [wrapper] or [])."""
+    if hasattr(fn, 'py_func'):
+        return fn.py_func, [fn]
+    return fn, []
+
+
+def try_wrapped_unwrap(fn):
+    """functools-style __wrapped__ attribute. Returns (innermost, [wrapper] or [])."""
+    if hasattr(fn, '__wrapped__'):
+        return fn.__wrapped__, [fn]
+    return fn, []
+
+
+def walk_to_source_fn(fn):
+    """Follow .src_fn chain to the bottom. Returns the innermost fn."""
+    while hasattr(fn, 'src_fn'):
+        fn = fn.src_fn
+    return fn
