@@ -249,21 +249,15 @@ Cross-brick stencil reads (the `A[i, j, k+1]` pattern crossing brick boundaries 
 
 ## 7. Risks and open questions
 
-### 7.1 Canonicalization quality
-
-The accuracy of the analysis hinges on how well `arith` canonicalization simplifies the substituted-and-subtracted expression `addr(iv+k) - addr(iv)`. For Row/TileBy/Brick this is straightforward. For unusual user-defined `gen_p` ops with non-trivial apply-region bodies, simplification may stall and the access classifies as `non_affine` even when human inspection would say it's vectorizable. **Mitigation:** add layout-aware canonicalization patterns over time; document which `gen_p` shapes the analysis recognizes.
-
-### 7.2 Mixed-precision shape transitions
+### 7.1 Mixed-precision shape transitions
 
 The `vector.extract_strided_slice` / `vector.insert_strided_slice` infrastructure is upstream-stable but rarely exercised in LEGO. The shape-cast patterns may need debugging when first integrated. **Mitigation:** the FileCheck test for the mixed f32/f64 case is part of v1 acceptance.
 
-### 7.3 Trip count when not statically known
+### 7.2 Trip count when not statically known
 
 For dynamically-sized loops, `T` is unknown at compile time. The analysis falls back to `Ln = min(R_T, Ld)` and emits a residual scalar tail. LLVM optimizes the tail well; this is not a correctness risk but may be a performance risk if the residual fraction is non-trivial relative to the main loop. **Mitigation:** the proof-point benchmark uses static sizes; future autotune work (separate roadmap item) will explore residual minimization.
 
-### 7.4 Coexistence with existing JIT path
-
-The existing `--lego-to-llvm` pipeline produces scalar code and is the default for `LayoutCompiler.compile()`. Switching the default to `--lego-to-x86-vector` is **out of scope for this spec** — `cpu_tile_jit` is opt-in. After validation, a follow-up may switch the JIT default to the vectorizing pipeline; that is a separate change.
+**Note on canonicalization quality.** Not a risk: by the time `lego-vectorize` runs, `buildLegoLowerPipeline` has already executed two rounds of `LegoToArith` plus fixed-point arith canonicalization, integer-range analysis, CSE, and strength reduction. The synthesized `addr(iv+k) - addr(iv)` expression operates on already-canonical arith, so simplification quality is a property of the upstream pipeline (well-tested) rather than something this spec needs to guarantee.
 
 ## 8. Acceptance criteria
 
