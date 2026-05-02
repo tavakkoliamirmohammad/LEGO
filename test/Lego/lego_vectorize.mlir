@@ -10,11 +10,12 @@ func.func @noop_passthrough(%a: i32, %b: i32) -> i32 {
 
 // -----
 
-// A trivially unit-stride access: addr = iv (each i64 = 8 bytes)
+// A trivially unit-stride access: addr = iv (each f64 = 8 bytes).
+// AVX-512 default → L_strip = 64/8 = 8 → vector<8xf64>.
+// Task 8 emits a vector loop + scalar tail; both must appear in output.
 // CHECK-LABEL: func.func @row_major_unit_stride
-// CHECK: scf.for
-// CHECK: memref.load
-// CHECK: memref.store
+// CHECK: vector.transfer_read {{.*}} : memref<1024xf64>, vector<8xf64>
+// CHECK: vector.transfer_write {{.*}} : vector<8xf64>, memref<1024xf64>
 // CHECK: return
 func.func @row_major_unit_stride(%A: memref<1024xf64>, %B: memref<1024xf64>) {
   %c0 = arith.constant 0 : index

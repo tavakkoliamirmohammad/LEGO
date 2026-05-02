@@ -4,8 +4,8 @@
 // dialect ops by symbolic stride analysis. Layout-agnostic: operates on
 // post-LegoToArith IR (arith + memref + scf).
 //
-// Phase B (Tasks 5-10) fills in the actual stride analysis and vectorization
-// rewrites. This scaffold registers the pass and leaves IR unchanged.
+// Phase B Tasks 5-7: stride analysis + strip-mine factor computation.
+// Phase B Task 8:    emit vector.transfer_read/write for unit-stride loops.
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,8 +19,10 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 
+#include <algorithm>  // std::find
 #include <limits>
 #include <numeric>  // std::gcd (C++17)
 
@@ -323,6 +325,134 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
   return L_strip;
 }
 
+// ---------------------------------------------------------------------------
+// Task 8: Strip-mining + vector.transfer_read/write emission.
+// ---------------------------------------------------------------------------
+
+struct StripMineResult {
+  scf::ForOp vecLoop;
+  scf::ForOp tailLoop;
+};
+
+/// Strip-mines `forOp` by L: produces a vec loop with step*L and a tail loop
+/// covering (trip mod L) remaining iterations.  Both loops are inserted
+/// before `forOp`; the caller is responsible for erasing `forOp` after
+/// populating their bodies.
+static StripMineResult stripMineForOp(scf::ForOp forOp, int64_t L,
+                                      OpBuilder &builder) {
+  Location loc = forOp.getLoc();
+  builder.setInsertionPoint(forOp);
+  Value lb = forOp.getLowerBound();
+  Value ub = forOp.getUpperBound();
+  Value origStep = forOp.getStep();
+
+  Value Lval = arith::ConstantIndexOp::create(builder, loc, L);
+  Value newStep = arith::MulIOp::create(builder, loc, origStep, Lval);
+
+  // alignedSpan = floor((ub - lb) / newStep) * newStep
+  Value extent = arith::SubIOp::create(builder, loc, ub, lb);
+  Value q = arith::DivUIOp::create(builder, loc, extent, newStep);
+  Value alignedSpan = arith::MulIOp::create(builder, loc, q, newStep);
+  Value alignedUb = arith::AddIOp::create(builder, loc, lb, alignedSpan);
+
+  auto vecLoop = scf::ForOp::create(builder, loc, lb, alignedUb, newStep);
+  auto tailLoop = scf::ForOp::create(builder, loc, alignedUb, ub, origStep);
+
+  return {vecLoop, tailLoop};
+}
+
+/// Populate `vecLoop`'s body.
+/// For each memref.load/store in the original body that has unit-stride
+/// classification, emit vector.transfer_read / vector.transfer_write.
+/// Broadcast loads get cloned as scalar then vector.broadcast.
+/// Everything else passes through scalar (Task 9 handles arith vectorization).
+static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
+                           int64_t L_strip,
+                           ArrayRef<Operation *> accesses,
+                           ArrayRef<lego::AccessClassification> classes,
+                           OpBuilder &builder) {
+  Location loc = origLoop.getLoc();
+  Value newIv = vecLoop.getInductionVar();
+  builder.setInsertionPointToStart(vecLoop.getBody());
+
+  IRMapping mapping;
+  mapping.map(origLoop.getInductionVar(), newIv);
+
+  for (Operation &op : origLoop.getBody()->getOperations()) {
+    if (isa<scf::YieldOp>(op))
+      continue;  // vecLoop already has its own yield
+
+    if (auto load = dyn_cast<memref::LoadOp>(&op)) {
+      auto it = std::find(accesses.begin(), accesses.end(), &op);
+      assert(it != accesses.end() && "load not found in accesses");
+      const auto &cls = classes[it - accesses.begin()];
+
+      if (cls.kind == lego::AccessKind::Unit) {
+        Type elemTy = load.getType();
+        auto vecTy = VectorType::get({L_strip}, elemTy);
+        SmallVector<Value> indices;
+        for (Value idxv : load.getIndices())
+          indices.push_back(mapping.lookupOrDefault(idxv));
+        // Use builder overload #3: auto-computes minor-identity permMap,
+        // no padding argument needed (defaults to poison), inBounds = true.
+        auto vec = vector::TransferReadOp::create(
+            builder, loc, vecTy, load.getMemRef(), indices,
+            /*padding=*/std::nullopt,
+            /*inBounds=*/ArrayRef<bool>{true});
+        mapping.map(load.getResult(), vec.getVector());
+      } else if (cls.kind == lego::AccessKind::Broadcast) {
+        // Loop-invariant load — clone as scalar then broadcast.
+        Operation *clonedLoad = builder.clone(*load.getOperation(), mapping);
+        Type elemTy = load.getType();
+        auto vecTy = VectorType::get({L_strip}, elemTy);
+        Value bc = vector::BroadcastOp::create(builder, loc, vecTy,
+                                               clonedLoad->getResult(0));
+        mapping.map(load.getResult(), bc);
+      } else {
+        // Shouldn't reach here — caller filters on hasNonAccessNonYield.
+        Operation *cloned = builder.clone(*load.getOperation(), mapping);
+        mapping.map(load.getResult(), cloned->getResult(0));
+      }
+    } else if (auto store = dyn_cast<memref::StoreOp>(&op)) {
+      auto it = std::find(accesses.begin(), accesses.end(), &op);
+      assert(it != accesses.end() && "store not found in accesses");
+      const auto &cls = classes[it - accesses.begin()];
+
+      if (cls.kind == lego::AccessKind::Unit) {
+        Value valToStore = mapping.lookupOrDefault(store.getValue());
+        SmallVector<Value> indices;
+        for (Value idxv : store.getIndices())
+          indices.push_back(mapping.lookupOrDefault(idxv));
+        // Use builder overload #4: auto-computes minor-identity permMap,
+        // inBounds = true.
+        vector::TransferWriteOp::create(
+            builder, loc, valToStore, store.getMemRef(), indices,
+            /*inBounds=*/ArrayRef<bool>{true});
+      } else {
+        builder.clone(*store.getOperation(), mapping);
+      }
+    } else {
+      // Pass-through for arith and any other scalar ops.
+      // Task 9 will vectorize arith operations.
+      builder.clone(op, mapping);
+    }
+  }
+}
+
+/// Clone the entire original body verbatim into the tail loop (scalar
+/// fallback for the (trip mod L) remaining iterations).
+static void emitTailBody(scf::ForOp tailLoop, scf::ForOp origLoop,
+                         OpBuilder &builder) {
+  builder.setInsertionPointToStart(tailLoop.getBody());
+  IRMapping mapping;
+  mapping.map(origLoop.getInductionVar(), tailLoop.getInductionVar());
+  for (Operation &op : origLoop.getBody()->getOperations()) {
+    if (isa<scf::YieldOp>(op))
+      continue;
+    builder.clone(op, mapping);
+  }
+}
+
 class LegoVectorizePass
     : public mlir::lego::impl::LegoVectorizePassBase<LegoVectorizePass> {
  public:
@@ -333,11 +463,17 @@ class LegoVectorizePass
     func::FuncOp func = getOperation();
     auto loops = collectCandidateLoops(func);
 
+    // Collect which loops to erase after the transform loop (cannot erase
+    // while iterating if the list contains nested loops, but Task 8 handles
+    // only flat single-level loops that are not nested — safe to erase
+    // immediately after body population since we iterated by value).
+    llvm::SmallVector<scf::ForOp> toErase;
+
     for (auto &a : loops) {
       Value iv = a.forOp.getInductionVar();
       a.classes.reserve(a.accesses.size());
       for (Operation *op : a.accesses) {
-        // Determine elementBytes from the op's element type (default to 8 for f64).
+        // Determine elementBytes from the op's element type (default 8 = f64).
         int64_t elemBytes = 8;
         Type t;
         if (auto load = dyn_cast<memref::LoadOp>(op)) t = load.getType();
@@ -353,10 +489,31 @@ class LegoVectorizePass
       // for the v1 pass-only path, AVX-512 is the default.
       llvm::StringRef target = "avx512";
       a.L_strip = computeStripMineFactor(a, target);
+
+      // Task 8: strip-mine + emit vector.transfer_read/write.
+      if (a.L_strip <= 1) continue;
+
+      // Task 8 only handles pure load/store kernels. If the body has arith
+      // or other ops beyond load/store/yield, skip (Task 9 handles those).
+      bool hasNonAccessNonYield = false;
+      for (Operation &op : a.forOp.getBody()->getOperations()) {
+        if (isa<memref::LoadOp, memref::StoreOp, scf::YieldOp>(op)) continue;
+        hasNonAccessNonYield = true;
+        break;
+      }
+      if (hasNonAccessNonYield) continue;
+
+      OpBuilder builder(a.forOp);
+      StripMineResult mined = stripMineForOp(a.forOp, a.L_strip, builder);
+      emitVectorBody(mined.vecLoop, a.forOp, a.L_strip,
+                     a.accesses, a.classes, builder);
+      emitTailBody(mined.tailLoop, a.forOp, builder);
+      toErase.push_back(a.forOp);
     }
 
-    // Phase-B Task 8-9 will use `loops` for scoring + rewrite.
-    // Task 7 stops here — L_strip is computed but IR is not yet mutated.
+    // Erase original loops after all transforms are complete.
+    for (scf::ForOp op : toErase)
+      op.erase();
   }
 };
 
