@@ -218,6 +218,157 @@ AccessClassification solveAccessTierA(Operation *memrefOp, Value iv,
 }  // namespace mlir::lego
 
 // ---------------------------------------------------------------------------
+// Tier-B speculative-unroll evaluator
+// ---------------------------------------------------------------------------
+namespace {
+
+// Concrete-evaluation of an integer-arith DAG: given that the value of `iv`
+// is fixed at `ivVal`, returns the concrete int64_t result of evaluating
+// `root`, or std::nullopt if any node can't be evaluated (e.g. depends on
+// non-iv block args, has a non-supported op).
+static std::optional<int64_t>
+concreteEvaluate(Value root, Value iv, int64_t ivVal,
+                 llvm::DenseMap<Value, std::optional<int64_t>> &cache) {
+  if (auto it = cache.find(root); it != cache.end()) return it->second;
+  std::optional<int64_t> result;
+
+  if (root == iv) {
+    result = ivVal;
+    cache[root] = result;
+    return result;
+  }
+  Operation *defOp = root.getDefiningOp();
+  if (!defOp) {
+    // Other block argument — not evaluable.
+    cache[root] = std::nullopt;
+    return std::nullopt;
+  }
+
+  // Constants.
+  if (auto cst = dyn_cast<arith::ConstantIndexOp>(defOp)) {
+    result = cst.value();
+  } else if (auto cst = dyn_cast<arith::ConstantOp>(defOp)) {
+    if (auto ia = dyn_cast<IntegerAttr>(cst.getValue())) {
+      result = ia.getInt();
+    }
+  // Binary integer ops.
+  } else if (defOp->getNumOperands() == 2 && defOp->getNumResults() == 1) {
+    auto a = concreteEvaluate(defOp->getOperand(0), iv, ivVal, cache);
+    auto b = concreteEvaluate(defOp->getOperand(1), iv, ivVal, cache);
+    if (a && b) {
+      if (isa<arith::AddIOp>(defOp))          result = *a + *b;
+      else if (isa<arith::SubIOp>(defOp))     result = *a - *b;
+      else if (isa<arith::MulIOp>(defOp))     result = *a * *b;
+      else if (isa<arith::DivUIOp>(defOp) && *b != 0)
+        result = (int64_t)((uint64_t)*a / (uint64_t)*b);
+      else if (isa<arith::DivSIOp>(defOp) && *b != 0) result = *a / *b;
+      else if (isa<arith::RemUIOp>(defOp) && *b != 0)
+        result = (int64_t)((uint64_t)*a % (uint64_t)*b);
+      else if (isa<arith::RemSIOp>(defOp) && *b != 0) result = *a % *b;
+      else if (isa<arith::ShLIOp>(defOp))     result = *a << *b;
+      else if (isa<arith::ShRUIOp>(defOp))
+        result = (int64_t)((uint64_t)*a >> *b);
+      else if (isa<arith::ShRSIOp>(defOp))    result = *a >> *b;
+      else if (isa<arith::AndIOp>(defOp))     result = *a & *b;
+      else if (isa<arith::OrIOp>(defOp))      result = *a | *b;
+      else if (isa<arith::XOrIOp>(defOp))     result = *a ^ *b;
+      // Otherwise: unsupported, leave result as nullopt.
+    }
+  } else if (isa<arith::IndexCastOp, arith::IndexCastUIOp>(defOp)) {
+    result = concreteEvaluate(defOp->getOperand(0), iv, ivVal, cache);
+  }
+  // (Add more ops as needed — the above covers most LEGO-generated index arithmetic.)
+
+  cache[root] = result;
+  return result;
+}
+
+}  // anonymous namespace
+
+namespace mlir::lego {
+
+AccessClassification solveAccessTierB(Operation *memrefOp, Value iv,
+                                      int64_t elementBytes, int64_t L) {
+  AccessClassification cls;
+  cls.elementBytes = elementBytes;
+  cls.kind = AccessKind::NonAffine;
+
+  // Get the address index value (first index of memref.load/store).
+  Value addr;
+  if (auto load = dyn_cast<memref::LoadOp>(memrefOp)) {
+    if (!load.getIndices().empty()) addr = load.getIndices().front();
+  } else if (auto store = dyn_cast<memref::StoreOp>(memrefOp)) {
+    if (!store.getIndices().empty()) addr = store.getIndices().front();
+  }
+  if (!addr) return cls;
+
+  // Probe addr(iv = k) for k = 0..L-1.
+  // (For v1, baseline=0: matches the "starting iteration" of the strip-mined
+  // loop. The pattern test uses differences, so baseline only shifts all
+  // addresses uniformly — it doesn't change classification.)
+  llvm::DenseMap<Value, std::optional<int64_t>> cache;
+  llvm::SmallVector<int64_t, 16> addrs;
+  addrs.reserve(L);
+  for (int64_t k = 0; k < L; ++k) {
+    cache.clear();
+    auto v = concreteEvaluate(addr, iv, /*ivVal=*/k, cache);
+    if (!v) return cls;  // NonAffine — can't evaluate.
+    addrs.push_back(*v);
+  }
+  if ((int64_t)addrs.size() < 2) return cls;
+
+  // Compute consecutive differences and check uniformity.
+  int64_t firstStep = addrs[1] - addrs[0];
+  bool uniform = true;
+  int64_t boundary = -1;
+  int boundaryCount = 0;
+  for (size_t i = 1; i < addrs.size(); ++i) {
+    int64_t step = addrs[i] - addrs[i - 1];
+    if (step != firstStep) {
+      uniform = false;
+      if (boundaryCount == 0) boundary = (int64_t)i;
+      boundaryCount++;
+    }
+  }
+
+  if (uniform) {
+    if (firstStep == elementBytes) {
+      cls.kind = AccessKind::Unit;
+      cls.stride = elementBytes;
+    } else if (firstStep == 0) {
+      cls.kind = AccessKind::Broadcast;
+    } else {
+      cls.kind = AccessKind::Strided;
+      cls.stride = firstStep;
+    }
+    return cls;
+  }
+
+  // Cross-block detection: two contiguous runs of unit stride with one jump.
+  if (boundaryCount == 1) {
+    // Verify both segments have unit-stride (elementBytes per step).
+    bool segmentsUnit = true;
+    for (size_t i = 1; i < addrs.size(); ++i) {
+      if ((int64_t)i == boundary) continue;  // skip the jump step
+      if (addrs[i] - addrs[i - 1] != elementBytes) {
+        segmentsUnit = false;
+        break;
+      }
+    }
+    if (segmentsUnit) {
+      cls.kind = AccessKind::CrossBlock;
+      cls.boundary = boundary;
+      return cls;
+    }
+  }
+
+  // Otherwise: NonAffine.
+  return cls;
+}
+
+}  // namespace mlir::lego
+
+// ---------------------------------------------------------------------------
 // Pass implementation
 // ---------------------------------------------------------------------------
 namespace {
@@ -313,8 +464,12 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
     } else if (cls.kind == lego::AccessKind::Broadcast) {
       // Doesn't constrain L_strip; skip.
       continue;
+    } else if (cls.kind == lego::AccessKind::CrossBlock) {
+      // CrossBlock: emission lands in Task 12; use register lanes as L.
+      Ln = std::min({R_T, T, Ld});
+      sawConstraining = true;
     } else {
-      // Strided / NonAffine / CrossBlock — not handled in Task 7.
+      // Strided / NonAffine — not handled in Task 7.
       // Tasks 14-15 will handle gather/strided emission.
       return 1;
     }
@@ -647,6 +802,13 @@ class LegoVectorizePass
     for (auto &a : loops) {
       Value iv = a.forOp.getInductionVar();
       a.classes.reserve(a.accesses.size());
+
+      // Task 4 didn't expose a TableGen `target` option (GCC brace-init issue),
+      // so we hard-code "avx512" here. When Task 17 adds the
+      // LegoX86VectorPipeline, it can override via pipeline options if needed;
+      // for the v1 pass-only path, AVX-512 is the default.
+      llvm::StringRef target = "avx512";
+
       for (Operation *op : a.accesses) {
         // Determine elementBytes from the op's element type (default 8 = f64).
         int64_t elemBytes = 8;
@@ -655,15 +817,27 @@ class LegoVectorizePass
         else if (auto store = dyn_cast<memref::StoreOp>(op))
           t = store.getValue().getType();
         if (t && t.isIntOrFloat()) elemBytes = t.getIntOrFloatBitWidth() / 8;
-        a.classes.push_back(lego::solveAccessTierA(op, iv, elemBytes));
+
+        auto cls = lego::solveAccessTierA(op, iv, elemBytes);
+        if (cls.kind == lego::AccessKind::NonAffine) {
+          // Tier B fallback: speculative unroll at concrete iv values 0..L-1.
+          int64_t L_probe = getRegisterLanesForType(target, elemBytes);
+          cls = lego::solveAccessTierB(op, iv, elemBytes, L_probe);
+        }
+        a.classes.push_back(cls);
       }
 
-      // Task 4 didn't expose a TableGen `target` option (GCC brace-init issue),
-      // so we hard-code "avx512" here. When Task 17 adds the
-      // LegoX86VectorPipeline, it can override via pipeline options if needed;
-      // for the v1 pass-only path, AVX-512 is the default.
-      llvm::StringRef target = "avx512";
       a.L_strip = computeStripMineFactor(a, target);
+
+      // Task 11: classify CrossBlock but defer emission to Task 12.
+      bool hasCrossBlock = false;
+      for (const auto &c : a.classes) {
+        if (c.kind == lego::AccessKind::CrossBlock) {
+          hasCrossBlock = true;
+          break;
+        }
+      }
+      if (hasCrossBlock) continue;  // Task 12 will remove this guard.
 
       // Task 8: strip-mine + emit vector.transfer_read/write.
       if (a.L_strip <= 1) continue;

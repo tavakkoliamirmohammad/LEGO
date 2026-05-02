@@ -45,6 +45,22 @@ struct AccessClassification {
 AccessClassification solveAccessTierA(Operation *memrefOp, Value iv,
                                       int64_t elementBytes);
 
+// Speculative unroll: compute concrete addr(iv+0..L-1) for the given memref op,
+// classify based on the actual address sequence.
+//   - If all addresses differ by elementBytes from the previous: Unit.
+//   - If they form a constant-stride pattern (uniform but != elementBytes): Strided(c).
+//   - If the address is loop-invariant (all diffs == 0): Broadcast.
+//   - If they partition into exactly two contiguous runs of unit stride with
+//     a single jump between them: CrossBlock(boundary).
+//   - Otherwise: NonAffine.
+//
+// Layout-agnostic — uses the lightweight AffineVal evaluator from Tier A
+// extended to substitute concrete iv+k values.
+//
+// Like Tier A, this function does NOT mutate the input IR.
+AccessClassification solveAccessTierB(Operation *memrefOp, Value iv,
+                                      int64_t elementBytes, int64_t L);
+
 }  // namespace mlir::lego
 
 #endif  // LEGO_LIB_LEGOVECTORIZEUTILS_H
