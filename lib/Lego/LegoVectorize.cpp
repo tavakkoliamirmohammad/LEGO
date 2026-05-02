@@ -636,6 +636,64 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
                                                clonedLoad->getResult(0));
         mapping.map(load.getResult(), bc);
         subVectorMap[load.getResult()] = {bc};
+      } else if (cls.kind == lego::AccessKind::CrossBlock) {
+        // Two adjacent block reads + vector.shuffle.
+        //
+        // Cross-block pattern: addr(iv+0..L-1) is unit-stride for the first
+        // `boundary` lanes, then jumps to the next block for the remaining
+        // (L - boundary) lanes. Synthesise this by:
+        //   1. Reading L lanes from block N (starting at addr(0)).
+        //   2. Reading L lanes from block N+1 (starting at addr(boundary)).
+        //   3. vector.shuffle selects lanes [0..boundary) from blockN and
+        //      lanes [0..L-boundary) from blockNp1.
+        //
+        // v1 restriction: only handle the case where Ln == L_strip.
+        // If CrossBlock is combined with mixed-precision (Ln < L_strip),
+        // fall through to the scalar-clone fallback.
+        int64_t Ln = getLnForAccess(idx);
+        if (Ln == L_strip) {
+          int64_t boundary = cls.boundary;
+          Type elemTy = load.getType();
+          auto vecTy = VectorType::get({Ln}, elemTy);
+          Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
+
+          // Index for block N+1 base: baseIv + boundary.
+          Value boundaryConst =
+              arith::ConstantIndexOp::create(builder, loc, boundary);
+          Value blockNp1Iv =
+              arith::AddIOp::create(builder, loc, baseIv, boundaryConst);
+
+          Value blockN = vector::TransferReadOp::create(
+              builder, loc, vecTy, load.getMemRef(), ValueRange{baseIv},
+              /*padding=*/std::nullopt,
+              /*inBounds=*/ArrayRef<bool>{true});
+          Value blockNp1 = vector::TransferReadOp::create(
+              builder, loc, vecTy, load.getMemRef(), ValueRange{blockNp1Iv},
+              /*padding=*/std::nullopt,
+              /*inBounds=*/ArrayRef<bool>{true});
+
+          // Shuffle indices: [0..boundary) from blockN (concatenation indices
+          // 0..boundary-1), then [0..L-boundary) from blockNp1 (indices
+          // Ln..Ln+(L-boundary)-1 in the concatenation).
+          SmallVector<int64_t> shuffleIndices;
+          shuffleIndices.reserve(Ln);
+          for (int64_t lane = 0; lane < Ln; ++lane) {
+            if (lane < boundary)
+              shuffleIndices.push_back(lane);
+            else
+              shuffleIndices.push_back(Ln + (lane - boundary));
+          }
+          Value shuffled = vector::ShuffleOp::create(builder, loc, blockN,
+                                                     blockNp1, shuffleIndices);
+
+          SmallVector<Value> subs = {shuffled};
+          subVectorMap[load.getResult()] = std::move(subs);
+          mapping.map(load.getResult(), shuffled);
+        } else {
+          // CrossBlock + mixed precision: too complex for v1 — scalar fallback.
+          Operation *cloned = builder.clone(*load.getOperation(), mapping);
+          mapping.map(load.getResult(), cloned->getResult(0));
+        }
       } else {
         // Shouldn't reach here for vectorizable loops.
         Operation *cloned = builder.clone(*load.getOperation(), mapping);
@@ -828,16 +886,6 @@ class LegoVectorizePass
       }
 
       a.L_strip = computeStripMineFactor(a, target);
-
-      // Task 11: classify CrossBlock but defer emission to Task 12.
-      bool hasCrossBlock = false;
-      for (const auto &c : a.classes) {
-        if (c.kind == lego::AccessKind::CrossBlock) {
-          hasCrossBlock = true;
-          break;
-        }
-      }
-      if (hasCrossBlock) continue;  // Task 12 will remove this guard.
 
       // Task 8: strip-mine + emit vector.transfer_read/write.
       if (a.L_strip <= 1) continue;
