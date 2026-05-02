@@ -60,14 +60,18 @@ The new pipeline phase reuses the entire shared front-end (`buildLegoLowerPipeli
 
 ## 5. Detailed design
 
-### 5.1 Frontend: `cpu_jit` (Python decorator) + shared-helper extraction
+### 5.1 Frontend: `cpu_dsl` (mirrors `gpu_dsl.py`) + shared-helper cleanup
 
-The CPU JIT entry point reuses the existing shared infrastructure in `python/lego/frontends/`:
+**The CPU DSL mirrors `python/lego/backend/gpu_dsl.py` exactly** — the same architecture used for the LEGO puzzle examples. `gpu_dsl.py` is a pure-Python AST-to-MLIR transformation: native Python control flow (`for`/`if`/indexing) decorated with `@gpu_kernel(grid, block)` and `Buffer[...]`/`Shared[...]` parameter types compiles directly to MLIR GPU IR via `KernelBuilder` (in `gpu_builder.py`). No source rewriting, no `lego.rewriter` AST-text round-trip — straight Python AST → builder calls → MLIR.
 
-- `DSLAdapter` (abstract base) and `write_and_exec_temp_file` already live in `_adapter.py`.
-- `lego.rewriter.rewrite()` is the shared Python-AST rewrite engine that drives any `DSLAdapter`.
+The CPU DSL has the analogous shape:
 
-The GPU DSL (`cutile_jit.py`) sits on top of that infrastructure. The new CPU JIT does the same — there is no need to duplicate Python AST parsing or rewriter machinery.
+- **`python/lego/backend/cpu_dsl.py`** (new) mirrors `gpu_dsl.py`: defines `cpu_kernel(grid, block)` decorator, `Buffer[...]`/`Shared[...]` (or `Local[...]`) parameter types, and a `_Compiler` AST walker with the same per-node methods (`_stmt`, `_assign`, `_for`, `_if`, `_load`, `_store`, `_call`, etc.).
+- **`python/lego/backend/cpu_builder.py`** (new) mirrors `gpu_builder.py`'s `KernelBuilder` but emits CPU-side MLIR (`scf.for`, `arith`, `memref`, plus `lego.tile_by`/`lego.order_by` for layouts) and lowers via the new `lego-to-x86-vector` (or `-arm-neon`) pipeline.
+
+User-facing differences vs. gpu_dsl: drop the `grid`/`block`/`thread_id`/`block_dim`/`Shared` machinery (CPU has no SIMT/shared-memory primitives). Replace with CPU-flavored knobs as needed (e.g., `tile`, `vector_dim` if explicit user control is wanted, or — preferred — leave it to `lego-vectorize` to pick L automatically).
+
+**Shared-helper cleanup (orthogonal):** independently of the cpu_dsl frontend, four generic Python decorator-chain helpers are extracted from `cutile_jit.py`'s `CutileAdapter.unwrap` into `_adapter.py` (`try_fn_chain_unwrap`, `try_py_func_unwrap`, `try_wrapped_unwrap`, `walk_to_source_fn`). cuTile is then refactored to call them. This is byte-for-byte behavior-preserving and unrelated to cpu_dsl — but useful hygiene that lives well in the same diff.
 
 **Step A — Extract decorator-chain helpers into `_adapter.py`.**
 
@@ -294,11 +298,12 @@ NEW:
   lib/Lego/LegoX86VectorPipeline.cpp                       — x86 pipeline file
   lib/Lego/LegoArmNeonPipeline.cpp                         — ARM NEON pipeline file
   lib/Lego/Conversion/LegoVectorize.cpp                    — the analysis pass (target-aware)
-  python/lego/frontends/cpu_jit.py                         — CPU JIT decorator + adapter
+  python/lego/backend/cpu_dsl.py                           — Python AST→MLIR DSL (mirrors gpu_dsl.py): @cpu_kernel, Buffer, _Compiler
+  python/lego/backend/cpu_builder.py                       — CPUKernelBuilder (mirrors gpu_builder.py's KernelBuilder)
   test/Lego/lego_to_x86vector.mlir                         — x86 pipeline FileCheck test
   test/Lego/lego_to_arm_neon.mlir                          — ARM NEON pipeline FileCheck test
   test/Lego/lego_vectorize.mlir                            — pass-only FileCheck test
-  python/tests/test_cpu_jit.py                             — Python integration tests
+  python/tests/test_cpu_dsl.py                             — Python integration tests
   evaluation/cpu_vector_proof/brick_within_cell/           — within-brick proof point
   evaluation/cpu_vector_proof/brick_stencil_cross/         — cross-brick stencil proof point (flips cand 11)
 

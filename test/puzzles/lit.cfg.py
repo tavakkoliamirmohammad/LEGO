@@ -49,5 +49,7 @@ if config.available_features & {'gpu', 'wgpu'}:
 
 # Each puzzle test uses ~1.7 GB RAM + GPU resources.
 # Limit parallelism to avoid OOM kills when many tests run concurrently.
-lit_config.parallelism_groups['gpu-puzzles'] = 2
+# Reduced from 2 to 1 because puzzle_25/26 (warp shuffle) intermittently
+# SIGBUS at >1 concurrent on shared CHPC nodes; serialized runs are stable.
+lit_config.parallelism_groups['gpu-puzzles'] = 1
 config.parallelism_group = 'gpu-puzzles'

@@ -31,5 +31,7 @@ config.environment['LEGO_COMPILE_ONLY'] = '1'
 
 # Each puzzle imports PyTorch/numpy/CUDA (~1.5 GB each).
 # Limit parallelism to avoid OOM kills under tight cgroup limits.
-lit_config.parallelism_groups['compile-puzzles'] = 2
+# Reduced from 2 to 1 because puzzle_25/26 (warp shuffle) intermittently
+# SIGBUS at >1 concurrent on shared CHPC nodes; serialized runs are stable.
+lit_config.parallelism_groups['compile-puzzles'] = 1
 config.parallelism_group = 'compile-puzzles'
