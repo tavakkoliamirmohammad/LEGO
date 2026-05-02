@@ -5,9 +5,11 @@
 #include "mlir/Pass/PassOptions.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "Lego/LegoOps.h"
 #include <memory>
 
@@ -23,6 +25,7 @@ std::unique_ptr<Pass> createLegoExternalSMTVerifierPass();
 std::unique_ptr<Pass> createLegoVerifyBijectivityPass();
 std::unique_ptr<Pass> createLegoVerifyPass();
 std::unique_ptr<Pass> createLegoStrengthReductionPass();
+std::unique_ptr<Pass> createLegoVectorizePass();
 
 /// Options for the lego-to-spirv pipeline.
 struct LegoToSPIRVPipelineOptions
@@ -179,6 +182,7 @@ void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format);
 #define GEN_PASS_DECL_LEGOVERIFYBIJECTIVITYPASS
 #define GEN_PASS_DECL_LEGOVERIFYPASS
 #define GEN_PASS_DECL_LEGOSTRENGTHREDUCTIONPASS
+#define GEN_PASS_DECL_LEGOVECTORIZEPASS
 #define GEN_PASS_REGISTRATION
 #include "Lego/Passes.h.inc"
 

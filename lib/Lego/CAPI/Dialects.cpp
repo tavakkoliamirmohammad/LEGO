@@ -121,6 +121,7 @@ void legoRegisterPasses() {
   mlir::lego::registerLegoVerifyPass();
   mlir::lego::registerLegoStrengthReductionPass();
   mlir::lego::registerLegoMaterializeAssumeBoundsPass();
+  mlir::lego::registerLegoVectorizePass();
 
   // Named pipelines: "lego-lower", "lego-to-llvm", "lego-to-spirv", "lego-to-llvmspirv"
   // Internally these create LLVM/SPIR-V/GPU conversion passes via

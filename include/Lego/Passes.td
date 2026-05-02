@@ -112,4 +112,23 @@ def LegoStrengthReductionPass : Pass<"lego-strength-reduction", "mlir::ModuleOp"
   let dependentDialects = ["mlir::arith::ArithDialect"];
 }
 
+def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
+  let summary = "Layout-agnostic vectorization for LEGO via symbolic stride solve";
+  let description = [{
+    Lowers loops over Lego-derived arith address expressions to MLIR vector
+    dialect ops by symbolic stride analysis. Layout-agnostic: operates on
+    post-LegoToArith IR (arith + memref + scf).
+
+    Phase B (Tasks 5-10) fills in the actual stride analysis and vectorization
+    rewrites. This scaffold registers the pass and leaves IR unchanged.
+  }];
+  let constructor = "mlir::lego::createLegoVectorizePass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect"
+  ];
+}
+
 #endif // LEGO_PASSES_TD
