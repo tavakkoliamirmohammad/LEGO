@@ -217,6 +217,28 @@ AccessClassification solveAccessTierA(Operation *memrefOp, Value iv,
 // ---------------------------------------------------------------------------
 namespace {
 
+struct LoopAnalysis {
+  scf::ForOp forOp;
+  llvm::SmallVector<Operation *, 4> accesses;
+  llvm::SmallVector<lego::AccessClassification, 4> classes;
+  // Phase-B Task 7+ will add: int64_t L_strip; double score;
+};
+
+static llvm::SmallVector<LoopAnalysis>
+collectCandidateLoops(func::FuncOp func) {
+  llvm::SmallVector<LoopAnalysis> result;
+  func.walk([&](scf::ForOp forOp) {
+    LoopAnalysis a;
+    a.forOp = forOp;
+    forOp.getBody()->walk([&](Operation *op) {
+      if (isa<memref::LoadOp, memref::StoreOp>(op))
+        a.accesses.push_back(op);
+    });
+    if (!a.accesses.empty()) result.push_back(std::move(a));
+  });
+  return result;
+}
+
 class LegoVectorizePass
     : public mlir::lego::impl::LegoVectorizePassBase<LegoVectorizePass> {
  public:
@@ -225,25 +247,25 @@ class LegoVectorizePass
 
   void runOnOperation() final {
     func::FuncOp func = getOperation();
-    func.walk([&](scf::ForOp forOp) {
-      Value iv = forOp.getInductionVar();
-      forOp.getBody()->walk([&](Operation *op) {
-        if (!isa<memref::LoadOp, memref::StoreOp>(op))
-          return;
-        // Determine elementBytes from the element type (default 8 for f64).
+    auto loops = collectCandidateLoops(func);
+
+    for (auto &a : loops) {
+      Value iv = a.forOp.getInductionVar();
+      a.classes.reserve(a.accesses.size());
+      for (Operation *op : a.accesses) {
+        // Determine elementBytes from the op's element type (default to 8 for f64).
         int64_t elemBytes = 8;
         Type t;
-        if (auto load = dyn_cast<memref::LoadOp>(op))
-          t = load.getType();
+        if (auto load = dyn_cast<memref::LoadOp>(op)) t = load.getType();
         else if (auto store = dyn_cast<memref::StoreOp>(op))
           t = store.getValue().getType();
-        if (t && t.isIntOrFloat())
-          elemBytes = t.getIntOrFloatBitWidth() / 8;
-        // Classify (result currently unused — Phase B Task 6 will collect).
-        (void)mlir::lego::solveAccessTierA(op, iv, elemBytes);
-      });
-    });
-    // No rewrite yet — pass remains a no-op for IR.
+        if (t && t.isIntOrFloat()) elemBytes = t.getIntOrFloatBitWidth() / 8;
+        a.classes.push_back(lego::solveAccessTierA(op, iv, elemBytes));
+      }
+    }
+
+    // Phase-B Task 7-9 will use `loops` for strip-mine factor + scoring + rewrite.
+    // Task 6 stops here — the analysis is collected but not yet used.
   }
 };
 
