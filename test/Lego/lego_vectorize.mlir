@@ -144,3 +144,24 @@ func.func @cross_brick_stencil(%A: memref<?xf64>, %B: memref<?xf64>) {
   return
 }
 
+// -----
+
+// Non-affine access (Morton-style bit-interleave). Emit vector.gather with
+// runtime-computed index vector (per-lane clones of the address DAG).
+// CHECK-LABEL: func.func @morton_gather
+// CHECK: vector.gather
+func.func @morton_gather(%A: memref<?xf64>, %B: memref<?xf64>, %i_outer: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  %c5 = arith.constant 5 : index
+  scf.for %j = %c0 to %c8 step %c1 {
+    %ti = arith.andi %i_outer, %c5 : index
+    %tj = arith.andi %j, %c5 : index
+    %tj_shl = arith.shli %tj, %c1 : index
+    %morton = arith.ori %ti, %tj_shl : index
+    %v = memref.load %A[%morton] : memref<?xf64>
+    memref.store %v, %B[%j] : memref<?xf64>
+  }
+  return
+}
