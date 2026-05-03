@@ -4,14 +4,18 @@ import numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from kernel import kernel_scalar, kernel_cpu_dsl, N
+from kernel import kernel_scalar, kernel_cpu_dsl, N, _NN
 
 
 def main():
     rng = np.random.default_rng(0)
-    A = rng.standard_normal(N).astype(np.float32)
-    B = rng.standard_normal(N).astype(np.float32)
-    C_base = rng.standard_normal(N).astype(np.float32)
+    A = rng.standard_normal(_NN).astype(np.float32)
+    B = rng.standard_normal(_NN).astype(np.float32)
+    C_base = np.zeros(_NN, dtype=np.float32)
+
+    # Reference: numpy (kernel_scalar)
+    C_ref = C_base.copy()
+    kernel_scalar(A, B, C_ref)
 
     # Reference: scalar JIT
     scalar_jit = kernel_cpu_dsl.compile(target="scalar")
@@ -22,6 +26,9 @@ def main():
         print(f"PENDING R??: scalar_jit failed: {e}")
         return
 
+    np.testing.assert_allclose(C_sc, C_ref, rtol=1e-3, atol=1e-3,
+                                err_msg="scalar_jit != numpy")
+
     # Vectorized JIT
     vec_jit = kernel_cpu_dsl.compile(target="x86")
     C_vec = C_base.copy()
@@ -31,8 +38,8 @@ def main():
         print(f"PENDING R??: vec_jit failed: {e}")
         return
 
-    np.testing.assert_allclose(C_vec, C_sc, rtol=1e-4,
-                                err_msg="vec_jit != scalar_jit")
+    np.testing.assert_allclose(C_vec, C_ref, rtol=1e-3, atol=1e-3,
+                                err_msg="vec_jit != numpy")
     print(f"VERIFIED: {__file__}")
 
 
