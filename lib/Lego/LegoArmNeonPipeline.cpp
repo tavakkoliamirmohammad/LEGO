@@ -20,6 +20,7 @@
 
 #include "Lego/Passes.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
@@ -43,7 +44,7 @@ void buildLegoToArmNeonPipeline(OpPassManager &pm,
   // will split <8xf64> to NEON-width <2xf64> pairs automatically.
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
-  pm.addPass(createLegoVectorizePass());
+  pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass());
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
   pm.addPass(createConvertVectorToLLVMPass());

@@ -14,6 +14,7 @@
 
 #include "Lego/Passes.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
@@ -34,9 +35,10 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
 
   // Phase 2: clean up, then vectorize. lego-vectorize emits vector dialect
   // ops (vector.transfer_read/write, vector.broadcast, arith ops on vectors).
+  // Note: lego-vectorize is a func.func-level pass; nest inside func.func.
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
-  pm.addPass(createLegoVectorizePass());
+  pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass());
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
   // convert-vector-to-llvm must precede SCF→CF so that the vector loop body
