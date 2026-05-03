@@ -1,19 +1,16 @@
 // RUN: lego-opt %s --lego-to-arm-neon | FileCheck %s
 
 // End-to-end test for the --lego-to-arm-neon pipeline.
-// Checks that a SAXPY kernel (y[i] = a*x[i] + y[i]) fully lowers to LLVM
-// dialect. The ARM NEON pipeline is structurally identical to lego-to-x86-vector
-// at v1: lego-vectorize emits vector<8xf64> ops (AVX-512 default width); the
-// LLVM AArch64 backend will split to NEON-width (2xf64) pairs when targeting
-// an aarch64 triple. Proper NEON-width vector selection (2 f64 / 4 f32 lanes)
-// is deferred to R15.
+// R15 complete: lego-vectorize now emits NEON-width vectors when the pipeline
+// passes target="neon". For f64: 16-byte NEON register / 8 bytes = 2 lanes.
+// So the pipeline emits vector<2xf64> (not the old AVX-512 default vector<8xf64>).
 //
 // CHECK-LABEL: llvm.func @saxpy_neon
 // CHECK-NOT: lego.
 // CHECK-NOT: arith.
 // CHECK-NOT: scf.for
 // CHECK-NOT: vector.
-// CHECK: vector<8xf64>
+// CHECK: vector<2xf64>
 // CHECK: llvm.fmul
 // CHECK: llvm.fadd
 // CHECK: llvm.return

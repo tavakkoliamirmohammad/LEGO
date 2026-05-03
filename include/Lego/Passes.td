@@ -119,8 +119,12 @@ def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
     dialect ops by symbolic stride analysis. Layout-agnostic: operates on
     post-LegoToArith IR (arith + memref + scf).
 
-    Phase B (Tasks 5-10) fills in the actual stride analysis and vectorization
-    rewrites. This scaffold registers the pass and leaves IR unchanged.
+    The `target` option controls vector register width:
+      avx512 — 64-byte ZMM registers (8xf64, 16xf32)
+      avx2   — 32-byte YMM registers (4xf64, 8xf32)
+      neon   — 16-byte NEON registers (2xf64, 4xf32)
+    All vectorization decisions use getRegisterLanesForType(target, elemBytes)
+    so NO AVX-specific lane widths are hardcoded.
   }];
   let constructor = "mlir::lego::createLegoVectorizePass()";
   let dependentDialects = [
@@ -128,6 +132,10 @@ def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
     "mlir::memref::MemRefDialect",
     "mlir::scf::SCFDialect",
     "mlir::vector::VectorDialect"
+  ];
+  let options = [
+    Option<"target", "target", "std::string", /*default=*/"\"avx512\"",
+           "Target backend: avx512 | avx2 | neon (controls vector register lane width)">,
   ];
 }
 

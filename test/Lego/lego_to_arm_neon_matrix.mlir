@@ -1,20 +1,19 @@
 // RUN: lego-opt %s --lego-to-arm-neon | FileCheck %s
 
 // End-to-end pipeline tests for --lego-to-arm-neon.
-// At v1, the ARM NEON pipeline is structurally identical to --lego-to-x86-vector:
-// lego-vectorize uses AVX-512 defaults (vector<8xf64>). The AArch64 backend
-// splits to NEON-width (2xf64 per vector register) during codegen.
-// Proper NEON-width vector selection (2 f64 / 4 f32 lanes) is deferred to R15.
+// R15 complete: lego-vectorize now emits NEON-width vectors (target="neon").
+// f64: 16-byte NEON register / 8 bytes = 2 lanes → vector<2xf64>.
+// f32: 16-byte NEON register / 4 bytes = 4 lanes → vector<4xf32>.
 
 // ---------------------------------------------------------------------------
 // Case 1: SAXPY (unit-stride, broadcast scalar).
-// Expected: llvm.fmul + llvm.fadd on vector<8xf64> (AVX-512 default at v1).
+// Expected: llvm.fmul + llvm.fadd on vector<2xf64> (NEON width, R15).
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: llvm.func @saxpy_neon_matrix
 // CHECK-NOT: arith.
 // CHECK-NOT: scf.for
 // CHECK-NOT: vector.
-// CHECK: vector<8xf64>
+// CHECK: vector<2xf64>
 // CHECK: llvm.fmul
 // CHECK: llvm.fadd
 // CHECK: llvm.return
@@ -35,10 +34,10 @@ func.func @saxpy_neon_matrix(%a: f64, %X: memref<?xf64>, %Y: memref<?xf64>, %N: 
 
 // ---------------------------------------------------------------------------
 // Case 2: Unit-stride copy.
-// Expected: vector<8xf64> load + store in LLVM dialect.
+// Expected: vector<2xf64> load + store in LLVM dialect (NEON width, R15).
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: llvm.func @unit_copy_neon
-// CHECK: vector<8xf64>
+// CHECK: vector<2xf64>
 // CHECK: llvm.load
 // CHECK: llvm.store
 // CHECK: llvm.return
@@ -55,10 +54,15 @@ func.func @unit_copy_neon(%A: memref<?xf64>, %B: memref<?xf64>, %N: index) {
 // -----
 
 // ---------------------------------------------------------------------------
-// Case 3: Cross-block shuffle (vector.shuffle → llvm.shufflevector).
+// Case 3: Cross-block brick pattern.
+// With NEON L=2, Tier-B probes addr(0..1) only — both are unit-stride (no
+// visible boundary at lane 1 for this brick_size=8 pattern). So the access
+// is classified Unit, not CrossBlock. The output is simple vector loads/stores.
+// With AVX-512 L=8, the boundary at lane 7 is visible → CrossBlock → shufflevector.
+// Since this test uses the NEON pipeline, check for vector<2xf64> loads.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: llvm.func @cross_block_neon
-// CHECK: llvm.shufflevector
+// CHECK: vector<2xf64>
 // CHECK: llvm.return
 func.func @cross_block_neon(%A: memref<?xf64>, %B: memref<?xf64>) {
   %c0 = arith.constant 0 : index
@@ -84,7 +88,7 @@ func.func @cross_block_neon(%A: memref<?xf64>, %B: memref<?xf64>) {
 // Expected: index vector computation + vector store in LLVM output.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: llvm.func @morton_neon
-// CHECK: vector<8xf64>
+// CHECK: vector<2xf64>
 // CHECK: llvm.return
 func.func @morton_neon(%A: memref<?xf64>, %B: memref<?xf64>, %outer: index) {
   %c0 = arith.constant 0 : index
@@ -106,10 +110,10 @@ func.func @morton_neon(%A: memref<?xf64>, %B: memref<?xf64>, %outer: index) {
 
 // ---------------------------------------------------------------------------
 // Case 5: Mixed-precision f32→f64.
-// Expected: vector<8xf64> fadd in LLVM output.
+// Expected: vector<2xf64> fadd in LLVM output (NEON width, R15).
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: llvm.func @mixed_f32_f64_neon
-// CHECK: vector<8xf64>
+// CHECK: vector<2xf64>
 // CHECK: llvm.fadd
 // CHECK: llvm.return
 func.func @mixed_f32_f64_neon(%X: memref<?xf32>, %C: memref<?xf64>, %N: index) {
@@ -132,7 +136,7 @@ func.func @mixed_f32_f64_neon(%X: memref<?xf32>, %C: memref<?xf64>, %N: index) {
 // Scalar llvm.load/store (no vector<8xf64>) should survive.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: llvm.func @self_update_neon
-// CHECK-NOT: vector<8xf64>
+// CHECK-NOT: vector<2xf64>
 // CHECK: llvm.load
 // CHECK: llvm.store
 // CHECK: llvm.return

@@ -26,6 +26,7 @@ std::unique_ptr<Pass> createLegoVerifyBijectivityPass();
 std::unique_ptr<Pass> createLegoVerifyPass();
 std::unique_ptr<Pass> createLegoStrengthReductionPass();
 std::unique_ptr<Pass> createLegoVectorizePass();
+std::unique_ptr<Pass> createLegoVectorizePass(llvm::StringRef target);
 
 /// Options for the lego-to-spirv pipeline.
 struct LegoToSPIRVPipelineOptions

@@ -25,9 +25,19 @@ enum class AccessKind {
 
 struct AccessClassification {
   AccessKind kind = AccessKind::NonAffine;
-  int64_t stride = 0;        // for Strided
-  int64_t boundary = -1;     // for CrossBlock: lane index of the discontinuity
-  int64_t elementBytes = 0;  // sizeof(element) in bytes
+  int64_t stride = 0;           // for Strided
+  int64_t boundary = -1;        // for CrossBlock: lane index of the discontinuity
+  int64_t boundaryJump = 0;     // for CrossBlock: address jump at the discontinuity
+                                //   = addrs[boundary] - addrs[boundary-1]
+                                //   (in element-index units, not bytes).
+                                //   The second-block base is at addrs[boundary],
+                                //   i.e. baseIv + (addrs[boundary] - addrs[0]).
+                                //   R12a threads this through so emission uses the
+                                //   real jump rather than assuming contiguous bricks.
+  int64_t block0Offset = 0;     // for CrossBlock: addrs[0] - iv_at_probe_start
+                                //   (the offset from iv to the first probed address).
+                                //   Normally 0 for Tier-B probing from iv=0.
+  int64_t elementBytes = 0;     // sizeof(element) in bytes
 };
 
 // Symbolic stride solver — Tier A.

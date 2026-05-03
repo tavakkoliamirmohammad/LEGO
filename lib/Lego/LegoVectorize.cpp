@@ -551,6 +551,22 @@ AccessClassification solveAccessTierB(Operation *memrefOp, Value iv,
     if (segmentsUnit) {
       cls.kind = AccessKind::CrossBlock;
       cls.boundary = boundary;
+      // R12a: record the actual address of the second block's first element
+      // relative to the first probed address (addrs[0]).
+      // blockNp1 starts at addrs[boundary], so the offset from the first
+      // probed element is (addrs[boundary] - addrs[0]).
+      // In emitVectorBody: blockNp1Iv = baseIv + (addrs[0] - iv[probe_start])
+      //   + (addrs[boundary] - addrs[0])
+      //                               = baseIv + cls.block0Offset + cls.boundaryJump
+      // For Tier-B probing from iv=0: addrs[0] is addr(iv=0), and baseIv in
+      // emission is the strip-mined IV (not iv=0). The correct expression for
+      // the second block's base in the vector body is:
+      //   blockNp1Iv = baseIv + (addrs[boundary] - addrs[0])
+      // since addrs[0] was computed at iv=0 and baseIv is the runtime iv that
+      // starts each strip-mined chunk. This works because the address pattern
+      // is the SAME relative to the chunk start as it was relative to iv=0.
+      cls.boundaryJump = addrs[boundary] - addrs[0];
+      cls.block0Offset = addrs[0];  // offset of addrs[0] from iv (probe starts at 0)
       return cls;
     }
   }
@@ -602,9 +618,9 @@ struct LoopAnalysis {
   // Future: double score (Task 8).
 };
 
-static llvm::SmallVector<LoopAnalysis>
+static llvm::SmallVector<LoopAnalysis, 0>
 collectCandidateLoops(func::FuncOp func) {
-  llvm::SmallVector<LoopAnalysis> result;
+  llvm::SmallVector<LoopAnalysis, 0> result;
   func.walk([&](scf::ForOp forOp) {
     LoopAnalysis a;
     a.forOp = forOp;
@@ -1197,20 +1213,25 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
           auto vecTy = VectorType::get({Ln}, elemTy);
           Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
 
-          // V1 LIMITATION (R12): the second-block base is computed as `baseIv + boundary`,
-          // which equals the address of the boundary-th lane in the SAME brick — not the
-          // next brick's base address. This works for FileCheck IR-shape verification but
-          // produces incorrect runtime values for real brick stencils (e.g. brick stride
-          // = BRICK_SIZE * elem_size, not just `boundary`). R12 will thread the brick
-          // stride through from the layout op so this becomes correct.
+          // R12a: use cls.boundaryJump (the actual address delta from addrs[0]
+          // to addrs[boundary]) to compute the second block's base address.
           //
-          // For pure within-brick patterns (no cross-brick reads), CrossBlock isn't
-          // triggered — Tier-A classifies as Unit. So the bug only manifests for genuine
-          // cross-brick stencils, all of which are blocked on R12 anyway.
-          Value boundaryConst =
-              arith::ConstantIndexOp::create(builder, loc, boundary);
+          // Tier-B probes at iv=0..L-1 and records:
+          //   addrs[0]        = address at iv=0  (= base for first block)
+          //   addrs[boundary] = address at iv=boundary (= base for second block)
+          // In the vector body, baseIv = strip-mined iv (runtime).  The first
+          // transfer_read starts at baseIv (which corresponds to addrs[0] at
+          // probe time).  The second block starts boundaryJump elements further:
+          //   blockNp1Iv = baseIv + boundaryJump
+          // where boundaryJump = addrs[boundary] - addrs[0].
+          //
+          // This is correct even for non-contiguous bricks because boundaryJump
+          // encodes the REAL address gap (including any inter-brick padding)
+          // rather than just the lane index.
+          Value boundaryJumpConst =
+              arith::ConstantIndexOp::create(builder, loc, cls.boundaryJump);
           Value blockNp1Iv =
-              arith::AddIOp::create(builder, loc, baseIv, boundaryConst);
+              arith::AddIOp::create(builder, loc, baseIv, boundaryJumpConst);
 
           Value blockN = vector::TransferReadOp::create(
               builder, loc, vecTy, load.getMemRef(), ValueRange{baseIv},
@@ -1373,9 +1394,170 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
       }
 
     // -----------------------------------------------------------------------
+    // R17: scf.if predicated maskedstore.
+    // Supports the pattern:
+    //   scf.if %cond {
+    //     memref.store %val, %B[%i] : memref<?xT>
+    //   }
+    // where %cond is a scalar i1 produced by arith.cmpf/cmpi in this loop.
+    // Lowers to: vector.maskedstore with the vectorised condition as mask.
+    // -----------------------------------------------------------------------
+    } else if (auto ifOp = dyn_cast<scf::IfOp>(&op)) {
+      // We only reach here if bodyOK allowed this scf.if (single then-branch,
+      // stores only inside the then-block).
+      Value cond = ifOp.getCondition();
+      // Look up the vectorized condition — should be a vector<L x i1> from
+      // the R16 cmpi/cmpf vectorization in the same loop body.
+      Value vecCond = mapping.lookupOrDefault(cond);
+      // If the condition didn't get vectorized (it's still scalar), broadcast it.
+      if (!dyn_cast<VectorType>(vecCond.getType())) {
+        auto maskTy = VectorType::get({L_strip}, builder.getI1Type());
+        vecCond = vector::BroadcastOp::create(builder, loc, maskTy, vecCond);
+      }
+      // Emit a vector.maskedstore for each store in the then-block.
+      for (Operation &thenOp : ifOp.getThenRegion().front().getOperations()) {
+        if (isa<scf::YieldOp>(thenOp)) continue;
+        auto store = dyn_cast<memref::StoreOp>(&thenOp);
+        if (!store) continue;
+        // Find the access classification for this store.
+        auto it = std::find(accesses.begin(), accesses.end(), &thenOp);
+        Value valueToStore;
+        Value baseIdx;
+        if (it != accesses.end()) {
+          size_t idx = it - accesses.begin();
+          auto subs = getSubsFor(store.getValue());
+          // Use the full L_strip-wide sub-vector (or first sub if multiple).
+          valueToStore = subs.empty() ? mapping.lookupOrDefault(store.getValue()) : subs[0];
+          baseIdx = mapping.lookupOrDefault(store.getIndices().front());
+        } else {
+          // Store not in accesses list (shouldn't happen for body-OK stores).
+          valueToStore = mapping.lookupOrDefault(store.getValue());
+          baseIdx = mapping.lookupOrDefault(store.getIndices().front());
+        }
+        // Ensure value is a vector<L_strip x T> type.
+        Type elemTy = store.getValue().getType();
+        if (!dyn_cast<VectorType>(valueToStore.getType())) {
+          // Scalar — broadcast it.
+          auto vecTy = VectorType::get({L_strip}, elemTy);
+          valueToStore = vector::BroadcastOp::create(builder, loc, vecTy, valueToStore);
+        }
+        // Use the full-width mask directly (both mask and value are L_strip wide).
+        Value finalMask = vecCond;
+        // Emit vector.maskedstore(base, [baseIdx], mask, valueToStore).
+        vector::MaskedStoreOp::create(builder, loc, store.getMemRef(),
+                                      ValueRange{baseIdx}, finalMask, valueToStore,
+                                      /*alignment=*/mlir::IntegerAttr{});
+      }
+
+    // -----------------------------------------------------------------------
     // arith (and any other) ops — mixed-precision aware pass-through
     // -----------------------------------------------------------------------
     } else {
+      // R16: special handling for arith.cmpi / arith.cmpf / arith.select
+      // when operands are index-typed. Index has no fixed bit width in MLIR,
+      // so we convert index operands to i64 vectors before building the
+      // comparison/select.
+      if (isa<arith::CmpIOp, arith::CmpFOp>(&op)) {
+        // Check if any operand is index-typed.
+        bool hasIndexOperand = llvm::any_of(op.getOperands(), [](Value v) {
+          return v.getType().isIndex();
+        });
+        if (hasIndexOperand) {
+          // Convert index operands to i64 then vectorize.
+          auto i64Ty = builder.getI64Type();
+          SmallVector<Value> convertedOperands;
+          for (Value operand : op.getOperands()) {
+            Value mapped = mapping.lookupOrDefault(operand);
+            if (operand.getType().isIndex()) {
+              // Convert scalar index → i64 then broadcast, OR convert
+              // vector<L x index> → vector<L x i64>.
+              if (auto vecTy = dyn_cast<VectorType>(mapped.getType())) {
+                // Shouldn't happen (index vectors invalid in MLIR),
+                // so fall back to scalar conversion + broadcast.
+                (void)vecTy;
+                // This path shouldn't be reached normally.
+                convertedOperands.push_back(mapped);
+              } else {
+                // Scalar index → cast to i64, broadcast to vector<L_strip x i64>.
+                auto i64Val = arith::IndexCastOp::create(builder, loc, i64Ty, mapped);
+                auto vecI64Ty = VectorType::get({L_strip}, i64Ty);
+                auto bc = vector::BroadcastOp::create(builder, loc, vecI64Ty, i64Val);
+                convertedOperands.push_back(bc);
+              }
+            } else {
+              // Non-index operand — look up normally (should already be vectorized
+              // if it was produced inside the loop).
+              auto subs = getSubsFor(operand);
+              convertedOperands.push_back(subs.empty() ? mapped : subs[0]);
+            }
+          }
+          // Emit the comparison on i64 vectors → result is vector<L_strip x i1>.
+          auto maskTy = VectorType::get({L_strip}, builder.getI1Type());
+          OperationState state(loc, op.getName());
+          state.addOperands(convertedOperands);
+          state.addAttributes(op.getAttrs());
+          state.addTypes(maskTy);
+          Operation *newCmp = builder.create(state);
+          Value resultVec = newCmp->getResult(0);
+          mapping.map(op.getResult(0), resultVec);
+          subVectorMap[op.getResult(0)] = {resultVec};
+          continue;
+        }
+        // Non-index cmpi/cmpf falls through to the normal arith catch-all below.
+      }
+
+      if (isa<arith::SelectOp>(&op)) {
+        // R16: arith.select on index-typed result.
+        // select(cond: i1, trueVal, falseVal) where result is index-typed.
+        // Lower by converting operands to i64 and result back to index if needed.
+        Value cond = op.getOperand(0);
+        Value trueVal = op.getOperand(1);
+        Value falseVal = op.getOperand(2);
+        Value origResult = op.getResult(0);
+        Type resTy = origResult.getType();
+
+        if (resTy.isIndex()) {
+          // Index-typed select: convert true/false to i64 vectors,
+          // emit vector<L x i64> select, map result.
+          auto i64Ty = builder.getI64Type();
+          auto vecI64Ty = VectorType::get({L_strip}, i64Ty);
+          auto maskTy = VectorType::get({L_strip}, builder.getI1Type());
+
+          // Get vectorized condition.
+          auto condSubs = getSubsFor(cond);
+          Value vecCond = condSubs.empty() ? mapping.lookupOrDefault(cond) : condSubs[0];
+          if (!dyn_cast<VectorType>(vecCond.getType())) {
+            vecCond = vector::BroadcastOp::create(builder, loc, maskTy, vecCond);
+          }
+
+          // Get/convert true operand.
+          auto trueSubs = getSubsFor(trueVal);
+          Value vecTrue = trueSubs.empty() ? mapping.lookupOrDefault(trueVal) : trueSubs[0];
+          if (trueVal.getType().isIndex()) {
+            if (!dyn_cast<VectorType>(vecTrue.getType())) {
+              auto cast = arith::IndexCastOp::create(builder, loc, i64Ty, vecTrue);
+              vecTrue = vector::BroadcastOp::create(builder, loc, vecI64Ty, cast);
+            }
+          }
+
+          // Get/convert false operand.
+          auto falseSubs = getSubsFor(falseVal);
+          Value vecFalse = falseSubs.empty() ? mapping.lookupOrDefault(falseVal) : falseSubs[0];
+          if (falseVal.getType().isIndex()) {
+            if (!dyn_cast<VectorType>(vecFalse.getType())) {
+              auto cast = arith::IndexCastOp::create(builder, loc, i64Ty, vecFalse);
+              vecFalse = vector::BroadcastOp::create(builder, loc, vecI64Ty, cast);
+            }
+          }
+
+          Value selected = arith::SelectOp::create(builder, loc, vecCond, vecTrue, vecFalse);
+          mapping.map(origResult, selected);
+          subVectorMap[origResult] = {selected};
+          continue;
+        }
+        // Non-index select falls through to normal arith catch-all.
+      }
+
       // For ops with no results or non-scalar/float results: clone unchanged.
       if (op.getNumResults() != 1) {
         builder.clone(op, mapping);
@@ -1609,25 +1791,12 @@ class LegoVectorizePass
       Value iv = a.forOp.getInductionVar();
       a.classes.reserve(a.accesses.size());
 
-      // Target ISA for lane-width computation.
-      //
-      // Default: "avx512" (64-byte registers, 16 f32 / 8 f64 lanes).
-      //
-      // PRINCIPLED default: the lego-to-x86-vector pipeline lowers vector ops
-      // to LLVM with target-features derived from the host CPU at JIT time (via
-      // the `cpu` pipeline option, default "skx").  When the host lacks AVX-512,
-      // LLVM's VectorType lowering splits 512-bit ops into 256-bit or 128-bit
-      // sequences automatically.  Using R_T = 16 for f32 on AVX-512 therefore
-      // NEVER silently miscompiles on an AVX2-only host — it just means the tail
-      // loop covers fewer iterations than optimal.  In the future, Task 24 will
-      // thread the pipeline's `cpu` option here for exact lane-width selection.
-      //
-      // ARM-NEON path: the lego-to-arm-neon pipeline wraps this pass at the
-      // module level; for that pipeline "neon" would give R_T = 4 for f32.
-      // Since lego-vectorize is currently only invoked by the x86 pipeline, the
-      // default below is safe.  When lego-to-arm-neon is updated to use
-      // lego-vectorize (Task 25), it should override this via a pass option.
-      llvm::StringRef target = "avx512";
+      // R15: target ISA is now threaded through the tablegen pass option `target`
+      // (default "avx512").  The lego-to-x86-vector pipeline passes "avx512" or
+      // "avx2"; the lego-to-arm-neon pipeline passes "neon".
+      // All lane-width decisions use getRegisterLanesForType(target, elemBytes) —
+      // NO AVX-specific constants are hardcoded below this line.
+      llvm::StringRef target = this->target;
 
       for (Operation *op : a.accesses) {
         // Determine elementBytes from the op's element type (default 8 = f64).
@@ -1658,18 +1827,19 @@ class LegoVectorizePass
       // ALLOWED: memref.load, memref.store, scf.yield — the core memory ops.
       // ALLOWED: arith dialect ops (add, mul, sub, div, etc.) — vectorized via
       //          the sub-vector catch-all in emitVectorBody.
+      // ALLOWED (R16): arith.cmpi, arith.cmpf, arith.select — now handled by
+      //          dedicated emit paths in emitVectorBody.
+      // ALLOWED (R17): scf.if with a single then-branch (no else) where the
+      //          then-block contains only memref.store ops — predicated maskedstore.
       //
       // GUARDED (must-skip) cases:
       //
       // [G1] arith.cmpi / arith.cmpf on index-typed operands.
-      //   STATUS: UNIMPLEMENTED — roadmap item R16 (index vectorization).
-      //   REASON: The catch-all path in emitVectorBody does not handle index-
-      //   typed comparison results.  cmpi(index, index) produces an i1 result
-      //   that must have the same VECTOR width as the input indices; but indices
-      //   have no fixed bit-width in MLIR, so VectorType<index> is illegal.
-      //   When index vectorization (R16) lands, cmpi on indices can be lowered
-      //   by converting operands to i64 vectors first.  Loops with cmpi/cmpf
-      //   on f32/f64 operands ARE handled correctly (resBytes=0 path in catch-all).
+      //   STATUS: RESOLVED (R16). cmpi/cmpf on index operands are now lowered
+      //   by converting index operands to i64 vectors in emitVectorBody, then
+      //   emitting a vector<L x i1> result for the comparison.  arith.select
+      //   on index-typed results is also handled by lowering to i64.
+      //   Legacy guard removed — all cmpi/cmpf/select now allowed.
       //
       // [G2] arith.index_cast / arith.index_castui with non-index source/result
       //   when IV-dependent.
@@ -1683,34 +1853,48 @@ class LegoVectorizePass
       //   hoistable (IV-independent), the allInvariant path in evalAffine already
       //   handles it correctly without any bodyOK skip.
       //
-      // [G3] Any op NOT in the arith dialect and NOT a memref load/store/yield.
+      // [G3] Any op NOT in the arith dialect and NOT a memref load/store/yield/scf.if.
       //   STATUS: PRINCIPLED SKIP — conservative allowlist.
       //   REASON: Unknown ops may have side effects, may require dialect-specific
       //   vectorization support, or may use types (e.g. memref.subview's result
       //   types) that the sub-vector catch-all cannot handle.  Widening the
       //   allowlist is safe to do per-dialect as vectorization support is added.
-      //   Current known safe additions: math dialect (sin, cos, exp, sqrt) —
-      //   roadmap item R17.
+      //
+      // [G4] scf.if with an else branch or with non-store body ops.
+      //   STATUS: PARTIAL (R17). Only single-branch scf.if whose then-block
+      //   contains only memref.store ops is allowed; this covers the
+      //   "conditional store" pattern (predicated maskedstore).  Scf.if with
+      //   an else branch or compute ops in the then-block is still conservatively
+      //   rejected (too complex for a single emission pass).
       bool bodyOK = true;
       for (Operation &op : a.forOp.getBody()->getOperations()) {
         if (isa<memref::LoadOp, memref::StoreOp, scf::YieldOp>(op)) continue;
         if (op.getDialect() &&
             isa<arith::ArithDialect>(op.getDialect())) {
-          // [G1] Reject arith.cmpi / arith.cmpf when any operand is index-typed.
-          if (isa<arith::CmpIOp, arith::CmpFOp>(op)) {
-            bool hasIndexOperand = llvm::any_of(op.getOperands(), [](Value v) {
-              return v.getType().isIndex();
-            });
-            if (hasIndexOperand) {
-              bodyOK = false;
-              break;
-            }
-          }
-          // [G2] Reject IV-dependent arith.index_cast with non-index source/result.
+          // R16: arith.cmpi / arith.cmpf / arith.select are now handled.
+          // No longer rejected — the emit path for index-typed operands converts
+          // to i64 before building vector comparisons.
+          //
+          // [G2] Reject IV-dependent arith.index_cast with any index source or result.
+          //
+          // Two problems exist:
+          //   (a) index_cast(i32 → index): result would be vector<L x index>, invalid MLIR.
+          //   (b) index_cast(index → i32): source is scalar index; the catch-all would emit
+          //       index_cast(index → vector<L x i32>), which has mismatched shapes and is
+          //       an invalid operation.
+          //
+          // Both cases require a dedicated per-lane emit path (clone the index_cast once
+          // per lane with a lane-specific index). This is not implemented in v1; it would
+          // require the same cloneAddrDAG technique used for NonAffine gathers.
+          //
+          // SAFE cases NOT rejected:
+          //   - index_cast(i32 → i64) or (i64 → i32): no index type, caught elsewhere.
+          //   - IV-independent index_cast: operand is loop-invariant, broadcast pre-pass
+          //     handles it correctly (scalar → broadcast).
           if (isa<arith::IndexCastOp, arith::IndexCastUIOp>(op)) {
-            bool srcNonIndex = !op.getOperand(0).getType().isIndex();
-            bool resNonIndex = !op.getResult(0).getType().isIndex();
-            if (srcNonIndex || resNonIndex) {
+            bool srcIsIndex = op.getOperand(0).getType().isIndex();
+            bool resIsIndex = op.getResult(0).getType().isIndex();
+            if (srcIsIndex || resIsIndex) {
               bool ivDependent = llvm::any_of(op.getOperands(), [&](Value v) {
                 if (v == a.forOp.getInductionVar()) return true;
                 Operation *defOp = v.getDefiningOp();
@@ -1724,7 +1908,27 @@ class LegoVectorizePass
           }
           continue;
         }
-        // [G3] Op outside the arith dialect — conservative skip.
+        // R17: allow scf.if with a single then-branch that only stores.
+        if (auto ifOp = dyn_cast<scf::IfOp>(&op)) {
+          // Reject if there is an else branch (too complex for v1 maskedstore).
+          if (ifOp.getNumRegions() > 1 && !ifOp.getElseRegion().empty()) {
+            bodyOK = false;
+            break;
+          }
+          // Verify the then-block only contains stores + yield.
+          bool thenOK = true;
+          for (Operation &thenOp : ifOp.getThenRegion().front().getOperations()) {
+            if (isa<memref::StoreOp, scf::YieldOp>(thenOp)) continue;
+            thenOK = false;
+            break;
+          }
+          if (!thenOK) {
+            bodyOK = false;
+            break;
+          }
+          continue;
+        }
+        // [G3] Op outside the arith dialect and not an allowed scf.if.
         bodyOK = false;
         break;
       }
@@ -1750,6 +1954,13 @@ namespace mlir::lego {
 
 std::unique_ptr<Pass> createLegoVectorizePass() {
   return std::make_unique<LegoVectorizePass>();
+}
+
+/// Overload that sets the target option (avx512 | avx2 | neon).
+std::unique_ptr<Pass> createLegoVectorizePass(llvm::StringRef target) {
+  LegoVectorizePassOptions opts;
+  opts.target = std::string(target);
+  return std::make_unique<LegoVectorizePass>(opts);
 }
 
 }  // namespace mlir::lego

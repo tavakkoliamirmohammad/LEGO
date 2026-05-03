@@ -36,29 +36,22 @@ namespace lego {
 
 void buildLegoToArmNeonPipeline(OpPassManager &pm,
                                 const LegoToArmNeonPipelineOptions &opts) {
-  // V1 STUB: this pipeline registers `--lego-to-arm-neon` but emits AVX-512-width
-  // vectors (the `lego-vectorize` pass currently hardcodes target=avx512 — the
-  // option flow through tablegen pass-options had a GCC C++17 brace-init issue
-  // that's deferred to R15).
-  //
-  // On an x86 host, invoking this pipeline produces functionally-correct x86
-  // AVX-512 IR — NOT ARM NEON. To actually target ARM NEON, R15 needs to:
-  //   1. Plumb the target option from this pipeline through to lego-vectorize.
-  //   2. Set the LLVM target triple to aarch64 + features.
-  //   3. Cross-compile via mlir-translate → llc.
-  //
-  // Until R15 lands, this pipeline exists for build-system completeness and
-  // FileCheck IR-shape coverage. Do not use it for ARM execution.
+  // R15: lego-vectorize now accepts a `target` option; this pipeline passes
+  // "neon" to emit 16-byte (128-bit) NEON-width vectors:
+  //   f64: 16/8 = 2 lanes → vector<2xf64>
+  //   f32: 16/4 = 4 lanes → vector<4xf32>
+  // On an x86 host, these NEON-width vectors are correct MLIR and can be
+  // FileCheck-verified. For actual ARM execution, add mlir-translate → llc
+  // with -mtriple=aarch64-linux-gnu -mattr=+neon.
 
   // Phase 1: shared front-end (LEGO → Arith + strength reduction).
   buildLegoLowerPipeline(pm);
 
-  // Phase 2: clean up, then vectorize. lego-vectorize emits vector dialect
-  // ops.  At v1 the vector width is AVX-512 default; the LLVM AArch64 backend
-  // will split <8xf64> to NEON-width <2xf64> pairs automatically.
+  // Phase 2: clean up, then vectorize with NEON lane widths.
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
-  pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass());
+  // Pass target="neon" to emit NEON-width vectors (2xf64, 4xf32).
+  pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("neon"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
   pm.addPass(createConvertVectorToLLVMPass());

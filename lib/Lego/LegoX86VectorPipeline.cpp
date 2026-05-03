@@ -38,7 +38,11 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   // Note: lego-vectorize is a func.func-level pass; nest inside func.func.
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
-  pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass());
+  // R15: pass the target to lego-vectorize so lane widths are ISA-specific.
+  // The x86 pipeline uses "avx512" by default (64-byte ZMM registers).
+  // LLVM splits <16xf32>/<8xf64> ops to 256-bit pairs automatically on
+  // AVX2-only hosts — so this is correct-by-splitting even on AVX2 CPUs.
+  pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("avx512"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
   // convert-vector-to-llvm must precede SCF→CF so that the vector loop body
