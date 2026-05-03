@@ -107,6 +107,7 @@ add_mlir_dialect_library(MLIRLego
   LegoToArith.cpp
   LegoArithSimplification.cpp
   LegoMaterializeAssumeBounds.cpp
+  LegoVectorizeAnalysis.cpp
   LegoVectorize.cpp
   Passes.cpp
   # Verification

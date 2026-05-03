@@ -11,6 +11,8 @@
 
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include <cstdint>
 
 namespace mlir::lego {
@@ -22,6 +24,33 @@ enum class AccessKind {
   CrossBlock,  // piecewise unit-stride with single boundary (Tier B only — set later)
   NonAffine,   // simplification stalls; iv survives in S(k)
 };
+
+// ---------------------------------------------------------------------------
+// Lightweight symbolic integer evaluator (Tier A).
+//
+// Represents an index expression as (coeff * iv + constant + invariant_terms).
+// Declared here so that pass code (computeMinDepDistance) can call evalAffine
+// directly without going through solveAccessTierA.
+// ---------------------------------------------------------------------------
+struct AffineVal {
+  bool valid = true;
+  int64_t coeff = 0;
+  int64_t constant = 0;
+  llvm::SmallVector<Value, 2> invariant;
+
+  static AffineVal nonAffine()            { AffineVal v; v.valid = false; return v; }
+  static AffineVal constant_val(int64_t c){ AffineVal v; v.coeff = 0; v.constant = c; return v; }
+  static AffineVal iv_val()               { AffineVal v; v.coeff = 1; v.constant = 0; return v; }
+  static AffineVal invariant_val(Value inv) {
+    AffineVal v; v.coeff = 0; v.constant = 0; v.invariant.push_back(inv); return v;
+  }
+};
+
+// Evaluate the index expression `v` symbolically w.r.t. induction variable
+// `iv`. Caches intermediate results in `cache`.
+// Defined in LegoVectorizeAnalysis.cpp.
+AffineVal evalAffine(Value v, Value iv,
+                     llvm::DenseMap<Value, AffineVal> &cache);
 
 struct AccessClassification {
   AccessKind kind = AccessKind::NonAffine;
