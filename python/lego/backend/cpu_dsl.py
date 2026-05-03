@@ -101,13 +101,40 @@ def cpu_kernel(grid: Tuple, tile: Optional[Tuple] = None):
     """Decorator: transform a Python function into a :class:`CPUKernelBuilder`.
 
     Args:
-        grid: Outer iteration shape, e.g. ``(N,)`` or ``(M, N)``.
-              The kernel body runs once per grid point.
-        tile: Optional per-task tile shape, e.g. ``(8,)`` or ``(4, 4)``.
-              If given, the kernel body is wrapped in an outer scf.for over
-              the grid tiles; the user writes ``for i in tile_range:`` to
-              iterate within the tile.  If omitted, grid is treated as the
-              per-element range.
+        grid: Total iteration space shape, e.g. ``(N,)`` or ``(M, N)``.
+              The kernel body runs over the full grid extent.
+        tile: Cache-tiling hint, e.g. ``(16,)`` or ``(8, 8)``.
+              This is forwarded to the ``lego-vectorize`` pass as the
+              strip-mining factor; it controls *cache tiling*, not the
+              number of SIMD lanes (the vectorizer picks the SIMD width
+              automatically from the hardware).
+
+              When ``tile`` is provided, the kernel body must contain
+              ``for i in tile_range:`` — a sentinel loop that the compiler
+              rewrites to ``range(grid[0])``.  The pass strip-mines that
+              loop by ``tile[0]`` to produce cache-friendly tiles of
+              consecutive iterations, then vectorizes the inner strip.
+
+              If ``tile`` is ``None``, the kernel must use ``for i in
+              range(grid[0]):`` directly; no strip-mining is applied and the
+              vectorizer sees a single loop over the full grid.
+
+              Rule of thumb: set ``tile`` to the SIMD width (16 for AVX-512
+              float32, 8 for AVX2 float32) or a small multiple of it so that
+              each strip fits in L1.
+
+    Example::
+
+        N = 1 << 20
+        TILE = 16  # AVX-512 float32 lane count
+
+        @cpu_kernel(grid=(N,), tile=(TILE,))
+        def saxpy(a: float, X: Buffer[N], Y: Buffer[N]):
+            for i in tile_range:       # rewritten to range(N)
+                Y[i] = a * X[i] + Y[i]
+
+        jit_fn = saxpy.compile()       # selects x86 / AVX-512 automatically
+        jit_fn(2.5, X_np, Y_np)       # modifies Y_np in-place
     """
     def decorator(fn):
         return _build(fn, grid, tile)
