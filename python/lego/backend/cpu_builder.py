@@ -42,70 +42,28 @@ from lego.mlir.dialects import arith as arith_dialect
 from lego.mlir.dialects import memref as memref_dialect
 from lego.mlir.passmanager import PassManager
 from lego.mlir.execution_engine import ExecutionEngine
-from lego.mlir.runtime import get_ranked_memref_descriptor
 
 from lego.backend.dialects.lego_dialect import register as register_lego
 from lego.backend._ops import _index_const, _emit_apply
 from lego.backend.compiler import DType, _get_mlir_element_type
 from lego.backend.symbolic import emit_layout_from_python
 from lego.backend.gpu_builder import LayoutBuffer  # reuse the same descriptor
+from lego.backend._kernel_builder_base import (
+    _KernelContextBase,
+    _cached_memref_ptr,
+    clear_descriptor_cache,
+    _make_callable as _make_callable_base,
+)
 
-
-# ============================================================================
-# Memref descriptor cache
-# ============================================================================
-# get_ranked_memref_descriptor() takes ~23 µs per call (Python + ctypes struct
-# allocation).  For benchmarks that call the same kernel 1000× with the same
-# numpy arrays, this adds ~0.1 ms of pure Python overhead per call — dominating
-# the measured kernel time and masking vectorization wins.
-#
-# Cache key: (data_ptr, shape, strides).  Using arr.ctypes.data (the actual
-# C-level buffer pointer) instead of id(arr) avoids the id-reuse hazard: two
-# different numpy arrays that share the same base memory will hash identically,
-# which is correct — they share the same descriptor.  The key naturally
-# invalidates when the underlying buffer moves (reshape to non-contiguous,
-# in-place realloc, etc.) because the data pointer or strides change.
-#
-# We also cache ctypes.pointer(ctypes.pointer(desc)) — the "double-pointer"
-# that engine.invoke expects — so the hot path is a single dict lookup + ~1 µs
-# of pointer construction (from 104 µs raw).
-#
-# The cache is a plain module-level dict (no WeakRef needed: the descriptor
-# struct keeps a reference to the numpy array's memory, so GC will not free
-# the underlying buffer while a live descriptor exists).
-
-_DESC_CACHE: Dict[tuple, object] = {}   # key → ctypes double-pointer object
-_DESC_CACHE_DESC: Dict[tuple, object] = {}  # key → raw descriptor (keeps it alive)
-
-
-def _cached_memref_ptr(arr: np.ndarray):
-    """Return a cached ctypes pointer-of-pointer for *arr*'s ranked memref descriptor.
-
-    The result is suitable for passing directly to ``engine.invoke``.  The
-    descriptor and the double-pointer object are kept alive in module-level
-    dicts for the lifetime of the process (or until the cache is manually
-    cleared with ``clear_descriptor_cache()``).
-    """
-    key = (arr.ctypes.data, arr.shape, arr.strides)
-    pp = _DESC_CACHE.get(key)
-    if pp is None:
-        desc = get_ranked_memref_descriptor(arr)
-        pp = ctypes.pointer(ctypes.pointer(desc))
-        _DESC_CACHE_DESC[key] = desc   # keep descriptor alive
-        _DESC_CACHE[key] = pp
-    return pp
-
-
-def clear_descriptor_cache():
-    """Evict all cached memref descriptors.
-
-    Call this if you intentionally reuse numpy array memory for a different
-    buffer (e.g. ``arr[:] = new_data`` after an in-place realloc).  Under
-    normal benchmark patterns (fixed arrays, repeated calls) this is never
-    needed.
-    """
-    _DESC_CACHE.clear()
-    _DESC_CACHE_DESC.clear()
+# Re-export for backward compatibility (callers that do
+#   from lego.backend.cpu_builder import clear_descriptor_cache)
+__all__ = [
+    "CPUKernelBuilder",
+    "CPUKernelContext",
+    "CPUTarget",
+    "LayoutBuffer",
+    "clear_descriptor_cache",
+]
 
 
 # ============================================================================
@@ -167,15 +125,16 @@ CPUTarget(
 # Kernel context — CPU equivalent of KernelContext in gpu_builder.py
 # ============================================================================
 
-class CPUKernelContext:
+class CPUKernelContext(_KernelContextBase):
     """Context passed to a user kernel body when building CPU MLIR.
 
-    Provides layout-aware load/store, arithmetic helpers, and loop helpers.
-    Mirrors KernelContext in gpu_builder.py but without GPU-specific ops
-    (no block_id/thread_id/barrier/tensor_core/shared memory).
+    Inherits shared arithmetic helpers, load_flat/store_flat, constants,
+    math ops, and for_range from :class:`_KernelContextBase`.
 
-    Additionally exposes ``tile_id``: the current outer-loop induction
-    variable (the "which tile are we computing" index).
+    CPU-specific additions vs the GPU context:
+    - Layout-aware ``load(buf, indices)`` / ``store(val, buf, indices)``.
+    - ``set_layout(buf_index, new_layout)`` for dynamic layout reassignment.
+    - No GPU-specific ops (no block_id, thread_id, barrier, MMA, shuffles).
     """
 
     def __init__(self, buf_vals, buf_descs, tile_id=None):
@@ -206,12 +165,6 @@ class CPUKernelContext:
         flat_idx = _emit_apply(layout_val, indices)
         memref_dialect.StoreOp(value, memref, [flat_idx])
 
-    def load_flat(self, buf_index: int, flat_idx):
-        return memref_dialect.LoadOp(self._buf_vals[buf_index], [flat_idx]).result
-
-    def store_flat(self, value, buf_index: int, flat_idx):
-        memref_dialect.StoreOp(value, self._buf_vals[buf_index], [flat_idx])
-
     def set_layout(self, buf_index: int, new_layout):
         from lego.backend.gpu_builder import LayoutBuffer as _LB
         self._buf_descs[buf_index] = _LB(
@@ -220,70 +173,6 @@ class CPUKernelContext:
             dtype=self._buf_descs[buf_index].dtype,
             shared=self._buf_descs[buf_index].shared,
         )
-
-    # --- Arithmetic helpers (same as KernelContext) ---
-
-    def addf(self, a, b):
-        return arith_dialect.AddFOp(a, b).result
-
-    def mulf(self, a, b):
-        return arith_dialect.MulFOp(a, b).result
-
-    def subf(self, a, b):
-        return arith_dialect.SubFOp(a, b).result
-
-    def addi(self, a, b):
-        return arith_dialect.AddIOp(a, b).result
-
-    def muli(self, a, b):
-        return arith_dialect.MulIOp(a, b).result
-
-    def add(self, a, b):
-        return self.addf(a, b)
-
-    def mul(self, a, b):
-        return self.mulf(a, b)
-
-    # --- Constants ---
-
-    def const_f32(self, value):
-        return arith_dialect.ConstantOp(F32Type.get(), float(value)).result
-
-    def const_index(self, value):
-        return _index_const(int(value))
-
-    # --- Math ops ---
-
-    def exp(self, val):
-        from lego.mlir.ir import Operation
-        return Operation.create("math.exp", results=[val.type], operands=[val]).result
-
-    def sqrt(self, val):
-        from lego.mlir.ir import Operation
-        return Operation.create("math.sqrt", results=[val.type], operands=[val]).result
-
-    def rsqrt(self, val):
-        from lego.mlir.ir import Operation
-        return Operation.create("math.rsqrt", results=[val.type], operands=[val]).result
-
-    # --- For-range loop with optional accumulator ---
-
-    def for_range(self, n, body_fn, init_vals=None):
-        if isinstance(n, int):
-            n = _index_const(n)
-        if init_vals is None:
-            loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1))
-            with InsertionPoint(loop.body):
-                body_fn(loop.induction_variable)
-                scf_dialect.YieldOp([])
-            return None
-        loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1), init_vals)
-        with InsertionPoint(loop.body):
-            iv = loop.induction_variable
-            carry_args = list(loop.inner_iter_args)
-            updated = body_fn(iv, *carry_args)
-            scf_dialect.YieldOp(updated)
-        return list(loop.results)
 
 
 # ============================================================================
@@ -800,146 +689,14 @@ class CPUKernelBuilder:
     def _make_callable(self, engine):
         """Build a Python wrapper that invokes the JIT-compiled function.
 
-        Hot-path optimisations
-        ----------------------
-        1. **Descriptor cache** — ``get_ranked_memref_descriptor()`` costs
-           ~23 µs per numpy array (Python + ctypes struct allocation).  For
-           benchmarks that call the same kernel 1000× with the same arrays
-           this adds ~0.1 ms overhead per call, masking vectorization wins.
-           We cache the descriptor *and* the ``ctypes.pointer(pointer(desc))``
-           object keyed by ``(data_ptr, shape, strides)`` so repeated calls
-           with identical arrays pay only a dict lookup + ~1 µs.
-
-        2. **Pre-built dtype → ctype map** — the ``_dtype_to_ctype`` dict is
-           built once at wrapper-creation time rather than on every call.
-
-        3. **np.ascontiguousarray guard** — skipped for arrays that are
-           already C-contiguous (the common case); only invoked when needed,
-           and its result is cached via the pointer key.
+        Delegates to :func:`_kernel_builder_base._make_callable` which
+        implements descriptor caching, scalar marshalling, and pre-cast
+        packed-array dispatch.  See that function's docstring for the full
+        list of hot-path optimisations.
         """
-        name = self._name
-        scalar_params = self._scalar_params
-        buffers = self._buffers
-
-        # Build dtype→ctype map once (not per-call).
-        _dtype_to_ctype = {
-            "f32": ctypes.c_float,
-            "f64": ctypes.c_double,
-            "i32": ctypes.c_int32,
-            "i64": ctypes.c_int64,
-            "i16": ctypes.c_int16,
-            "i8":  ctypes.c_int8,
-        }
-
-        # Hot-path optimisations
-        # ───────────────────────
-        # 4. **Pre-cached function pointer + packed array** — engine.invoke
-        #    does per-call: symbol lookup, CFUNCTYPE creation, packed-array
-        #    allocation, and N ctypes.cast calls.  Total: ~6-8 µs overhead.
-        #    Instead:
-        #      a) Call engine.lookup(name) ONCE at compile time → _ciface_fn.
-        #      b) For each (scalar, buffer) combination that appears in the
-        #         benchmark loop, build and cache a (c_void_p * N) packed
-        #         array with the addresses pre-computed.
-        #      c) On every hot-path call: key check + _ciface_fn(_pre_packed).
-        #    This reduces the per-call Python overhead from ~7 µs to ~1 µs.
-        #
-        # 5. **Single-slot last-call cache** — for the overwhelmingly common
-        #    benchmark pattern (same scalars + same arrays × 1000 calls),
-        #    one key equality check is faster than a dict lookup.
-        n_scalars = len(scalar_params)
-        n_buffers = len(buffers)
-        n_cargs = n_scalars + n_buffers
-
-        # Pre-build the ctypes callable once: avoids per-call symbol lookup
-        # and CFUNCTYPE construction inside engine.invoke.
-        try:
-            _ciface_fn = engine.lookup(name)   # ctypes callable for hot path
-        except RuntimeError:
-            _ciface_fn = None   # fall back to engine.invoke if lookup fails
-
-        _scalar_cache: dict = {}   # (dtype_str, py_val) → ctypes-array-1
-        # Cache maps key → (cargs_list, pre_packed_c_void_p_array)
-        # The cargs list keeps ctypes objects alive (prevents GC of descriptors).
-        # The pre_packed array is passed directly to _ciface_fn — no per-call cast.
-        _call_cache: dict = {}     # key → (cargs_list, packed_array | None)
-        _last: list = [None, None, None]  # [last_key, last_cargs, last_packed]
-
-        def _build_packed(cargs):
-            """Build a pre-cast (c_void_p * N) array from *cargs*."""
-            p = (ctypes.c_void_p * n_cargs)()
-            for j, v in enumerate(cargs):
-                p[j] = ctypes.cast(v, ctypes.c_void_p)
-            return p
-
-        def jit_fn(*args):
-            """Invoke the JIT-compiled CPU kernel.
-
-            Args:
-                *args: scalar args (matching scalar_params types), then one
-                       numpy array per LayoutBuffer (in declaration order).
-            """
-            # Validate arg count once.
-            if len(args) != n_cargs:
-                raise ValueError(
-                    f"Expected {n_cargs} arg(s) "
-                    f"({n_scalars} scalar(s) + {n_buffers} buffer(s)), "
-                    f"got {len(args)}"
-                )
-
-            # ── Single-slot last-call cache ──────────────────────────────────
-            # Build a cheap key using id() for O(1) object identity on arrays.
-            # On a hit: call _ciface_fn with the pre-built packed array directly
-            # — zero Python allocation, zero dict lookup, zero per-buffer work.
-            if n_scalars == 1 and n_buffers == 2:
-                key = (args[0], id(args[1]), id(args[2]))
-            elif n_scalars == 0 and n_buffers == 2:
-                key = (id(args[0]), id(args[1]))
-            else:
-                key = tuple(args[:n_scalars]) + tuple(id(a) for a in args[n_scalars:])
-
-            if key == _last[0]:
-                if _ciface_fn is not None:
-                    _ciface_fn(_last[2])   # pre-packed, zero-overhead dispatch
-                else:
-                    engine.invoke(name, *_last[1])
-                return
-
-            # ── Full _call_cache (multi-array sweeps, new combos) ────────────
-            cached = _call_cache.get(key)
-            if cached is not None:
-                cargs, packed = cached
-            else:
-                # Build cargs from scratch.
-                cargs = [None] * n_cargs
-
-                for i, (dtype_str, py_val) in enumerate(
-                        zip(scalar_params, args[:n_scalars])):
-                    kk = (dtype_str, py_val)
-                    c_wrap = _scalar_cache.get(kk)
-                    if c_wrap is None:
-                        c_ty = _dtype_to_ctype.get(dtype_str, ctypes.c_float)
-                        c_wrap = (c_ty * 1)(py_val)
-                        _scalar_cache[kk] = c_wrap
-                    cargs[i] = c_wrap
-
-                for i, arr in enumerate(args[n_scalars:]):
-                    if isinstance(arr, np.ndarray):
-                        arr_c = arr if arr.flags['C_CONTIGUOUS'] else np.ascontiguousarray(arr)
-                        cargs[n_scalars + i] = _cached_memref_ptr(arr_c)
-                    else:
-                        cargs[n_scalars + i] = arr
-
-                # Pre-cast addresses into the packed array once.
-                packed = _build_packed(cargs) if _ciface_fn is not None else None
-                _call_cache[key] = (cargs, packed)
-
-            _last[0] = key
-            _last[1] = cargs
-            _last[2] = packed
-            if _ciface_fn is not None:
-                _ciface_fn(packed)
-            else:
-                engine.invoke(name, *cargs)
-
-        return jit_fn
+        return _make_callable_base(
+            engine,
+            name=self._name,
+            scalar_params=self._scalar_params,
+            buffers=self._buffers,
+        )

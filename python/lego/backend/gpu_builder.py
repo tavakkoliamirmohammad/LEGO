@@ -59,6 +59,7 @@ from lego.backend.compiler import (
     DType, _dtype_to_mlir, _get_mlir_element_type, _get_layout_dims,
 )
 from lego.backend.symbolic import emit_layout_from_python, _resolve_dim
+from lego.backend._kernel_builder_base import _KernelContextBase
 
 
 def _ensure_stack_size():
@@ -261,16 +262,18 @@ class _DimAccessor:
         return self._op(gpu_dialect.Dimension.z)
 
 
-class KernelContext:
+class KernelContext(_KernelContextBase):
     """Context object passed to user kernel body functions.
 
-    Provides:
-      - Layout-aware load/store via LEGO ops
-      - GPU thread/block ID access
-      - Layout apply/apply_inverse for index computation
-      - Inner loops with layout-derived indices
-      - Barriers for shared memory synchronization
-      - Arithmetic helpers
+    Inherits shared arithmetic helpers, load_flat/store_flat, constants,
+    math ops, for_range, if_, lt, eq from :class:`_KernelContextBase`.
+
+    GPU-specific additions:
+      - ``block_id``, ``thread_id``, ``block_dim`` dimension accessors.
+      - ``barrier()`` for shared memory synchronization.
+      - ``tensor_core()`` and MMA fragment operations.
+      - Warp shuffle and all-reduce operations.
+      - Layout-aware load/store via LEGO ops.
     """
 
     def __init__(self, buf_vals, buf_descs, shared_vals=None):
@@ -540,89 +543,9 @@ class KernelContext:
         """
         return _TensorCoreHandle(tile_m, tile_n, tile_k, a_dtype, c_dtype)
 
-    # --- Math operations ---
-
-    def exp(self, val):
-        """Compute e^val (math.exp)."""
-        from lego.mlir.ir import Operation
-        return Operation.create("math.exp", results=[val.type], operands=[val]).result
-
-    def sqrt(self, val):
-        """Compute sqrt(val) (math.sqrt)."""
-        from lego.mlir.ir import Operation
-        return Operation.create("math.sqrt", results=[val.type], operands=[val]).result
-
-    def rsqrt(self, val):
-        """Compute 1/sqrt(val) (math.rsqrt)."""
-        from lego.mlir.ir import Operation
-        return Operation.create("math.rsqrt", results=[val.type], operands=[val]).result
-
-    # --- Arithmetic helpers ---
-
-    def addf(self, a, b):
-        return arith_dialect.AddFOp(a, b).result
-
-    def mulf(self, a, b):
-        return arith_dialect.MulFOp(a, b).result
-
-    def subf(self, a, b):
-        return arith_dialect.SubFOp(a, b).result
-
-    def addi(self, a, b):
-        return arith_dialect.AddIOp(a, b).result
-
-    def muli(self, a, b):
-        return arith_dialect.MulIOp(a, b).result
-
-    def add(self, a, b):
-        return self.addf(a, b)
-
-    def mul(self, a, b):
-        return self.mulf(a, b)
-
-    # --- Constants ---
-
-    def const_f32(self, value):
-        return arith_dialect.ConstantOp(F32Type.get(), float(value)).result
-
-    def const_index(self, value):
-        return _index_const(int(value))
-
-    # --- For-range loop with accumulator ---
-
-    def for_range(self, n, body_fn, init_vals=None):
-        """SCF for loop 0..n with optional carried accumulator values."""
-        if isinstance(n, int):
-            n = _index_const(n)
-        if init_vals is None:
-            loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1))
-            with InsertionPoint(loop.body):
-                body_fn(loop.induction_variable)
-                scf_dialect.YieldOp([])
-            return None
-        loop = scf_dialect.ForOp(_index_const(0), n, _index_const(1), init_vals)
-        with InsertionPoint(loop.body):
-            iv = loop.induction_variable
-            carry_args = list(loop.inner_iter_args)
-            updated = body_fn(iv, *carry_args)
-            scf_dialect.YieldOp(updated)
-        return list(loop.results)
-
-    # --- Conditionals ---
-
-    def if_(self, cond, then_fn):
-        if_op = scf_dialect.IfOp(cond, has_else=False)
-        with InsertionPoint(if_op.then_block):
-            then_fn()
-            scf_dialect.YieldOp([])
-
-    # --- Comparisons ---
-
-    def lt(self, a, b):
-        return arith_dialect.CmpIOp(arith_dialect.CmpIPredicate.ult, a, b).result
-
-    def eq(self, a, b):
-        return arith_dialect.CmpIOp(arith_dialect.CmpIPredicate.eq, a, b).result
+    # Note: exp, sqrt, rsqrt, addf, mulf, subf, divf, addi, muli, subi,
+    # add, mul, const_f32, const_index, for_range, if_, lt, eq,
+    # load_flat, store_flat are all inherited from _KernelContextBase.
 
     def load_raw(self, buf_index, gid=None):
         if gid is None:
