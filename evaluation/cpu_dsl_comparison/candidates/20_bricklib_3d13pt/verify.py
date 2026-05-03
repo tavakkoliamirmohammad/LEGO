@@ -1,10 +1,18 @@
-"""Verify 20_bricklib_3d13pt correctness across scalar_jit / vec_jit paths."""
+"""Verify 20_bricklib_3d13pt correctness across scalar_jit / vec_jit paths.
+
+Safe range analysis for the 13-point stencil:
+  For element at flat = n + _OFFSET, the most extreme neighbor access is
+  A[flat - _NYNZ - _NZ].  This is valid only when flat - _NYNZ - _NZ >= 0,
+  i.e. n >= _NYNZ + _NZ - _OFFSET = 1024 + 32 - 1024 = 32.
+  Similarly, A[flat + _NYNZ + _NZ] is valid only when n <= _INNER - _NZ - 1.
+  So we skip the first _NZ = 32 and last _NZ + 1 = 33 interior elements.
+"""
 import sys
 import numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from kernel import kernel_cpu_dsl, N_FLAT, _INNER, _OFFSET
+from kernel import kernel_cpu_dsl, N_FLAT, _INNER, _OFFSET, _NYNZ, _NZ
 
 
 def main():
@@ -29,26 +37,27 @@ def main():
         print(f"PENDING R??: vec_jit failed: {e}")
         return
 
-    # Compare interior points only.
-    # The 13-point stencil includes diagonal neighbors at offsets ±(_NYNZ±_NZ)
-    # and ±(_NYNZ±1). At the boundary of the vectorized tile, the gather may
-    # read slightly outside the "safe" interior region, causing occasional
-    # mismatch near the last strip boundary. Skip last 2 layers.
-    from kernel import _NYNZ
-    safe_end = _INNER - 2 * _NYNZ
-    if safe_end <= 0:
-        print(f"PENDING R??: safe range too small for 13pt stencil at this N")
+    # Safe range: skip first _NZ and last _NZ interior elements to avoid
+    # out-of-bounds accesses from the diagonal neighbors (±_NYNZ±_NZ).
+    # Both scalar and vec read garbage at those boundary elements, but they
+    # read DIFFERENT garbage (scalar Python wraps, vec reads vectorized OOB).
+    safe_start = _NZ           # = 32: skip first row of interior
+    safe_end   = _INNER - _NZ  # = 30688: skip last row of interior
+
+    if safe_end <= safe_start:
+        print(f"PENDING R??: safe range too small for 13pt stencil")
         return
+
     try:
         np.testing.assert_allclose(
-            B_vec[_OFFSET:_OFFSET + safe_end],
-            B_sc[_OFFSET:_OFFSET + safe_end],
+            B_vec[_OFFSET + safe_start : _OFFSET + safe_end],
+            B_sc [_OFFSET + safe_start : _OFFSET + safe_end],
             rtol=1e-4,
-            err_msg="vec_jit != scalar_jit",
+            err_msg="vec_jit != scalar_jit (in safe interior)",
         )
         print(f"VERIFIED: {__file__}")
-    except AssertionError:
-        print(f"PENDING R??: 13pt stencil boundary mismatch (diagonal gather at last strip)")
+    except AssertionError as e:
+        print(f"PENDING R??: 13pt stencil mismatch in safe range: {str(e)[:80]}")
 
 
 if __name__ == "__main__":
