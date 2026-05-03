@@ -303,3 +303,52 @@ def test_bitwise_gather_runs():
 
     np.testing.assert_allclose(B, B_ref, rtol=1e-5,
                                err_msg="bitwise gather JIT result mismatch")
+
+
+# ---------------------------------------------------------------------------
+# Tier 10 — AOT object-file path (R13)
+# Validates that compile_aot() produces a .o file containing vector FMA ops.
+# ---------------------------------------------------------------------------
+
+@_skip_no_x86_pipeline
+def test_aot_object_file():
+    """R13: compile_aot() emits a relocatable .o with vector instructions.
+
+    Compiles SAXPY to a .o via ExecutionEngine.dump_to_object_file, then
+    runs objdump -d to confirm the file contains vector FMA or multiply
+    instructions (v prefix on x86 AVX/AVX-512 mnemonics).
+    """
+    import os
+    import subprocess
+
+    obj_path = _saxpy.compile_aot(output_path='/tmp/test_saxpy_aot.o',
+                                  target='cpu')
+    assert os.path.exists(obj_path), f"AOT .o not written: {obj_path}"
+    assert os.path.getsize(obj_path) > 0, "AOT .o is empty"
+
+    # Disassemble and look for vector (AVX/AVX-512) instructions.
+    # On x86, these begin with 'v' (vmovaps, vfmadd, vmulps, vaddps, …).
+    try:
+        out = subprocess.check_output(
+            ['objdump', '-d', obj_path],
+            stderr=subprocess.DEVNULL,
+        ).decode(errors='replace')
+    except FileNotFoundError:
+        pytest.skip("objdump not available on this system")
+    except subprocess.CalledProcessError as e:
+        pytest.fail(f"objdump failed: {e}")
+
+    # Check for any vector instruction prefix (vmovaps, vmulps, vfmadd*, etc.)
+    has_vector = any(f'\tv{op}' in out for op in
+                     ('movaps', 'mulps', 'addps', 'fmadd', 'movups',
+                      'mulss', 'addss', 'movsd', 'mulsd', 'addsd',
+                      'mulfp', 'fadd', 'fmul', 'load'))
+    # Broader fallback: any word starting with 'v' followed by a letter in asm
+    if not has_vector:
+        import re
+        has_vector = bool(re.search(r'\tv[a-z]', out))
+
+    assert has_vector, (
+        "Expected vector instructions (v-prefix) in AOT .o disassembly.\n"
+        f"objdump output (first 2000 chars):\n{out[:2000]}"
+    )

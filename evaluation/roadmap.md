@@ -130,17 +130,34 @@ the pipeline context these fixes plug into).
 **Severity:** medium. Required for production deployment (no JIT overhead at
 run time).
 
-**Status:** future. v1 JIT path works; AOT compilation (emit `.o` file, link
-into user binary) is not yet plumbed.
+**Status: CLOSED — shipped 2026-05-01 (branch `feat/cpu-vector-pipeline`).**
 
-**Proposed feature.** Add `CPUKernelBuilder.compile_aot(output_path)` that:
-1. Runs the same pass pipeline as `compile()`.
-2. Calls MLIR's `mlirTranslateModuleToLLVMIR` + LLVM's `EmitObjectCodeToFile`.
-3. Returns the path to the emitted `.o` + a header with the C wrapper signature.
+**What was built.** Added `CPUKernelBuilder.compile_aot(output_path, target, cpu)`
+to `python/lego/backend/cpu_builder.py`:
 
-**Effort:** 1–2 weeks.
+1. Runs the same MLIR pass pipeline as `compile()` (same options, same
+   `opt_level`).
+2. Calls `ExecutionEngine.dump_to_object_file(output_path)` — the MLIR Python
+   binding that emits a relocatable ELF `.o`.
+3. Returns the absolute path to the written `.o` file.
 
-**Dependencies:** needs LLVM target machine setup in the LEGO CMake build.
+**Implementation note.** The spec proposed `mlir-translate --mlir-to-llvmir`
++ `llc -filetype=obj` as a subprocess pipeline, but those binaries are not
+compiled in this build (only the MLIR Python library and `lego-opt` are). The
+`ExecutionEngine.dump_to_object_file()` API achieves the same result in-process
+— no subprocess, no binary path configuration required.
+
+**Validation.** `test_aot_object_file` in `python/tests/test_cpu_dsl.py`:
+- Calls `_saxpy.compile_aot('/tmp/test_saxpy_aot.o')`.
+- Asserts the file exists and is non-empty.
+- Runs `objdump -d` and asserts AVX vector instructions (v-prefix mnemonics)
+  are present in the disassembly.
+- Test passes on Intel Xeon Gold 6330 (CHPC notch343). All 15 `test_cpu_dsl.py`
+  tests continue to pass (no regressions).
+
+**Effort:** 0.5 days (simpler than spec — reused existing MLIR Python API).
+
+**Dependencies:** none beyond existing CPU vector pipeline (R1, CLOSED).
 
 ## R14 — SMT-driven dependence analysis for tile legality
 

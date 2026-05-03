@@ -473,6 +473,53 @@ class CPUKernelBuilder:
 
         return self._make_callable(self._engines[cache_key])
 
+    def compile_aot(self, output_path: str = "kernel.o",
+                   target: str = "cpu", cpu: Optional[str] = None) -> str:
+        """Compile to the given CPU target and emit a relocatable .o file.
+
+        Uses the same MLIR pass pipeline as ``compile()``, then writes the
+        compiled kernel to an object file via
+        ``ExecutionEngine.dump_to_object_file()``.  The resulting ``.o`` can be
+        linked into a static or shared binary without any JIT runtime overhead.
+
+        Args:
+            output_path: Destination for the ``.o`` file.  Parent directory
+                         must exist.  Default: ``"kernel.o"``.
+            target:      CPU backend — same values as ``compile()``.
+            cpu:         Optional CPU string (e.g. ``"skx"``, ``"znver3"``).
+
+        Returns:
+            The resolved absolute path to the written object file.
+
+        Example::
+
+            obj_path = builder.compile_aot(output_path='/tmp/saxpy.o')
+            # Link: gcc -O2 harness.c /tmp/saxpy.o -o harness
+        """
+        import os
+        cpu_target = _CPU_TARGETS.get(target)
+        if cpu_target is None:
+            raise ValueError(
+                f"Unknown CPU target '{target}'. "
+                f"Available: {list(_CPU_TARGETS)}"
+            )
+        ctx, module = self.build_module()
+        pipeline_str = cpu_target.pipeline_string(cpu=cpu)
+        with ctx:
+            try:
+                pm = PassManager.parse(pipeline_str)
+                pm.run(module.operation)
+            except Exception as e:
+                raise RuntimeError(
+                    f"AOT compilation failed ({cpu_target.pipeline}):\n{e}"
+                ) from e
+            # opt_level=3: same as compile() for non-scalar targets.
+            jit_opt = 0 if target == "scalar" else 3
+            engine = ExecutionEngine(module, opt_level=jit_opt)
+            engine.dump_to_object_file(output_path)
+
+        return os.path.abspath(output_path)
+
     def bench(self, *args, n_iters: int = 1000, target: str = "cpu",
               cpu: Optional[str] = None) -> float:
         """Run the kernel *n_iters* times in a **single** JIT-level call.
