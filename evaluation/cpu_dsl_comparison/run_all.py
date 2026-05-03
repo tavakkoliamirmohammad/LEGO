@@ -6,8 +6,9 @@ Usage (activate the venv first; no PYTHONPATH override needed):
     python run_all.py
 
 Each candidate's measure.py is run in a subprocess.  The last line of
-stdout must be a single JSON record conforming to the schema::
+stdout must be a single JSON record.  Two JSON schemas are accepted:
 
+Legacy schema (old harnesses):
     {
       "name":        "<candidate_id>",
       "baseline_ms": <float>,
@@ -15,6 +16,19 @@ stdout must be a single JSON record conforming to the schema::
       "speedup":     <float | NaN>,
       "verdict":     "WIN" | "PARITY" | "LOSS" | "ERROR",
       "notes":       "<optional string>"
+    }
+
+Isolation schema (new harnesses, apples-to-apples):
+    {
+      "name":                "<candidate_id>",
+      "N":                   <int>,
+      "numpy_ms":            <float>,
+      "scalar_jit_ms":       <float | NaN>,
+      "vec_jit_ms":          <float | NaN>,
+      "speedup_isolated_jit": <float | NaN>,
+      "speedup_vs_numpy":    <float | NaN>,
+      "verdict":             "WIN" | "PARITY" | "LOSS" | "ERROR",
+      "notes":               "<optional string>"
     }
 
 The top-level results.json is written alongside this script.
@@ -86,28 +100,71 @@ for cand_dir in sorted(CANDIDATES_DIR.iterdir()):
         results.append({"name": cand_dir.name, "verdict": "ERROR",
                         "notes": str(exc)})
 
-# Print summary table.
+
+def _fmt_ms(v):
+    if isinstance(v, float) and not math.isnan(v):
+        return f"{v:>13.3f}"
+    return f"{'NaN':>13}"
+
+
+def _fmt_sp(v, width=10):
+    if isinstance(v, float) and not math.isnan(v):
+        return f"{v:>{width-1}.2f}x"
+    return f"{'NaN':>{width}}"
+
+
+# Check if any result uses the isolation schema.
+_has_isolation = any("vec_jit_ms" in r for r in results)
+
 print()
-print(f"{'Name':<28} {'Baseline ms':>14} {'cpu_dsl ms':>14} {'Speedup':>10} {'Verdict':>10}")
-print("-" * 82)
-for r in results:
-    name = r.get("name", "?")
-    verdict = r.get("verdict", "")
-    base = r.get("baseline_ms", math.nan)
-    dsl = r.get("cpu_dsl_ms", math.nan)
-    sp = r.get("speedup", math.nan)
+if _has_isolation:
+    # Full isolation table.
+    hdr = (f"{'Name':<28} {'N':>8} {'numpy_ms':>13} {'scalar_jit':>13}"
+           f" {'vec_jit':>13} {'vec_isolated':>12} {'vs_numpy':>10} {'Verdict':>8}")
+    print(hdr)
+    print("-" * len(hdr))
+    for r in results:
+        name = r.get("name", "?")
+        verdict = r.get("verdict", "")
+        if verdict == "ERROR":
+            note_snippet = r.get("notes", "")[:50]
+            print(f"{name:<28} {'(error)':>8} {'':>13} {'':>13} {'':>13} {'':>12} {'':>10} {verdict:>8}  {note_snippet}")
+            continue
 
-    def _fmt(v):
-        return f"{v:>14.3f}" if isinstance(v, float) and not math.isnan(v) else f"{'NaN':>14}"
+        n_val = r.get("N", "")
+        n_str = f"{n_val:>8}" if isinstance(n_val, int) else f"{'?':>8}"
 
-    def _fmt_sp(v):
-        return f"{v:>9.2f}x" if isinstance(v, float) and not math.isnan(v) else f"{'NaN':>10}"
-
-    if verdict == "ERROR":
-        note_snippet = r.get("notes", "")[:50]
-        print(f"{name:<28} {'(error)':>14} {'':>14} {'':>10} {verdict:>10}  {note_snippet}")
-    else:
-        print(f"{name:<28} {_fmt(base)} {_fmt(dsl)} {_fmt_sp(sp)} {verdict:>10}")
+        # Isolation schema
+        if "vec_jit_ms" in r:
+            t_numpy = r.get("numpy_ms", math.nan)
+            t_scalar = r.get("scalar_jit_ms", math.nan)
+            t_vec = r.get("vec_jit_ms", math.nan)
+            sp_iso = r.get("speedup_isolated_jit", math.nan)
+            sp_np = r.get("speedup_vs_numpy", math.nan)
+            print(f"{name:<28} {n_str} {_fmt_ms(t_numpy)} {_fmt_ms(t_scalar)}"
+                  f" {_fmt_ms(t_vec)} {_fmt_sp(sp_iso, 12)} {_fmt_sp(sp_np, 10)} {verdict:>8}")
+        else:
+            # Legacy schema fallback.
+            base = r.get("baseline_ms", math.nan)
+            dsl = r.get("cpu_dsl_ms", math.nan)
+            sp = r.get("speedup", math.nan)
+            print(f"{name:<28} {'?':>8} {_fmt_ms(base)} {'NaN':>13}"
+                  f" {_fmt_ms(dsl)} {_fmt_sp(sp, 12)} {'NaN':>10} {verdict:>8}")
+else:
+    # Legacy table (no isolation results).
+    print(f"{'Name':<28} {'Baseline ms':>14} {'cpu_dsl ms':>14} {'Speedup':>10} {'Verdict':>10}")
+    print("-" * 82)
+    for r in results:
+        name = r.get("name", "?")
+        verdict = r.get("verdict", "")
+        base = r.get("baseline_ms", math.nan)
+        dsl = r.get("cpu_dsl_ms", math.nan)
+        sp = r.get("speedup", math.nan)
+        if verdict == "ERROR":
+            note_snippet = r.get("notes", "")[:50]
+            print(f"{name:<28} {'(error)':>14} {'':>14} {'':>10} {verdict:>10}  {note_snippet}")
+        else:
+            print(f"{name:<28} {_fmt_ms(base)} {_fmt_ms(dsl)} {_fmt_sp(sp)} {verdict:>10}")
 
 # Save full results.
 out_path = ROOT / "results.json"

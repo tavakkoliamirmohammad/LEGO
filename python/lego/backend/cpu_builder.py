@@ -93,6 +93,16 @@ CPUTarget(
     default_cpu="skx",
 ).register()
 
+# Scalar (no vectorization) baseline — same calling convention as x86/arm-neon
+# but compiled through lego-to-llvm (scalar SCF loops, no vector ops).
+# Used for apples-to-apples speedup isolation: compare scalar-JIT vs vec-JIT
+# to measure the vectorization benefit independently of JIT startup overhead.
+CPUTarget(
+    name="scalar",
+    pipeline="lego-to-llvm",
+    default_cpu=None,
+).register()
+
 
 # ============================================================================
 # Kernel context — CPU equivalent of KernelContext in gpu_builder.py
@@ -284,9 +294,10 @@ class CPUKernelBuilder:
         self._kernel_body = kernel_body
         self._name = name
         self._scalar_params = list(scalar_params or [])
-        # JIT state
-        self._ctx = None
-        self._engine = None
+        # JIT state — keyed by (target, cpu) so the same builder can be
+        # compiled to multiple targets (e.g. 'scalar' and 'x86' for the
+        # apples-to-apples isolation harness).
+        self._engines: Dict[tuple, object] = {}
 
     def build_module(self):
         """Build the MLIR module (func.func with LEGO dialect ops)."""
@@ -342,25 +353,35 @@ class CPUKernelBuilder:
     def compile(self, target: str = "cpu", cpu: Optional[str] = None) -> Callable:
         """Compile to the given CPU target and return a JIT-callable.
 
+        The same builder instance can be compiled to multiple targets
+        (e.g. ``'scalar'`` and ``'x86'``) — each produces an independent
+        JIT-compiled function, enabling apples-to-apples isolation of the
+        vectorization benefit vs JIT startup overhead.
+
         Args:
-            target: ``"cpu"`` / ``"x86"`` / ``"arm-neon"`` — must be in
-                    ``_CPU_TARGETS``.
+            target: ``"cpu"`` / ``"x86"`` / ``"arm-neon"`` / ``"scalar"`` —
+                    must be registered in ``_CPU_TARGETS``.
+                    ``"scalar"`` compiles via ``lego-to-llvm`` (no vector ops)
+                    and serves as the JIT baseline for isolation harnesses.
             cpu:    Optional CPU override (e.g. ``"znver3"``, ``"skl"``).
+                    Ignored for ``target="scalar"`` (lego-to-llvm has no cpu
+                    option).
 
         Returns:
             A Python callable with the same signature as the kernel
             (scalars first, then numpy arrays for each LayoutBuffer).
         """
-        if self._engine is None:
+        cache_key = (target, cpu)
+        if cache_key not in self._engines:
             cpu_target = _CPU_TARGETS.get(target)
             if cpu_target is None:
                 raise ValueError(
                     f"Unknown CPU target '{target}'. "
                     f"Available: {list(_CPU_TARGETS)}"
                 )
-            self._ctx, module = self.build_module()
+            ctx, module = self.build_module()
             pipeline_str = cpu_target.pipeline_string(cpu=cpu)
-            with self._ctx:
+            with ctx:
                 try:
                     pm = PassManager.parse(pipeline_str)
                     pm.run(module.operation)
@@ -368,13 +389,13 @@ class CPUKernelBuilder:
                     raise RuntimeError(
                         f"CPU compilation failed ({cpu_target.pipeline}):\n{e}"
                     ) from e
-                self._engine = ExecutionEngine(module, opt_level=2)
+                engine = ExecutionEngine(module, opt_level=2)
+            self._engines[cache_key] = engine
 
-        return self._make_callable()
+        return self._make_callable(self._engines[cache_key])
 
-    def _make_callable(self):
+    def _make_callable(self, engine):
         """Build a Python wrapper that invokes the JIT-compiled function."""
-        engine = self._engine
         name = self._name
         scalar_params = self._scalar_params
         buffers = self._buffers

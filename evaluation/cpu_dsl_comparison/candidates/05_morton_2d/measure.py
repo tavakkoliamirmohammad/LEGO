@@ -1,7 +1,8 @@
 """Measure baseline vs cpu_dsl for 05_morton_2d.
 
+Isolation harness: scalar-JIT vs vectorized-JIT (apples-to-apples).
 Note: v1 DSL does not support bitwise AND/shift, so the cpu_dsl version
-uses a proxy index (z → z).  The baseline uses proper Morton decode.
+uses a proxy index (z → z). The baseline uses proper Morton decode.
 Verdict will be LOSS or ERROR until bitwise ops land in the DSL.
 """
 import json
@@ -15,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from kernel import kernel_scalar, kernel_cpu_dsl, _NN
 
 
-def _measure(fn, warmup=5, timed=30):
+def _measure(fn, warmup=3, timed=20):
     for _ in range(warmup):
         fn()
     times = []
@@ -31,27 +32,51 @@ def main():
     M_buf = rng.standard_normal(_NN).astype(np.float32)
     out_base = np.zeros(_NN, dtype=np.float32)
 
-    t_base = _measure(lambda: kernel_scalar(M_buf, out_base))
+    # NumPy baseline.
+    t_numpy = _measure(lambda: kernel_scalar(M_buf, out_base))
 
-    out_dsl = np.zeros(_NN, dtype=np.float32)
+    # Scalar JIT baseline (apples-to-apples).
+    t_scalar_jit = float('nan')
     try:
-        compiled = kernel_cpu_dsl.compile()
-        t_dsl = _measure(lambda: compiled(M_buf, out_dsl))
-        speedup = t_base / t_dsl
-        verdict = "WIN" if speedup > 1.05 else "PARITY" if speedup > 0.95 else "LOSS"
-        notes = ("DSL uses identity index (z→z); Morton decode blocked by missing "
-                 "bitwise ops in v1 DSL.  Correctness check skipped.")
+        scalar_jit = kernel_cpu_dsl.compile(target='scalar')
+        out_scalar = np.zeros(_NN, dtype=np.float32)
+        t_scalar_jit = _measure(lambda: scalar_jit(M_buf, out_scalar))
     except Exception as e:
-        t_dsl = float("nan")
-        speedup = float("nan")
-        verdict = "ERROR"
+        t_scalar_jit = float('nan')
+
+    # Vectorized JIT.
+    t_vec_jit = float('nan')
+    notes = ("DSL uses identity index (z→z); Morton decode blocked by missing "
+             "bitwise ops in v1 DSL. Correctness check skipped.")
+    try:
+        vec_jit = kernel_cpu_dsl.compile(target='x86')
+        out_dsl = np.zeros(_NN, dtype=np.float32)
+        t_vec_jit = _measure(lambda: vec_jit(M_buf, out_dsl))
+    except Exception as e:
+        t_vec_jit = float('nan')
         notes = str(e)
+
+    def _safe_ratio(a, b):
+        if a == a and b == b and b > 0:
+            return round(a / b, 4)
+        return float('nan')
+
+    speedup_isolated = _safe_ratio(t_scalar_jit, t_vec_jit)
+    speedup_vs_numpy = _safe_ratio(t_numpy, t_vec_jit)
+
+    verdict = "ERROR" if t_vec_jit != t_vec_jit else (
+        "WIN" if speedup_isolated > 1.05 else
+        "PARITY" if speedup_isolated > 0.95 else "LOSS"
+    )
 
     rec = {
         "name": "05_morton_2d",
-        "baseline_ms": round(t_base, 4),
-        "cpu_dsl_ms": round(t_dsl, 4) if t_dsl == t_dsl else t_dsl,
-        "speedup": round(speedup, 4) if speedup == speedup else speedup,
+        "N": _NN,
+        "numpy_ms": round(t_numpy, 4),
+        "scalar_jit_ms": round(t_scalar_jit, 4) if t_scalar_jit == t_scalar_jit else t_scalar_jit,
+        "vec_jit_ms": round(t_vec_jit, 4) if t_vec_jit == t_vec_jit else t_vec_jit,
+        "speedup_isolated_jit": speedup_isolated,
+        "speedup_vs_numpy": speedup_vs_numpy,
         "verdict": verdict,
         "notes": notes,
     }

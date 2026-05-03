@@ -1,4 +1,7 @@
-"""Measure baseline vs cpu_dsl for 07_mixed_precision."""
+"""Measure baseline vs cpu_dsl for 07_mixed_precision.
+
+Isolation harness: scalar-JIT vs vectorized-JIT at large N.
+"""
 import json
 import sys
 import time
@@ -7,10 +10,24 @@ import numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from kernel import kernel_scalar, kernel_cpu_dsl, N, SCALE
+from lego.backend.cpu_dsl import cpu_kernel, Buffer
+
+# Large N to amortize JIT startup overhead.
+N_BENCH = 1 << 20   # 1M elements
+TILE = 16
+_SCALE = 1.5
 
 
-def _measure(fn, warmup=5, timed=30):
+@cpu_kernel(grid=(N_BENCH,), tile=(TILE,))
+def _kernel_bench(X: Buffer[N_BENCH], Y: Buffer[N_BENCH]):
+    for i in tile_range:
+        Y[i] = 1.5 * X[i] + Y[i]
+
+
+from kernel import kernel_scalar, kernel_cpu_dsl, N as N_SMALL, SCALE
+
+
+def _measure(fn, warmup=3, timed=20):
     for _ in range(warmup):
         fn()
     times = []
@@ -23,37 +40,69 @@ def _measure(fn, warmup=5, timed=30):
 
 def main():
     rng = np.random.default_rng(0)
-    X = rng.standard_normal(N).astype(np.float32)
-    Y_ref = rng.standard_normal(N).astype(np.float32)
 
-    Y_base = Y_ref.copy()
-    t_base = _measure(lambda: kernel_scalar(X, Y_base))
+    # Correctness check at small N.
+    X_s = rng.standard_normal(N_SMALL).astype(np.float32)
+    Y_ref = rng.standard_normal(N_SMALL).astype(np.float32)
+    Y_check_base = Y_ref.copy()
+    kernel_scalar(X_s, Y_check_base)
 
-    Y_dsl = Y_ref.copy()
+    # Large-N timing arrays.
+    X_big = rng.standard_normal(N_BENCH).astype(np.float32)
+    Y_big_ref = rng.standard_normal(N_BENCH).astype(np.float32)
+
+    # NumPy baseline.
+    Y_numpy = Y_big_ref.copy()
+    t_numpy = _measure(lambda: kernel_scalar(X_big, Y_numpy))
+
+    # Scalar JIT baseline.
+    t_scalar_jit = float('nan')
     try:
-        compiled = kernel_cpu_dsl.compile()
-        t_dsl = _measure(lambda: compiled(X, Y_dsl))
-        # Correctness
-        Y_check_base = Y_ref.copy()
+        scalar_jit = _kernel_bench.compile(target='scalar')
+        Y_scalar = Y_big_ref.copy()
+        t_scalar_jit = _measure(lambda: scalar_jit(X_big, Y_scalar))
+    except Exception as e:
+        t_scalar_jit = float('nan')
+
+    # Vectorized JIT.
+    t_vec_jit = float('nan')
+    notes = "scale=1.5 baked as f32 constant; 2-buffer form avoids v1 R12 store bug"
+    try:
+        vec_jit = _kernel_bench.compile(target='x86')
+        Y_vec = Y_big_ref.copy()
+        t_vec_jit = _measure(lambda: vec_jit(X_big, Y_vec))
+
+        # Correctness at small N.
         Y_check_dsl = Y_ref.copy()
-        kernel_scalar(X, Y_check_base)
-        compiled(X, Y_check_dsl)
+        vec_jit_small = kernel_cpu_dsl.compile(target='x86')
+        vec_jit_small(X_s, Y_check_dsl)
         np.testing.assert_allclose(Y_check_dsl, Y_check_base, rtol=1e-4,
                                    err_msg="mixed_precision correctness mismatch")
-        speedup = t_base / t_dsl
-        verdict = "WIN" if speedup > 1.05 else "PARITY" if speedup > 0.95 else "LOSS"
-        notes = "scale=1.5 baked as f32 constant; 2-buffer form avoids v1 R12 store bug"
     except Exception as e:
-        t_dsl = float("nan")
-        speedup = float("nan")
-        verdict = "ERROR"
+        t_vec_jit = float('nan')
         notes = str(e)
+
+    def _safe_ratio(a, b):
+        if a == a and b == b and b > 0:
+            return round(a / b, 4)
+        return float('nan')
+
+    speedup_isolated = _safe_ratio(t_scalar_jit, t_vec_jit)
+    speedup_vs_numpy = _safe_ratio(t_numpy, t_vec_jit)
+
+    verdict = "ERROR" if t_vec_jit != t_vec_jit else (
+        "WIN" if speedup_isolated > 1.05 else
+        "PARITY" if speedup_isolated > 0.95 else "LOSS"
+    )
 
     rec = {
         "name": "07_mixed_precision",
-        "baseline_ms": round(t_base, 4),
-        "cpu_dsl_ms": round(t_dsl, 4) if t_dsl == t_dsl else t_dsl,
-        "speedup": round(speedup, 4) if speedup == speedup else speedup,
+        "N": N_BENCH,
+        "numpy_ms": round(t_numpy, 4),
+        "scalar_jit_ms": round(t_scalar_jit, 4) if t_scalar_jit == t_scalar_jit else t_scalar_jit,
+        "vec_jit_ms": round(t_vec_jit, 4) if t_vec_jit == t_vec_jit else t_vec_jit,
+        "speedup_isolated_jit": speedup_isolated,
+        "speedup_vs_numpy": speedup_vs_numpy,
         "verdict": verdict,
         "notes": notes,
     }
