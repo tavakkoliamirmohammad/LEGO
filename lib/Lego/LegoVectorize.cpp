@@ -751,9 +751,14 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
   // Hard-coded target (matches Task 7 / Task 8 behaviour).
   llvm::StringRef target = "avx512";
 
-  // Per-access natural lane width.
+  // Per-access natural lane width, clamped to L_strip.
+  // When the loop trip count (T) is smaller than the register width (R_T),
+  // L_strip = T < R_T.  Using R_T directly would give numSubOps = 0 which
+  // produces empty vector bodies.  Clamp to L_strip so we always emit exactly
+  // one vector op covering the full strip-mined span.
   auto getLnForAccess = [&](size_t idx) -> int64_t {
-    return getRegisterLanesForType(target, classes[idx].elementBytes);
+    int64_t R_T = getRegisterLanesForType(target, classes[idx].elementBytes);
+    return std::min(R_T, L_strip);
   };
 
   // Sub-vector tracking: for each original Value, store the list of
@@ -1056,9 +1061,12 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
         continue;
       }
 
-      // Determine target sub-width for the result.
+      // Determine target sub-width for the result, clamped to L_strip.
+      // Same reasoning as getLnForAccess: when T < R_T, L_strip < R_T and
+      // using the unclamped R_T yields numSubOpsResult = 0.
       int64_t resBytes = resTy.getIntOrFloatBitWidth() / 8;
-      int64_t Ln_result = getRegisterLanesForType(target, resBytes);
+      int64_t Ln_result = std::min(getRegisterLanesForType(target, resBytes),
+                                   L_strip);
       int64_t numSubOpsResult = L_strip / Ln_result;
 
       // Build per-operand sub-vector lists aligned to Ln_result.
