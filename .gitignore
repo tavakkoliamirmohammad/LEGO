@@ -29,3 +29,26 @@ python/lego/bin/naga.exe
 # Emscripten WASM build artifacts
 viz/wasm/lego_driver.js
 viz/wasm/lego_driver.wasm
+
+# C-baseline binaries (built locally via Makefile; never commit)
+evaluation/cpu_dsl_comparison/c_baselines/*_O3
+evaluation/cpu_dsl_comparison/c_baselines/*_agg
+evaluation/cpu_dsl_comparison/c_baselines/*_clang
+evaluation/cpu_dsl_comparison/c_baselines/*.s
+evaluation/cpu_dsl_comparison/c_baselines/*_O3_asm
+
+# Bare binaries without suffix (saxpy, gemm, vecadd, etc.) — built by Makefile
+evaluation/cpu_dsl_comparison/c_baselines/saxpy
+evaluation/cpu_dsl_comparison/c_baselines/gemm
+evaluation/cpu_dsl_comparison/c_baselines/vecadd
+evaluation/cpu_dsl_comparison/c_baselines/col_major
+evaluation/cpu_dsl_comparison/c_baselines/morton
+evaluation/cpu_dsl_comparison/c_baselines/mixed_precision
+evaluation/cpu_dsl_comparison/c_baselines/self_update
+evaluation/cpu_dsl_comparison/c_baselines/stencil_3pt
+evaluation/cpu_dsl_comparison/c_baselines/brick_within_cell
+
+# Dashboard snapshots and result JSON (regenerated each run)
+evaluation/cpu_dsl_comparison/dashboard*.txt
+evaluation/cpu_dsl_comparison/dashboard.md
+evaluation/cpu_dsl_comparison/results.json
