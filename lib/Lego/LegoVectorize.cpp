@@ -863,6 +863,16 @@ static Value buildIdentity(OpBuilder &builder, Location loc,
 /// covering (trip mod L) remaining iterations.  Both loops are inserted
 /// before `forOp`; the caller is responsible for erasing `forOp` after
 /// populating their bodies.
+///
+/// NOTE: This is intentionally hand-rolled rather than using upstream utilities:
+/// - scf::tilePerfectlyNested produces a 2-level *nested* loop structure.
+///   Our vectorization requires two *sibling* loops (vec + tail) so that
+///   emitVectorBody can populate the vec loop and emitTailBody can populate
+///   the tail loop independently.
+/// - scf::tileUsingSCF operates on ops implementing TilingInterface (e.g.
+///   linalg.generic), not on an existing scf::ForOp directly.
+/// - scf::peelForLoopAndSimplifyBounds peels a single (last) iteration, not L.
+/// Follow-up: revisit if MLIR adds a splitForOpAtStep utility.
 static StripMineResult stripMineForOp(scf::ForOp forOp, int64_t L,
                                       OpBuilder &builder) {
   Location loc = forOp.getLoc();
