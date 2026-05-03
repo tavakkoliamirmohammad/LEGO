@@ -466,6 +466,92 @@ class CPUKernelBuilder:
 
         return self._make_callable(self._engines[cache_key])
 
+    def bench(self, *args, n_iters: int = 1000, target: str = "cpu",
+              cpu: Optional[str] = None) -> float:
+        """Run the kernel *n_iters* times in a **single** JIT-level call.
+
+        The usual ``compile()`` path pays ~4-5µs of Python/ctypes dispatch per
+        call.  For small-N kernels (N ≤ 16 K) that cost dominates the
+        measurement.  ``bench()`` works around this by wrapping the kernel in a
+        ``scf.for`` loop at the MLIR level so that ONE ``engine.invoke()`` call
+        performs all *n_iters* iterations.  The total wall-clock time is then
+        divided by *n_iters* to get the per-iteration kernel time.
+
+        Parameters
+        ----------
+        *args:
+            Same arguments as the compiled kernel (scalars first, then numpy
+            arrays for each LayoutBuffer).
+        n_iters:
+            Number of kernel iterations to perform inside a single invoke.
+            Default 1000.
+        target / cpu:
+            Compilation target (forwarded to ``compile()``).
+
+        Returns
+        -------
+        float
+            Per-iteration time in **milliseconds**.
+        """
+        import time as _time
+        bench_key = (target, cpu, n_iters, "bench")
+        if bench_key not in self._engines:
+            # Build a wrapper module: an outer scf.for [0, n_iters) that calls
+            # the original kernel body on each iteration.  We do this by
+            # building a *fresh* CPUKernelBuilder whose body emits the outer
+            # loop and then delegates to the original kernel_body.
+            orig_kernel_body = self._kernel_body
+            orig_scalar_params = list(self._scalar_params)
+            orig_buffers = list(self._buffers)
+            n_iters_const = n_iters
+
+            def bench_body(ctx):
+                """Wrap original kernel body in scf.for n_iters loop."""
+                n_iv = _index_const(n_iters_const)
+                lb   = _index_const(0)
+                step = _index_const(1)
+                loop = scf_dialect.ForOp(lb, n_iv, step)
+                with InsertionPoint(loop.body):
+                    # Inside the loop body the context is the same ctx — scalar
+                    # vals and buf_vals don't change across iterations.
+                    orig_kernel_body(ctx)
+                    scf_dialect.YieldOp([])
+
+            bench_builder = CPUKernelBuilder(
+                buffers=orig_buffers,
+                kernel_body=bench_body,
+                name=self._name + "_bench",
+                scalar_params=orig_scalar_params,
+            )
+            # Compile and cache only the engine (not the callable wrapper).
+            cpu_target = _CPU_TARGETS.get(target)
+            if cpu_target is None:
+                raise ValueError(
+                    f"Unknown CPU target '{target}'. "
+                    f"Available: {list(_CPU_TARGETS)}"
+                )
+            ctx_mlir, module = bench_builder.build_module()
+            pipeline_str = cpu_target.pipeline_string(cpu=cpu)
+            with ctx_mlir:
+                try:
+                    pm = PassManager.parse(pipeline_str)
+                    pm.run(module.operation)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"bench() compilation failed ({cpu_target.pipeline}):\n{e}"
+                    ) from e
+                jit_opt = 0 if target == "scalar" else 2
+                bench_engine = ExecutionEngine(module, opt_level=jit_opt)
+            # Store both engine and callable.
+            bench_fn = bench_builder._make_callable(bench_engine)
+            self._engines[bench_key] = bench_fn
+
+        bench_fn = self._engines[bench_key]
+        t0 = _time.perf_counter_ns()
+        bench_fn(*args)
+        elapsed_ns = _time.perf_counter_ns() - t0
+        return elapsed_ns / n_iters / 1e6   # ms per iteration
+
     def _make_callable(self, engine):
         """Build a Python wrapper that invokes the JIT-compiled function.
 
