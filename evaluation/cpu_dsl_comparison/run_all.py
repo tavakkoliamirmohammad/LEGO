@@ -4,16 +4,15 @@
 Usage (activate the venv first):
     source /scratch/general/vast/u1419116/LEGO/venv/bin/activate
     cd evaluation/cpu_dsl_comparison
-    python run_all.py                   # full run (build C baselines + verify + time)
-    python run_all.py --quick           # skip C baselines, run verify + time
-    python run_all.py --verify-only     # only run verify.py per candidate
-    python run_all.py --target=neon     # cpu_dsl compiled with ARM NEON target
+    python run_all.py                       # full run (build C baselines + measure)
+    python run_all.py --quick               # skip C baseline build (use cached binaries)
+    python run_all.py --measure-repeats 5   # median of 5 measurements per candidate
+    python run_all.py --target=arm-neon     # cpu_dsl compiled with ARM NEON target
 
-Single command:
-    python run_all.py | tee dashboard_FINAL.txt
-
-Each candidate's measure.py emits a single JSON record on its last line.
-verify.py emits a single "VERIFIED:" or "PENDING ..." line.
+Each candidate is a single ``<short_name>.py`` using ``@benchmark`` from
+``lego.testing``; its ``__main__`` block prints one JSON record per run with
+timings and a ``verified: bool`` field. See ``candidates/01_saxpy/saxpy.py``
+for the canonical template.
 
 Dashboard columns:
     Candidate  LayoutClass  PriorVerd  N  numpy_ms  scalar_jit  vec_jit
@@ -234,22 +233,12 @@ def build_c_baselines(verbose: bool = False):
 # Candidate format detection
 # ---------------------------------------------------------------------------
 def _find_consolidated_kernel(cand_dir: Path) -> Path | None:
-    """Return the consolidated kernel.py (using @benchmark) if it exists.
+    """Return the candidate's single consolidated kernel file.
 
-    The new consolidated format uses a single *.py file that defines a
-    :class:`lego.testing.BenchmarkedKernel` and exposes ``measure()`` /
-    ``verify()`` methods.  We detect it by looking for any .py file that
-    is NOT measure.py / verify.py / kernel.py (those are the old format).
-
-    Convention: the consolidated file is named after the candidate short name
-    (e.g. ``saxpy.py``, ``gemm.py``) or ``kernel.py`` but tagged with
-    ``@benchmark``.  To keep detection simple, we check if measure.py exists;
-    if not, we look for a *.py file that is not __init__.py.
+    Each candidate directory contains exactly one ``<short_name>.py`` using
+    ``@benchmark`` from ``lego.testing``. The script's ``__main__`` prints a
+    JSON record with timing + a ``verified: bool`` field — see saxpy.py.
     """
-    # Old format: measure.py present
-    if (cand_dir / "measure.py").exists():
-        return None
-    # New format: look for any .py that isn't __init__.py
     for py in sorted(cand_dir.glob("*.py")):
         if py.name != "__init__.py":
             return py
@@ -257,46 +246,12 @@ def _find_consolidated_kernel(cand_dir: Path) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# Run verify.py for a single candidate
-# ---------------------------------------------------------------------------
-def run_verify(cand_dir: Path, sub_env: dict) -> str:
-    """Return 'VERIFIED', 'PENDING:<reason>', or 'FAIL:<reason>'."""
-    verify_py = cand_dir / "verify.py"
-    if not verify_py.exists():
-        return "MISSING"
-    try:
-        proc = subprocess.run(
-            [PYTHON, str(verify_py)],
-            capture_output=True, text=True, timeout=120,
-            env=sub_env,
-        )
-        out = (proc.stdout + proc.stderr).strip()
-        last = out.split("\n")[-1] if out else ""
-        if "VERIFIED" in last:
-            return "VERIFIED"
-        elif "PENDING" in last:
-            return f"PENDING:{last[8:60].strip()}"
-        else:
-            return f"FAIL:{last[:60].strip()}"
-    except subprocess.TimeoutExpired:
-        return "FAIL:timeout"
-    except Exception as exc:
-        return f"FAIL:{str(exc)[:60]}"
-
-
-# ---------------------------------------------------------------------------
 # Run measure.py for a single candidate
 # ---------------------------------------------------------------------------
-def run_measure(cand_dir: Path, sub_env: dict) -> dict:
-    """Run measure.py (old format) or consolidated kernel (new format).
+_TIMING_FIELDS = ("numpy_ms", "scalar_jit_ms", "vec_jit_ms")
 
-    Old format: subprocess-runs ``measure.py`` and parses the last JSON line.
-    New format (consolidated ``@benchmark`` kernel): subprocess-runs the
-    consolidated .py as a script which prints a JSON record to stdout.
-    """
-    measure_py = cand_dir / "measure.py"
-    if not measure_py.exists():
-        return {"name": cand_dir.name, "verdict": "ERROR", "notes": "no measure.py"}
+
+def _run_measure_once(measure_py: Path, sub_env: dict, cand_name: str) -> dict:
     try:
         proc = subprocess.run(
             [PYTHON, str(measure_py)],
@@ -309,16 +264,70 @@ def run_measure(cand_dir: Path, sub_env: dict) -> dict:
             rec = json.loads(last_line)
         except json.JSONDecodeError:
             rec = {
-                "name": cand_dir.name,
+                "name": cand_name,
                 "verdict": "ERROR",
                 "notes": (proc.stdout[-300:] + "\n" + proc.stderr[-300:]).strip(),
             }
-        rec.setdefault("name", cand_dir.name)
+        # Force the candidate-directory name as the canonical identifier.
+        rec["name"] = cand_name
         return rec
     except subprocess.TimeoutExpired:
-        return {"name": cand_dir.name, "verdict": "ERROR", "notes": "timeout after 300s"}
+        return {"name": cand_name, "verdict": "ERROR", "notes": "timeout after 300s"}
     except Exception as exc:
-        return {"name": cand_dir.name, "verdict": "ERROR", "notes": str(exc)}
+        return {"name": cand_name, "verdict": "ERROR", "notes": str(exc)}
+
+
+def run_measure(cand_dir: Path, sub_env: dict, repeats: int = 1) -> dict:
+    """Run the candidate's consolidated ``@benchmark`` kernel.
+
+    The script's ``__main__`` block prints one JSON record per invocation
+    with timings + a ``verified`` field. With ``repeats > 1`` the candidate
+    is run K times and the timing fields (``numpy_ms``, ``scalar_jit_ms``,
+    ``vec_jit_ms``) are medianed — defends against transient interference
+    on shared nodes where one bad sample can flip a WIN/LOSS verdict.
+    """
+    measure_py = _find_consolidated_kernel(cand_dir)
+    if measure_py is None:
+        return {"name": cand_dir.name, "verdict": "ERROR", "notes": "no candidate .py file"}
+
+    runs = [_run_measure_once(measure_py, sub_env, cand_dir.name)
+            for _ in range(max(1, repeats))]
+    base = runs[-1]
+    if repeats <= 1 or len(runs) == 1:
+        return base
+    if base.get("verdict") == "ERROR":
+        return base
+
+    rec = dict(base)
+    rec["measure_repeats"] = len(runs)
+    for field in _TIMING_FIELDS:
+        vals = [r.get(field) for r in runs
+                if isinstance(r.get(field), (int, float))
+                and not (isinstance(r.get(field), float) and math.isnan(r.get(field)))]
+        if vals:
+            rec[field] = round(_median(vals), 6)
+
+    t_scalar = rec.get("scalar_jit_ms", float('nan'))
+    t_vec    = rec.get("vec_jit_ms",    float('nan'))
+    t_numpy  = rec.get("numpy_ms",      float('nan'))
+    if (isinstance(t_scalar, float) and isinstance(t_vec, float)
+            and not math.isnan(t_scalar) and not math.isnan(t_vec) and t_vec > 0):
+        rec["speedup_isolated_jit"] = round(t_scalar / t_vec, 4)
+    if (isinstance(t_numpy, float) and isinstance(t_vec, float)
+            and not math.isnan(t_numpy) and not math.isnan(t_vec) and t_vec > 0):
+        rec["speedup_vs_numpy"] = round(t_numpy / t_vec, 4)
+    return rec
+
+
+def _median(xs):
+    s = sorted(xs)
+    n = len(s)
+    if n == 0:
+        return float('nan')
+    mid = n // 2
+    if n % 2:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -350,14 +359,14 @@ def parse_args():
     p = argparse.ArgumentParser(description="LEGO cpu_dsl_comparison benchmark harness")
     p.add_argument("--quick", action="store_true",
                    help="Skip building C baselines (faster iteration)")
-    p.add_argument("--verify-only", action="store_true",
-                   help="Only run verify.py per candidate (no timing)")
     p.add_argument("--target", default="x86",
                    help="cpu_dsl compilation target: x86 (default), arm-neon, scalar")
-    p.add_argument("--no-verify", action="store_true",
-                   help="Skip verify.py (only run measure.py)")
     p.add_argument("--verbose", action="store_true",
                    help="Show C baseline build output")
+    p.add_argument("--measure-repeats", type=int, default=3,
+                   help="Run each candidate's measure.py N times and median "
+                        "the timing fields. Stabilizes verdicts for tiny "
+                        "kernels with bimodal page-placement noise. Default: 3.")
     return p.parse_args()
 
 
@@ -373,55 +382,29 @@ def main():
     print()
 
     # Step 1: Build C baselines
-    if not args.quick and not args.verify_only:
+    if not args.quick:
         build_c_baselines(args.verbose)
     else:
-        print("  [build] Skipping C baseline build (--quick or --verify-only).")
+        print("  [build] Skipping C baseline build (--quick).")
     print()
 
-    # Collect candidates — supports both formats:
-    #   Old: directory with measure.py + verify.py + kernel.py
-    #   New: directory with a single consolidated *.py (using @benchmark)
     cand_dirs = sorted(
         d for d in CANDIDATES_DIR.iterdir()
-        if d.is_dir() and (
-            (d / "measure.py").exists()
-            or _find_consolidated_kernel(d) is not None
-        )
+        if d.is_dir() and _find_consolidated_kernel(d) is not None
     )
 
-    # Step 2: Verify all candidates
-    verify_results = {}
-    if not args.no_verify:
-        print(f"  [verify] Running verify.py for {len(cand_dirs)} candidates ...")
-        for cand_dir in cand_dirs:
-            status = run_verify(cand_dir, sub_env)
-            verify_results[cand_dir.name] = status
-            icon = "✓" if status == "VERIFIED" else ("?" if "PENDING" in status else "✗")
-            print(f"    {icon} {cand_dir.name:<40} {status[:60]}")
-        print()
-    else:
-        print("  [verify] Skipping verification (--no-verify).")
-        print()
-
-    if args.verify_only:
-        # Print verify summary and exit
-        n_ver = sum(1 for s in verify_results.values() if s == "VERIFIED")
-        n_pnd = sum(1 for s in verify_results.values() if "PENDING" in s)
-        n_fail = sum(1 for s in verify_results.values() if "FAIL" in s or s == "MISSING")
-        print(f"  Verify summary: VERIFIED={n_ver}, PENDING={n_pnd}, FAIL={n_fail} / {len(cand_dirs)}")
-        return
-
-    # Step 3: Time each candidate
+    # Step 2: Time + verify each candidate. With the @benchmark format, the
+    # consolidated script's ``__main__`` reports both timing and a
+    # ``verified`` field in one JSON record — no separate verify pass needed.
     results = []
-    print(f"  [measure] Running measure.py for {len(cand_dirs)} candidates ...")
+    print(f"  [measure] Running {len(cand_dirs)} candidates ...")
     for cand_dir in cand_dirs:
         print(f"    → {cand_dir.name}", flush=True)
         c_ms      = run_c_baseline(cand_dir.name)   # legacy (01-08 only)
         c_O3_ms   = run_c_O3_baseline(cand_dir.name)
         c_agg_ms  = run_c_agg_baseline(cand_dir.name)
         clang_ms  = run_clang_baseline(cand_dir.name)
-        rec = run_measure(cand_dir, sub_env)
+        rec = run_measure(cand_dir, sub_env, repeats=args.measure_repeats)
 
         # Attach C baseline timings
         if not math.isnan(c_ms):
@@ -433,8 +416,7 @@ def main():
         if not math.isnan(clang_ms):
             rec["c_clang_ms"] = round(clang_ms, 6)
 
-        # Attach verify status
-        rec["verify_status"] = verify_results.get(cand_dir.name, "NOT_RUN")
+        rec["verify_status"] = "VERIFIED" if rec.get("verified") is True else "FAIL"
 
         results.append(rec)
     print()
@@ -446,7 +428,7 @@ def main():
     _has_clang  = any("c_clang_ms" in r for r in results)
     _has_prior  = any("prior_verdict" in r for r in results)
     _has_layout = any("layout_class" in r for r in results)
-    _has_verify = not args.no_verify
+    _has_verify = True
 
     print("=" * 220)
     print("  LEGO cpu_dsl_comparison — Full Coverage Dashboard (dual C baselines)")
