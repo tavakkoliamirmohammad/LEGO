@@ -1301,25 +1301,53 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
         }
       } else if (cls.kind == lego::AccessKind::Strided) {
         // vector.gather for constant non-unit stride.
-        // Build index vector [base, base+stride, base+2*stride, ...] where
-        // stride is in element units (as stored in cls.stride for Tier-B).
+        //
+        // R19 fix: build per-lane indices by cloning the ORIGINAL scalar
+        // address DAG with origIv substituted by (newIv + j) for each lane j.
+        //
+        // The previous approach used `mapping.lookupOrDefault(addr)` as
+        // baseIv and then added j * cls.stride (byte-stride). This was wrong
+        // for two reasons:
+        //   1. cls.stride is in BYTES, not element units, so the offsets were
+        //      too large by a factor of elementBytes.
+        //   2. If the address expression (e.g. `arith.shli %origIv, 1`) was
+        //      already cloned into mapping by the catch-all pass that processes
+        //      index-type ops, the mapped value is a scalar clone of the
+        //      address — taking that plus byte-stride offsets is wrong because
+        //      the address already encodes the stride.
+        //
+        // The correct approach (mirroring the NonAffine path) is to use
+        // cloneAddrDAG on the ORIGINAL (pre-mapping) address expression with a
+        // fresh per-lane IRMapping that only substitutes origIv → (newIv + j).
+        // This produces element-unit indices that are then assembled into an
+        // index vector for vector.gather.
         int64_t Ln = getLnForAccess(idx);
-        int64_t stride = cls.stride;  // element-unit stride from Tier-B
         Type elemTy = load.getType();
         auto vecTy = VectorType::get({Ln}, elemTy);
 
-        Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
+        Value origIv = origLoop.getInductionVar();
+        Value origAddr = load.getIndices().front();
+        Value baseIv = mapping.lookupOrDefault(origIv);  // scalar new IV
+
         SmallVector<Value> indexElements;
         indexElements.reserve(Ln);
         for (int64_t j = 0; j < Ln; ++j) {
+          Value laneIv;
           if (j == 0) {
-            indexElements.push_back(baseIv);
+            laneIv = baseIv;
           } else {
-            Value addend =
-                arith::ConstantIndexOp::create(builder, loc, j * stride);
-            indexElements.push_back(
-                arith::AddIOp::create(builder, loc, baseIv, addend));
+            Value addend = arith::ConstantIndexOp::create(builder, loc, j);
+            laneIv = arith::AddIOp::create(builder, loc, baseIv, addend);
           }
+          // Clone the ORIGINAL scalar address DAG with origIv -> laneIv.
+          // Use a FRESH IRMapping (not the outer `mapping` which has
+          // vector subs for float values) so that cloneAddrDAG produces
+          // a SCALAR element-unit address for each lane.
+          IRMapping laneMap;
+          laneMap.map(origIv, laneIv);
+          Value laneAddr =
+              cloneAddrDAG(origAddr, laneMap, builder, origLoop);
+          indexElements.push_back(laneAddr);
         }
         auto idxVecTy = VectorType::get({Ln}, builder.getIndexType());
         Value indexVec = vector::FromElementsOp::create(
