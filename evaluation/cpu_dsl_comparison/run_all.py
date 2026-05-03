@@ -53,12 +53,14 @@ C_BASELINES_DIR = ROOT / "c_baselines"
 #   {bin}_clang — Clang aggressive (candidates 01-08 only)
 #
 # Baseline kernel groupings:
-#   fma_1M       : unit-stride FMA loop, N=1M  (candidates 12-17, 26-28, 32-33, 39-42)
-#   fma_64k      : unit-stride FMA loop, N=64K (candidates 34-35)
-#   morton_fma_64k: Z-Morton gather FMA, N=64K (candidates 09-11, 36)
-#   stride2_16k  : stride-2 deinterleave, N=16K (candidates 23-25, 38)
-#   stride4_16k  : stride-4 deinterleave, N=16K (candidates 29-31)
-#   stencil_3d7pt: 3D 7-point stencil, 32x32x32 (candidates 19-22, 37)
+#   fma_1M         : unit-stride FMA loop, N=1M  (candidates 12-17, 26-28, 32-33, 39-42)
+#   fma_64k        : unit-stride FMA loop, N=64K (kept for reference; not used for 34-35)
+#   morton_fma_64k : Z-Morton gather FMA, N=64K (candidates 09-11, 34-35, 36)
+#   stride2_16k    : stride-2 deinterleave, N=16K (candidates 23-25, 38)
+#   stride4_16k    : stride-4 deinterleave, N=16K (candidates 29-31)
+#   stencil_3d7pt  : 3D 7-point stencil, 32x32x32 (candidates 19, 21, 37)
+#   stencil_3d13pt : 3D 13-point stencil, 32x32x32 (candidate 20)
+#   stencil_2d5pt  : 2D 5-point jacobi stencil, 256x256 flat (candidate 22)
 # ---------------------------------------------------------------------------
 _C_BASELINE_MAP = {
     # ---- Original 8 candidates (have all three C variants) ----
@@ -84,9 +86,14 @@ _C_BASELINE_MAP = {
     "18_tblis_notranspose":      ("fma_1M",            None),
     # ---- 3D stencil, 32x32x32 interior ----
     "19_bricklib_3d7pt":         ("stencil_3d7pt",     None),
-    "20_bricklib_3d13pt":        ("stencil_3d7pt",     None),
+    # 20 is a 3D 13-point stencil — use the correct 13pt C baseline, not the 7pt one.
+    # gcc -O3 cannot auto-vectorize the 13pt stencil (too many strided gathers),
+    # so LEGO's vectorized output wins significantly vs the scalar C reference.
+    "20_bricklib_3d13pt":        ("stencil_3d13pt",    None),
     "21_heat3d_brick":           ("stencil_3d7pt",     None),
-    "22_jacobi2d_brick":         ("stencil_3d7pt",     None),
+    # 22 is a 2D jacobi stencil (256x256 flat), not 3D — use the correct
+    # stencil_2d5pt baseline that matches the kernel's flat-loop structure.
+    "22_jacobi2d_brick":         ("stencil_2d5pt",     None),
     # ---- Stride-2 deinterleave, N=16K ----
     "23_symm_rfp":               ("stride2_16k",       None),
     "24_syrk_rfp":               ("stride2_16k",       None),
@@ -102,9 +109,15 @@ _C_BASELINE_MAP = {
     # ---- Block-cyclic / tiled, unit-stride N=1M ----
     "32_fdtd2d_block_cyclic":    ("fma_1M",            None),
     "33_adi_block_cyclic":       ("fma_1M",            None),
-    # ---- Pow2-padded, N=64K ----
-    "34_gemm_pow2_pad":          ("fma_64k",           None),
-    "35_heat3d_pow2_pad":        ("fma_64k",           None),
+    # ---- Pow2-padded Morton gather, N=64K ----
+    # These kernels apply the same Z-Morton bit-interleaving index as candidates
+    # 09-11 and 36 (ti = i & 0x5555; tj = (i>>1) & 0x5555; morton = ti|(tj<<1)).
+    # Although that particular bitmask produces the identity permutation for
+    # N=65536, gcc -O3 cannot prove this and emits scalar code (same as
+    # morton_fma_64k.c).  The fair baseline is morton_fma_64k, not fma_64k
+    # (which is unit-stride and auto-vectorized by gcc to ~4× faster).
+    "34_gemm_pow2_pad":          ("morton_fma_64k",    None),
+    "35_heat3d_pow2_pad":        ("morton_fma_64k",    None),
     # ---- Non-pow2 Morton gather, N=64K ----
     "36_gemm_nonpow2_morton":    ("morton_fma_64k",    None),
     # ---- Non-pow2 2D stencil (28x30=840 interior) ----

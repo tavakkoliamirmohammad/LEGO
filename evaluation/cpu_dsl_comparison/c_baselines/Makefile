@@ -33,7 +33,7 @@ SRCS_ORIG = saxpy.c vecadd.c gemm.c stencil_3pt.c brick_within_cell.c \
 
 # New candidates for the remaining 34:
 SRCS_NEW = fma_1M.c fma_64k.c stride2_16k.c stride4_16k.c \
-           stencil_3d7pt.c morton_fma_64k.c dgemm.c
+           stencil_3d7pt.c stencil_3d13pt.c stencil_2d5pt.c morton_fma_64k.c dgemm.c
 
 ALL_SRCS = $(SRCS_ORIG) $(SRCS_NEW)
 
