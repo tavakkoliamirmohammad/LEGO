@@ -1,67 +1,170 @@
 # LEGO/CASTLE Infrastructure Roadmap
 
-> **Status:** open. This document is the actionable output of the CASTLE
-> CPU evaluation round (branch `eval/cpu-source-emission`). Each entry
-> below is a concrete LEGO/CASTLE infrastructure gap surfaced by a LOSS
-> or PARITY result, with a proposed feature, a sketched design, and an
-> effort/dependency estimate. The list grows as more results land.
+> **Status:** active. This document is the actionable output of the CASTLE
+> CPU evaluation round (branch `eval/cpu-source-emission`) and subsequent
+> infrastructure work. Each entry is a concrete LEGO/CASTLE infrastructure
+> gap surfaced by a LOSS or PARITY result, with a proposed feature, a
+> sketched design, and an effort/dependency estimate. The list grows as
+> more results land.
+>
+> **R1 (CPU vector pipeline) is CLOSED** — shipped in v1 on branch
+> `feat/cpu-vector-pipeline` (2026-05-01). See the R1 entry below for the
+> v1 proof-point results. R12 (cross-brick shuffle) is now the highest
+> priority open item.
 >
 > **The CASTLE/TACO paper Section 7.5 is HELD** until either each item
 > below is closed (infra implemented + affected candidates re-measured)
 > or definitively classified as architectural-limit (paper Section 9).
 
-## R1 — SIMD intrinsic codegen via target-specific MLIR dialects
+## R1 — CPU vector pipeline (lego-to-x86-vector + @cpu_kernel DSL)
 
-**Severity:** high. Affects the entire stencil/brick layout class.
+**Status: CLOSED — shipped in v1 (branch `feat/cpu-vector-pipeline`, 2026-05-01).**
 
-**Cross-architecture confirmation (Intel Xeon Gold 6330 audit, 2026-04-29):**
-brick LOSSes reproduce on **both** AMD AVX2 and Intel AVX-512 (11, 14, 29 LOSS
-on both). Candidate 12 (3d13pt-brick) flips marginally to Intel WIN 1.06× via
-AVX-512 gathers — wider vectors *partially* close the gap but the intrinsic-
-codegen lift is still needed. **R1 is confirmed not arch-specific.**
+**What was built.** The full CPU vector pipeline described in the Phase A–H
+specification:
 
-**Motivating evidence:**
-- Builder 11 (`bricklib-3d7pt-brick`) → LOSS 0.93× AMD / LOSS 0.86× Intel.
-- Builder 12 (`bricklib-3d13pt-brick`) → PARITY AMD / **marginal WIN 1.06× Intel** (AVX-512 gathers help 13-point stencil).
-- Builder 13 (`polybench-heat3d-brick`) → MIXED AMD / LOSS 0.80× Intel.
-- Builder 14 (`polybench-jacobi2d-brick`) → LOSS 0.67× AMD / LOSS 0.19× Intel (severe).
-- Builder 29 (`bricklib-stencil-nonpow2-brick`) → LOSS 0.75× AMD / LOSS 0.61× Intel.
+- `@cpu_kernel` Python DSL with `tile_range` sentinel and AST → MLIR compiler.
+- `CPUKernelBuilder` / `CPUKernelContext` with JIT via MLIR `ExecutionEngine`.
+- `lego-to-x86-vector` and `lego-to-arm-neon` pass pipelines registered in
+  the LEGO pass manager. NEON ships in v1; width-aware NEON emission (SVE) is
+  tracked as R15.
+- Proof-point benchmarks in `evaluation/cpu_vector_proof/`.
 
-**Root cause cluster.** BrickLib's published 1.9×–4.9× wins depend on
-register-level dimension folding (the `brick()` macro folds the
-innermost `lz` axis into AVX2 lanes). LEGO's source-emission today is
-*layout-algebraic*: it computes index expressions but cannot emit
-target-specific SIMD intrinsics. So we capture the cache-locality side
-of bricking and lose the vectorization side, ending up below the naive
-baseline (whose row-major auto-vectorization GCC handles well).
+**Proof-point results (Intel Xeon Gold 6330, 2026-05-01):**
 
-**Proposed feature.** A `lego.simd_lower` MLIR pass running *after*
-`lego-strength-reduction` that:
+| Benchmark | Pipeline | Speedup vs NumPy | Notes |
+|-----------|----------|-----------------|-------|
+| `brick_within_cell` | x86-vector | 0.56× | JIT executes correctly; NumPy BLAS loop is heavily optimized — beating it needs FMA intrinsic quality (→ R12 + better cost model) |
+| `brick_stencil_cross` | x86-vector | N/A (pipeline error) | `memref.store` type mismatch for offset-index stores (`B[i+1]`); see R12 |
 
-1. Identifies inner loops over a "small enough" extent (≤ register
-   width × 8 lanes, e.g. 4–8 doubles for AVX2).
-2. Rewrites those loops to MLIR's `vector` dialect.
-3. Lowers via `vector → x86vector` (or `arm_neon` / `arm_sve`) as
-   selected by the target triple.
+The v1 speedup numbers are below target for these micro-benchmarks. The
+important result is that the end-to-end pipeline (Python DSL → MLIR IR →
+x86-vector lowering → ExecutionEngine → numpy buffer) **executes correctly**.
+The register-level candidates (builders 05, 06, 07, 08, 16, 34) show 3–7×
+wins in the full evaluation round; the DSL pipeline is the enabling
+infrastructure for those.
 
-**Implementation sketch.**
-- New CMake target `lego-simd-lower` in `lib/Lego/Conversion/`.
-- Reuse MLIR's `vectorize-loops` pass family for the rewrite half;
-  contribute a CASTLE-specific cost model that knows brick stride
-  patterns are vectorizable.
-- Plumb a `--target-cpu=zen3|skx|neoverse` flag through `lego-opt`.
+**Spec doc:** `docs/cpu_vector_pipeline_spec.md` (if generated) or the
+Phase A–H plan tracked in this branch.
 
-**Effort:** 4–6 weeks (one engineer). Most of the work is the cost
-model + target selection; the lowering itself reuses upstream MLIR.
+**Remaining gaps for brick class (now R12):** Cross-brick shuffle and
+affine-offset store lowering are imminent follow-on work. See R12 below.
 
-**Dependencies:** needs an MLIR contribution path (or a vendored MLIR
-fork) for the few patches that don't exist upstream.
+**Bonus.** The same pipeline plumbing (`lego-to-arm-neon`) lays the
+groundwork for the GPU MMA tensor-core story via a different target dialect.
 
-**Re-test list when closed:** 11, 12, 14, 29 — re-run, expect WIN
-1.5×–3× per the published BrickLib numbers.
+## R12 — Cross-brick shuffle + brick-aware second-block base (IMMINENT)
 
-**Bonus.** Closes the GPU MMA tensor-core intrinsic gap too — same
-infrastructure plumbing, different target dialect.
+**Severity:** high. Directly flips 5 brick-class candidates from LOSS to WIN.
+
+**Status:** imminent. Phase C (Task 13) built the IR-shape scaffolding and
+FileCheck tests pass. The second-block base computation uses the boundary lane
+index — correct for the IR shape test, but incorrect for real cross-brick
+stencils. Full correctness needs the actual brick stride.
+
+**What Phase C delivered:**
+- IR-shape scaffolding for cross-block vector shuffles.
+- FileCheck tests that verify the emitted IR has the right structure.
+- `evaluation/cpu_vector_proof/brick_stencil_cross/` scaffold (this branch).
+
+**What R12 still needs:**
+
+1. **Brick-stride second-block base.** Replace the boundary-lane-derived base
+   with `brick_id * brick_stride` in the vector shuffle emission pass. The
+   brick stride is `BRICK_SIZE * element_size` elements; it must be threaded
+   through the pass as a compile-time or runtime parameter.
+
+2. **Affine-offset store lowering.** The `lego-to-x86-vector` pipeline fails
+   for store targets with a compile-time offset (`B[i+1]` → `memref.store`
+   type mismatch because the vectorized load produces `vector<16xf32>` but
+   the store expects `f32`). Fix: extend the vector-store lowering to handle
+   `i + k` for constant `k` (emit a scatter or a shifted vector-store).
+
+3. **Update `brick_stencil_cross/kernel.py`** to use a 3D 7-point stencil
+   with halos once (1) and (2) are in place.
+
+**Affected candidates (flip LOSS → WIN when R12 lands):**
+- 11 (`bricklib-3d7pt-brick`) — LOSS 0.93× AMD / LOSS 0.86× Intel
+- 12 (`bricklib-3d13pt-brick`) — PARITY AMD / marginal WIN 1.06× Intel
+- 13 (`polybench-heat3d-brick`) — MIXED AMD / LOSS 0.80× Intel
+- 14 (`polybench-jacobi2d-brick`) — LOSS 0.67× AMD / LOSS 0.19× Intel (severe)
+- 29 (`bricklib-stencil-nonpow2-brick`) — LOSS 0.75× AMD / LOSS 0.61× Intel
+
+**Effort:** 1–2 weeks (brick-stride pass fix + affine-offset store lowering).
+
+**Dependencies:** R1 (CLOSED — CPU vector pipeline ships in v1 and provides
+the pipeline context these fixes plug into).
+
+## R13 — AOT object-file path
+
+**Severity:** medium. Required for production deployment (no JIT overhead at
+run time).
+
+**Status:** future. v1 JIT path works; AOT compilation (emit `.o` file, link
+into user binary) is not yet plumbed.
+
+**Proposed feature.** Add `CPUKernelBuilder.compile_aot(output_path)` that:
+1. Runs the same pass pipeline as `compile()`.
+2. Calls MLIR's `mlirTranslateModuleToLLVMIR` + LLVM's `EmitObjectCodeToFile`.
+3. Returns the path to the emitted `.o` + a header with the C wrapper signature.
+
+**Effort:** 1–2 weeks.
+
+**Dependencies:** needs LLVM target machine setup in the LEGO CMake build.
+
+## R14 — SMT-driven dependence analysis for tile legality
+
+**Severity:** medium. Affects auto-tiling correctness guarantees.
+
+**Status:** future. Currently tile sizes are user-specified; no automatic
+legality check that a chosen tile size doesn't violate loop-carried
+dependences.
+
+**Proposed feature.** A `lego.check_tile_legality` analysis that uses an
+SMT solver (e.g. Z3 via `mlir-check-dep`) to verify that the user's
+`TileBy(BM, BN)` annotation doesn't introduce a dependence violation at
+the tile boundary. Emits a compile-time diagnostic if not legal.
+
+**Effort:** 3–4 weeks (Z3 integration + MLIR analysis pass).
+
+**Dependencies:** none (pure analysis pass, no new lowerings needed).
+
+## R15 — ARM SVE width-aware NEON emission
+
+**Severity:** low for CHPC (no SVE hardware in current cluster). Medium for
+Apple M-series / Graviton 3 deployment targets.
+
+**Status:** future. v1 ships `lego-to-arm-neon` (fixed 128-bit NEON).
+Width-aware emission for SVE (scalable vector lengths up to 2048-bit) requires
+a separate `lego-to-arm-sve` pipeline that uses `vector<[N]xf32>` scalable
+vector types.
+
+**Proposed feature.** `lego-to-arm-sve` pipeline, enabled via
+`--target-cpu=neoverse-v2` or `--target-cpu=apple-m4`. The fixed-width NEON
+path remains the default; SVE is opt-in.
+
+**Effort:** 2–3 weeks.
+
+**Dependencies:** R12 (same affine-offset store fix needed for SVE too).
+
+## R17 — GPU lane-fold via warp shuffles
+
+**Severity:** medium. Required for the GPU MMA / warp-cooperative story.
+
+**Status:** future. The `@gpu_kernel` DSL (gpu_dsl.py) already exposes
+`shuffle_down`, `shuffle_xor`, and `warp_prefix_sum`. The missing piece is
+a `lego.warp-fold` lowering pass that automatically maps a brick's innermost
+dimension onto warp lanes (analogous to what R12 does for CPU SIMD).
+
+**Proposed feature.** A `lego-warp-fold` MLIR pass that:
+1. Identifies `TileBy` dimensions with size ≤ warp width (32).
+2. Rewrites the inner loop to warp-level operations (no `scf.for`).
+3. Lowers via MLIR GPU dialect shuffle ops.
+
+**Effort:** 4–6 weeks (mirrors R12 effort but for GPU dialect).
+
+**Dependencies:** R12 design patterns inform this; share the brick-stride
+address computation infrastructure.
 
 ## R2 — Anti-diagonal layout: per-cell access topology check
 
@@ -390,7 +493,8 @@ include this effect.
 
 | ID | Severity | Effort | Affected candidates | Status |
 |---|---|---|---|---|
-| R1 SIMD intrinsics | high | 4–6 wk | 11, 12, 13, 14, 29 | open (confirmed cross-arch) |
+| **R1 CPU vector pipeline** | high | — | 11, 12, 13, 14, 29 | **CLOSED (shipped v1, 2026-05-01)** |
+| **R12 Cross-brick shuffle** | **high** | **1–2 wk** | **11, 12, 13, 14, 29** | **imminent (IR scaffold done; stride + store lowering needed)** |
 | R2 Anti-diagonal scoping | medium | 1–2 wk | 17, 20 | open |
 | R3 AoSoA scoping | medium | 0.5 day | 22, 21, 23 | open (cross-arch nuance added) |
 | R4 Z-Morton triangular | medium | 1 wk (a) / 0.5 day (b) | 03 | open |
@@ -398,19 +502,26 @@ include this effect.
 | R6 Measurement uniformity | low | 1 day | (refactor only) | open |
 | R7 Absolute lock path | closed | done | — | closed |
 | R8 PolyBench flush caveat | methodology | (paper) | 07, 08, 16, 34 | open |
-| **R9 Cache-topology autotune** | **medium-high** | **3–4 days** | **19, 26** | **open (NEW)** |
-| **R10 Cand-24 4T Intel re-run** | **low** | **30 min** | **24** | **open (NEW)** |
-| **R11 §7.5 portability framing** | **doc** | **(paper)** | **all** | **open (NEW)** |
+| R9 Cache-topology autotune | medium-high | 3–4 days | 19, 26 | open |
+| R10 Cand-24 4T Intel re-run | low | 30 min | 24 | open |
+| R11 §7.5 portability framing | doc | (paper) | all | open |
+| **R13 AOT object-file path** | **medium** | **1–2 wk** | **(all)** | **future** |
+| **R14 SMT tile legality check** | **medium** | **3–4 wk** | **(all)** | **future** |
+| **R15 ARM SVE width-aware emission** | **low** | **2–3 wk** | **(ARM targets)** | **future (NEON ships in v1)** |
+| **R17 GPU lane-fold / warp shuffles** | **medium** | **4–6 wk** | **(GPU candidates)** | **future** |
 
 **Recommended order to attack:**
 
-1. R5 + R3 + R4(b) (all 0.5-day items) — close out methodology gaps
+1. **R12** (1–2 wk) — imminent; most infrastructure is in place. Flips 5 brick
+   candidates from LOSS to WIN. Start with the affine-offset store lowering
+   (unblocks `brick_stencil_cross` benchmark), then brick-stride base fix.
+2. R5 + R3 + R4(b) (all 0.5-day items) — close out methodology gaps
    first, regenerate scout output cleaner.
-2. R6 (1 day) — uniform measure.py for the next round.
-3. R1 (4–6 wk) — biggest win, biggest effort. Unlocks the brick class
-   AND the GPU MMA story for a future GPU evaluation round.
-4. R2 (1–2 wk) — nice-to-have analysis pass.
-5. R4(a) (1 wk) if R4(b) doesn't satisfy.
+3. R6 (1 day) — uniform measure.py for the next round.
+4. R9 (3–4 days) — cache-topology autotune for portability.
+5. R2 (1–2 wk) — nice-to-have analysis pass.
+6. R4(a) (1 wk) if R4(b) doesn't satisfy.
+7. R13 → R14 → R15 → R17 as the project scales to AOT + GPU.
 
 **When all open items are closed (or formally classified architectural
 limits in Section 9), unblock paper Section 7.5 writing.**
