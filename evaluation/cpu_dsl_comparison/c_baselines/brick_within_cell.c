@@ -17,7 +17,8 @@
 #define WARMUP    100
 #define TIMED     1000
 
-static void brick_kernel(const float *A, float *B, int N) {
+static void __attribute__((noinline))
+brick_kernel(const float *A, float *B, int N) {
     for (int i = 0; i < N; i++)
         B[i] = A[i] * 2.0f + 1.0f;
 }

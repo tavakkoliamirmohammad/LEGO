@@ -14,7 +14,8 @@
 #define WARMUP    100
 #define TIMED     1000
 
-static void stencil_kernel(const float *A, float *B, int N) {
+static void __attribute__((noinline))
+stencil_kernel(const float *A, float *B, int N) {
     for (int i = 1; i < N - 1; i++)
         B[i] = A[i-1] + A[i] + A[i+1];
 }

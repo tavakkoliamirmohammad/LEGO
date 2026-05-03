@@ -14,7 +14,8 @@
 #define WARMUP    100
 #define TIMED     1000
 
-static void vecadd_kernel(const float *A, const float *B, float *C, int N) {
+static void __attribute__((noinline))
+vecadd_kernel(const float *A, const float *B, float *C, int N) {
     for (int i = 0; i < N; i++)
         C[i] = A[i] + B[i];
 }

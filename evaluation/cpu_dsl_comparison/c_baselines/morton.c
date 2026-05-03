@@ -60,12 +60,15 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < NN; i++) A[i] = (double)i;
 
+    /* noinline kernel wrapper to prevent the outer timing loop from
+     * being fused with the inner element loop (loop interchange). */
     /* Warmup — touches A and B, fills caches, trains branch predictors. */
     for (int w = 0; w < WARMUP; w++) {
         for (int i = 0; i < NN; i++) {
             int r = morton_row((uint32_t)i);
             int c = morton_col((uint32_t)i);
             B[i] = A[(r * side + c) & (NN - 1)];
+            __asm__ volatile("" ::: "memory");  /* prevent loop interchange */
         }
     }
 
@@ -77,6 +80,7 @@ int main(int argc, char **argv) {
             int c = morton_col((uint32_t)i);
             B[i] = A[(r * side + c) & (NN - 1)];
         }
+        __asm__ volatile("" ::: "memory");  /* prevent loop interchange across t-iterations */
     }
     long long t_total = clock_ns() - t0;
 

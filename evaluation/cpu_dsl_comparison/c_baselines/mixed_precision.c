@@ -16,7 +16,8 @@
 #define WARMUP    100
 #define TIMED     1000
 
-static void mixed_kernel(const float *X, double *Y, int N) {
+static void __attribute__((noinline))
+mixed_kernel(const float *X, double *Y, int N) {
     for (int i = 0; i < N; i++)
         Y[i] += (double)X[i];
 }

@@ -17,7 +17,8 @@
 #define WARMUP    100
 #define TIMED     1000
 
-static void col_major_kernel(const float *A, float *C, int N) {
+static void __attribute__((noinline))
+col_major_kernel(const float *A, float *C, int N) {
     /* Transpose: C[i*N+j] = A[j*N+i]  — strided access on A */
     for (int i = 0; i < N; i++)
         for (int j = 0; j < N; j++)

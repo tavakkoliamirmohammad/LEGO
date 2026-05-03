@@ -74,8 +74,8 @@ _C_BASELINE_MAP = {
     "09_gemm_zmorton":           ("morton_fma_64k",    None),
     "10_lu_zmorton":             ("morton_fma_64k",    None),
     "11_chol_zmorton":           ("morton_fma_64k",    None),
-    # ---- Tiled FMA / unit-stride, N=1M ----
-    "12_gemm_reg_L1_L2_tile":    ("fma_1M",            None),
+    # ---- Tiled 2D GEMM (N=512×512) — compare against naive 3-loop gemm.c ----
+    "12_gemm_reg_L1_L2_tile":    ("gemm",              512),
     "13_3mm_reg_L1_L2_tile":     ("fma_1M",            None),
     "14_2mm_reg_L1_tile":        ("fma_1M",            None),
     "15_trmm_L1_L2_tile":        ("fma_1M",            None),

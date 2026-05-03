@@ -15,7 +15,12 @@
 #define WARMUP    100
 #define TIMED     1000
 
-static void saxpy_kernel(float a, const float *X, float *Y, int N) {
+/* __attribute__((noinline)) prevents the outer timing loop from being merged
+ * with the inner element loop (loop interchange / fusion), which would reduce
+ * the effective per-call memory traffic and give an unrealistically optimistic
+ * per-call time for a baseline that is supposed to represent ONE kernel pass. */
+static void __attribute__((noinline))
+saxpy_kernel(float a, const float * __restrict__ X, float * __restrict__ Y, int N) {
     for (int i = 0; i < N; i++)
         Y[i] = a * X[i] + Y[i];
 }

@@ -17,7 +17,8 @@
 #define WARMUP    100
 #define TIMED     1000
 
-static void self_update_kernel(float *A, float *B, int N) {
+static void __attribute__((noinline))
+self_update_kernel(float *A, float *B, int N) {
     /* B[i] = A[i-1] + A[i] — reads A sequentially, writes B (no dep on B) */
     for (int i = 1; i < N; i++)
         B[i] = A[i-1] + A[i];

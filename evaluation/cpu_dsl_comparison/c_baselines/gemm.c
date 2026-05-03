@@ -15,7 +15,8 @@
 #define WARMUP    100
 #define TIMED     1000
 
-static void gemm_kernel(const float *A, const float *B, float *C, int N) {
+static void __attribute__((noinline))
+gemm_kernel(const float *A, const float *B, float *C, int N) {
     for (int i = 0; i < N; i++)
         for (int k = 0; k < N; k++) {
             float aik = A[i * N + k];
