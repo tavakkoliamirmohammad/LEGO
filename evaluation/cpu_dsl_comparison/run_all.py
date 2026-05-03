@@ -53,14 +53,15 @@ C_BASELINES_DIR = ROOT / "c_baselines"
 #   {bin}_clang — Clang aggressive (candidates 01-08 only)
 #
 # Baseline kernel groupings:
-#   fma_1M         : unit-stride FMA loop, N=1M  (candidates 12-17, 26-28, 32-33, 39-42)
-#   fma_64k        : unit-stride FMA loop, N=64K (kept for reference; not used for 34-35)
-#   morton_fma_64k : Z-Morton gather FMA, N=64K (candidates 09-11, 34-35, 36)
-#   stride2_16k    : stride-2 deinterleave, N=16K (candidates 23-25, 38)
-#   stride4_16k    : stride-4 deinterleave, N=16K (candidates 29-31)
-#   stencil_3d7pt  : 3D 7-point stencil, 32x32x32 (candidates 19, 21, 37)
-#   stencil_3d13pt : 3D 13-point stencil, 32x32x32 (candidate 20)
-#   stencil_2d5pt  : 2D 5-point jacobi stencil, 256x256 flat (candidate 22)
+#   fma_1M              : unit-stride FMA loop, N=1M  (candidates 12-17, 28, 32-33, 39-42)
+#   fma_64k             : unit-stride FMA loop, N=64K (kept for reference; not used for 34-35)
+#   morton_fma_64k      : Z-Morton gather FMA, N=64K (candidates 09-11, 34-35, 36)
+#   stride2_16k         : stride-2 deinterleave, N=16K (candidates 23-25, 38) or N=4096 (26-27)
+#   stride4_16k         : stride-4 deinterleave, N=16K (candidates 29-31)
+#   stencil_3d7pt       : 3D 7-point stencil, 32x32x32 (candidates 19, 21)
+#   stencil_3d13pt      : 3D 13-point stencil, 32x32x32 (candidate 20)
+#   stencil_2d5pt       : 2D 5-point jacobi stencil, 256x256 flat (candidate 22)
+#   stencil_2d5pt_30x30 : 2D 5-point jacobi stencil, 30x30 flat, N_INNER=840 (candidate 37)
 # ---------------------------------------------------------------------------
 _C_BASELINE_MAP = {
     # ---- Original 8 candidates (have all three C variants) ----
@@ -83,7 +84,7 @@ _C_BASELINE_MAP = {
     "15_trmm_L1_L2_tile":        ("fma_1M",            None),
     "16_doitgen_reg_L1_tile":    ("fma_1M",            None),
     "17_tensor_contraction_gett":("fma_1M",            None),
-    "18_tblis_notranspose":      ("fma_1M",            None),
+    "18_tblis_notranspose":      ("gemm",               64),
     # ---- 3D stencil, 32x32x32 interior ----
     "19_bricklib_3d7pt":         ("stencil_3d7pt",     None),
     # 20 is a 3D 13-point stencil — use the correct 13pt C baseline, not the 7pt one.
@@ -98,9 +99,10 @@ _C_BASELINE_MAP = {
     "23_symm_rfp":               ("stride2_16k",       None),
     "24_syrk_rfp":               ("stride2_16k",       None),
     "25_nw_antidiag":            ("stride2_16k",       None),
-    # ---- Skew / wavefront, unit-stride N=1M ----
-    "26_nussinov_skew":          ("fma_1M",            None),
-    "27_zuker_skew":             ("fma_1M",            None),
+    # ---- Skew tile, stride-2 gather at N=4096 ----
+    # kernel.py and measure.py both use stride-2 at N=4096; pass N=4096 to C baseline.
+    "26_nussinov_skew":          ("stride2_16k",        4096),
+    "27_zuker_skew":             ("stride2_16k",        4096),
     "28_seidel2d_wavefront":     ("fma_1M",            None),
     # ---- AoSoA stride-4, N=16K ----
     "29_particlefilter_aosoA":   ("stride4_16k",       None),
@@ -121,7 +123,8 @@ _C_BASELINE_MAP = {
     # ---- Non-pow2 Morton gather, N=64K ----
     "36_gemm_nonpow2_morton":    ("morton_fma_64k",    None),
     # ---- Non-pow2 2D stencil (28x30=840 interior) ----
-    "37_stencil_nonpow2_brick":  ("stencil_3d7pt",     None),
+    # Use the matching 30x30 baseline (N_INNER=840), not the 32x32x32 3D baseline (N_INNER=30720).
+    "37_stencil_nonpow2_brick":  ("stencil_2d5pt_30x30", None),
     # ---- Non-pow2 skew, stride-2, N=16K ----
     "38_nussinov_nonpow2_skew":  ("stride2_16k",       None),
     # ---- Tiled, unit-stride N=1M ----

@@ -3,8 +3,9 @@
 CASTLE candidate 18. Layout class: Skew tile.
 Prior verdicts: AMD WIN, Intel WIN.
 
-Skew tile: unit-stride innermost loop after skew transform.
-Uses N=1M for meaningful timing (amortizes JIT overhead).
+Skew tile: models stride-2 memory access pattern (deinterleave-style),
+characteristic of the Nussinov skew tiling approximation.
+Benchmarks the stride-2 kernel from kernel.py against the stride2_16k C baseline.
 """
 import json
 import math
@@ -14,19 +15,12 @@ import numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lego.backend.cpu_dsl import cpu_kernel, Buffer
+from kernel import kernel_cpu_dsl, N, N_BUF, TILE
 
-N_BENCH = 1048576
-TILE = 16
-
-
-@cpu_kernel(grid=(N_BENCH,), tile=(TILE,))
-def _bench(A: Buffer[N_BENCH], B: Buffer[N_BENCH], C: Buffer[N_BENCH]):
-    for i in tile_range:
-        C[i] = A[i] * B[i] + C[i]
+N_BENCH = N        # 4096 elements (logical), buffer N_BUF = 8192
 
 
-def _measure(fn, warmup=100, timed=500):
+def _measure(fn, warmup=200, timed=3000):
     for _ in range(warmup):
         fn()
     t0 = time.perf_counter_ns()
@@ -37,24 +31,26 @@ def _measure(fn, warmup=100, timed=500):
 
 def main():
     rng = np.random.default_rng(42)
-    A_np = rng.standard_normal(N_BENCH).astype(np.float32)
-    B_np = rng.standard_normal(N_BENCH).astype(np.float32)
-    C_np = np.zeros(N_BENCH, dtype=np.float32)
+    A_np = rng.standard_normal(N_BUF).astype(np.float32)
+    B_np = np.zeros(N_BENCH, dtype=np.float32)
 
-    t_numpy = _measure(lambda: np.add(A_np * B_np, C_np, out=C_np))
+    # NumPy baseline: strided gather (A[::2] * 2.0 → B)
+    t_numpy = _measure(lambda: np.multiply(A_np[::2], 2.0, out=B_np))
 
     t_scalar = float("nan")
     try:
-        sj = _bench.compile(target="scalar")
-        t_scalar = _measure(lambda: sj(A_np, B_np, C_np))
+        sj = kernel_cpu_dsl.compile(target="scalar")
+        B_sc = np.zeros(N_BENCH, dtype=np.float32)
+        t_scalar = _measure(lambda: sj(A_np, B_sc))
     except Exception:
         pass
 
     t_vec = float("nan")
     notes = ""
     try:
-        vj = _bench.compile(target="x86")
-        t_vec = _measure(lambda: vj(A_np, B_np, C_np))
+        vj = kernel_cpu_dsl.compile(target="x86")
+        B_v = np.zeros(N_BENCH, dtype=np.float32)
+        t_vec = _measure(lambda: vj(A_np, B_v))
     except Exception as e:
         notes = str(e)
 
@@ -75,7 +71,7 @@ def main():
         "speedup_isolated_jit": sp_iso,
         "speedup_vs_numpy": sr(t_numpy, t_vec),
         "verdict": verdict,
-        "notes": notes,
+        "notes": notes or "stride-2 gather: B[i] = A[i*2]*2.0 at N=4096",
     }))
 
 
