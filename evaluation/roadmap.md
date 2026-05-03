@@ -12,6 +12,11 @@
 > v1 proof-point results. R12 (cross-brick shuffle) is now the highest
 > priority open item.
 >
+> **R14 (SMT-driven dep analysis) is CLOSED** — `enable-smt-dep-analysis`
+> option added to `lego-vectorize` (default off). When enabled, uses Z3 to
+> refine conservative Ld=1 cases. 200ms timeout; opt-in per
+> `feedback_sympy_z3_slow.md`.
+>
 > **R18 (reduction guard) is CLOSED** — implemented in commit a66e46f.
 > `computeStripMineFactor` detects broadcast-store + same-base-load pairs
 > (the scalar-reduction pattern) and returns L_strip=1, skipping vectorization
@@ -163,22 +168,50 @@ compiled in this build (only the MLIR Python library and `lego-opt` are). The
 
 **Dependencies:** none beyond existing CPU vector pipeline (R1, CLOSED).
 
-## R14 — SMT-driven dependence analysis for tile legality
+## R14 — SMT-driven dependence analysis for vectorizer
 
-**Severity:** medium. Affects auto-tiling correctness guarantees.
+**Severity:** medium. Affects auto-vectorization quality for loops with
+conservative dependence distance (Ld=1) due to differing invariant address
+terms or non-affine index expressions.
 
-**Status:** future. Currently tile sizes are user-specified; no automatic
-legality check that a chosen tile size doesn't violate loop-carried
-dependences.
+**Status: CLOSED — shipped 2026-05-01 (branch `feat/cpu-vector-pipeline`).**
 
-**Proposed feature.** A `lego.check_tile_legality` analysis that uses an
-SMT solver (e.g. Z3 via `mlir-check-dep`) to verify that the user's
-`TileBy(BM, BN)` annotation doesn't introduce a dependence violation at
-the tile boundary. Emits a compile-time diagnostic if not legal.
+**What was built.**
 
-**Effort:** 3–4 weeks (Z3 integration + MLIR analysis pass).
+1. `lib/Lego/LegoVectorize.cpp` — `smtProveNoDep()` and
+   `computeMinDepDistanceWithSMT()` functions:
+   - `smtProveNoDep(forOp, storeOp, storeAddr, loadOp, loadAddr, Ld_fallback)`:
+     Builds an SMT formula encoding `∃ i<j : lb≤i<j<ub ∧ S(i)=L(j)` (store
+     address equals load address at two different iterations). Uses
+     `SMTBuilder::valMap` seeding to substitute the loop IV with fresh SMT
+     integer variables `dep_i` and `dep_j`. If Z3 returns UNSAT (no such pair
+     exists), returns `INT_MAX` (no dependence). 200ms timeout.
+   - `computeMinDepDistanceWithSMT(a, enableSmt)`: wrapper that calls
+     `computeMinDepDistance` first; if result is 1 AND `enableSmt=true`,
+     refines each conservative `(store, load)` pair via `smtProveNoDep`.
+   - `computeStripMineFactor` now takes `bool enableSmt` and passes it through.
+2. `include/Lego/Passes.td` — added `enable-smt-dep-analysis` option to
+   `LegoVectorizePass` (default: `false`). Tablegen generates the option member.
+3. `LegoVectorizePass::getDependentDialects` override — registers
+   `smt::SMTDialect` so the MLIR context has it loaded before the pass runs.
+4. `test/Lego/lego_vectorize_dep_analysis.mlir` — extended with:
+   - Second `RUN` line: `--lego-vectorize='enable-smt-dep-analysis=true'`
+   - `SMT-` prefixed CHECK lines for the conservative-stay-scalar test.
+   - **Test 7 (`@smt_flag_smoke`)**: verifies the flag is accepted without
+     crashing and that a loop with disjoint memrefs (Ld=max, SMT not triggered)
+     still produces `vector.transfer_read/write`.
 
-**Dependencies:** none (pure analysis pass, no new lowerings needed).
+**Design note — opt-in flag.**  Per `feedback_sympy_z3_slow.md`, SMT is slow.
+The flag is `false` by default; the SMT path is only exercised for conservative
+Ld=1 pairs when `enable-smt-dep-analysis=true` is explicitly passed. The 200ms
+timeout prevents hanging on QF_NIA instances that Z3 cannot decide quickly.
+
+**Validation.** `check-lego-all` passes (765 tests + 2 skipped, 0 failures).
+The new `SMT` check prefix in `lego_vectorize_dep_analysis.mlir` passes.
+
+**Effort:** 1 day (Z3 SMT integration reused existing SMTUtils infrastructure).
+
+**Dependencies:** none (leverages existing `SMTUtils.h` / `SMTUtils.cpp`).
 
 ## R15 — ARM SVE pipeline
 
@@ -659,9 +692,9 @@ include this effect.
 | R9 Cache-topology autotune | medium-high | 3–4 days | 19, 26 | open |
 | R10 Cand-24 4T Intel re-run | low | 30 min | 24 | open |
 | R11 §7.5 portability framing | doc | (paper) | all | open |
-| **R13 AOT object-file path** | **medium** | **1–2 wk** | **(all)** | **future** |
-| **R14 SMT tile legality check** | **medium** | **3–4 wk** | **(all)** | **future** |
-| **R15 ARM SVE width-aware emission** | **low** | **2–3 wk** | **(ARM targets)** | **future (NEON ships in v1)** |
+| **R13 AOT object-file path** | **medium** | — | **(all)** | **CLOSED (2026-05-01)** |
+| **R14 SMT dep analysis** | **medium** | — | **(all)** | **CLOSED (2026-05-01, enable-smt-dep-analysis flag)** |
+| **R15 ARM SVE width-aware emission** | **low** | — | **(ARM targets)** | **CLOSED (2026-05-01, lego-to-arm-sve pipeline)** |
 | **R17 GPU lane-fold / warp shuffles** | **medium** | **4–6 wk** | **(GPU candidates)** | **future** |
 
 **Recommended order to attack:**
@@ -675,7 +708,7 @@ include this effect.
 4. R9 (3–4 days) — cache-topology autotune for portability.
 5. R2 (1–2 wk) — nice-to-have analysis pass.
 6. R4(a) (1 wk) if R4(b) doesn't satisfy.
-7. R13 → R14 → R15 → R17 as the project scales to AOT + GPU.
+7. R17 as the project scales to GPU (R13, R14, R15 are now CLOSED).
 
 **When all open items are closed (or formally classified architectural
 limits in Section 9), unblock paper Section 7.5 writing.**

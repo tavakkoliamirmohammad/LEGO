@@ -1,4 +1,5 @@
 // RUN: lego-opt %s --lego-vectorize | FileCheck %s
+// RUN: lego-opt %s --lego-vectorize='enable-smt-dep-analysis=true' | FileCheck %s --check-prefix=SMT
 
 // Dependence analysis tests.
 // The dep analysis (computeMinDepDistance) checks cross-iteration RAW/WAW/WAR
@@ -15,6 +16,9 @@
 // CHECK-NOT: vector.gather
 // CHECK: memref.load
 // CHECK: memref.store
+// SMT-LABEL: func.func @self_update_raw
+// SMT-NOT: vector.transfer_read
+// SMT: memref.load
 func.func @self_update_raw(%A: memref<?xf64>, %N: index) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -144,6 +148,33 @@ func.func @raw_distance_gt_L(%A: memref<?xf64>, %N: index) {
     %im16 = arith.subi %i, %c16 : index
     %v = memref.load %A[%im16] : memref<?xf64>
     memref.store %v, %A[%i] : memref<?xf64>
+  }
+  return
+}
+
+// -----
+
+// ---------------------------------------------------------------------------
+// Test 7: R14 — enable-smt-dep-analysis flag smoke test.
+// A simple copy loop (disjoint memrefs A and B) that already vectorizes under
+// the default conservative analysis.  With enable-smt-dep-analysis=true the
+// same result is expected: SMT is invoked only for conservative Ld=1 pairs;
+// here Ld=max (disjoint bases), so SMT is never triggered.  This verifies:
+//   (a) the flag is accepted without crashing,
+//   (b) vectorization decisions are not regressed by the SMT wrapper.
+// ---------------------------------------------------------------------------
+// CHECK-LABEL: func.func @smt_flag_smoke
+// CHECK: vector.transfer_read
+// CHECK: vector.transfer_write
+// SMT-LABEL: func.func @smt_flag_smoke
+// SMT: vector.transfer_read
+// SMT: vector.transfer_write
+func.func @smt_flag_smoke(%A: memref<?xf64>, %B: memref<?xf64>, %N: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %N step %c1 {
+    %v = memref.load %A[%i] : memref<?xf64>
+    memref.store %v, %B[%i] : memref<?xf64>
   }
   return
 }
