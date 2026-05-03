@@ -1155,12 +1155,30 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
   };
 
   // Pre-pass: identify loop-invariant scalar SSA values used in the body and
-  // pre-broadcast them.  For mixed-precision we broadcast to the *result*
-  // element width; here we only broadcast function-arg scalars that appear
-  // directly as operands to arith ops, before any width-changing op.
-  // We broadcast to L_strip width so that the arith "catch-all" branch can
-  // then slice them down when Ln_result < L_strip.
-  DenseMap<Value, Value> broadcastMap;
+  // pre-broadcast them to the NATURAL sub-vector width (Ln), NOT to L_strip.
+  //
+  // Previous approach: broadcast to L_strip (e.g. vector<64xf32>), then let the
+  // arith catch-all slice it into numSubOpsResult pieces via
+  // vector.extract_strided_slice. This generated:
+  //   insertelement + shufflevector(64-wide) + 4× shufflevector(16-wide slice)
+  // = 6 instructions just to splat a scalar `a` that GCC splats in 1
+  // vpbroadcastss. At N=1M, this 6× instruction inflation dominated the
+  // per-element FMA cost and caused LEGO to be ~14% slower than gcc -O3.
+  //
+  // Fixed approach: broadcast each scalar directly to vector<Ln x T> and
+  // populate subVectorMap with numSubOps copies.  The catch-all path then
+  // sees (int64_t)subs.size() == numSubOpsResult and takes the "already the
+  // right number of pieces" branch — zero slicing overhead.
+  //
+  // Ln is the natural register width for the element type on this target.
+  // For f32 on AVX-512: Ln = 64/4 = 16 → vector<16xf32> = one ZMM register.
+  // numSubOps = L_strip / Ln: for L_strip=64, numSubOps=4 (ILP unroll).
+  // We emit numSubOps independent broadcast vectors; each uses a distinct
+  // SSA name → distinct register → full ILP.
+  //
+  // IMPORTANT: we also need to store numSubOps sub-vectors in subVectorMap
+  // for each scalar (not just map in IRMapping) so that the catch-all's
+  // getSubsFor() returns the pre-sliced list directly.
   auto isOutsideLoop = [&](Value v) {
     Operation *defOp = v.getDefiningOp();
     if (!defOp) {
@@ -1170,19 +1188,51 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
     return !origLoop->isAncestor(defOp);
   };
 
+  // Collect all loop-external scalar operands and determine their Ln.
+  // We scan the body for any scalar (intOrFloat) value used from outside.
   for (Operation &op : origLoop.getBody()->getOperations()) {
     for (Value operand : op.getOperands()) {
       if (!isOutsideLoop(operand)) continue;
-      if (broadcastMap.contains(operand)) continue;
+      if (subVectorMap.contains(operand)) continue;  // already handled
       Type t = operand.getType();
       if (!t.isIntOrFloat()) continue;
-      // Broadcast to L_strip; arith catch-all will slice if needed.
-      auto vecTy = VectorType::get({L_strip}, t);
+
+      // Compute the natural sub-vector width for this element type.
+      int64_t elemBits = t.getIntOrFloatBitWidth();
+      int64_t elemBytes = elemBits / 8;
+      int64_t Ln;
+      if (elemBytes <= 0) {
+        // i1 or sub-byte type: use L_strip directly (one bit per lane).
+        Ln = L_strip;
+      } else {
+        Ln = std::min(getRegisterLanesForType(target, elemBytes), L_strip);
+      }
+      int64_t numSubOps = (Ln > 0) ? (L_strip / Ln) : 1;
+
+      // Emit ONE broadcast op at vector<Ln x T> and replicate the SSA value
+      // reference numSubOps times in subVectorMap.
+      //
+      // Rationale: multiple identical `vector.broadcast %same_scalar` ops lower
+      // to multiple `vpbroadcastss` instructions, but they are ALL computing the
+      // same value. Emitting a single broadcast and reusing the SSA value gives
+      // LLVM a single vpbroadcastss (or equivalent) that it can hoist before the
+      // inner loop and reuse across all 4 ILP-unroll slots — exactly what GCC
+      // does with `vmovaps .LC0(%rip), %xmm1` before the hot loop.
+      //
+      // The ILP benefit of the 4× unroll comes from having 4 independent load
+      // addresses and 4 independent FMA result registers — not from having 4
+      // separate broadcast registers for the same constant.  LLVM's register
+      // allocator handles the one-broadcast-many-uses case correctly.
+      auto vecTy = VectorType::get({Ln}, t);
       Value bc = vector::BroadcastOp::create(builder, loc, vecTy, operand);
-      broadcastMap[operand] = bc;
+      SmallVector<Value> subs(numSubOps, bc);  // numSubOps refs to the SAME Value
+
+      // Map the broadcast into IRMapping (for any single-lookup path),
+      // and store all numSubOps refs in subVectorMap (for the catch-all path).
+      mapping.map(operand, bc);
+      subVectorMap[operand] = std::move(subs);
     }
   }
-  for (auto &[scalar, vec] : broadcastMap) mapping.map(scalar, vec);
 
   for (Operation &op : origLoop.getBody()->getOperations()) {
     if (isa<scf::YieldOp>(op))
@@ -1219,14 +1269,23 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
         mapping.map(load.getResult(), subs[0]);
         subVectorMap[load.getResult()] = std::move(subs);
       } else if (cls.kind == lego::AccessKind::Broadcast) {
-        // Loop-invariant load — clone as scalar then broadcast to L_strip.
+        // Loop-invariant load — clone as scalar then broadcast at natural Ln width.
+        // Emit ONE broadcast (one vpbroadcastss) and reuse it numSubOps times.
+        // Same reasoning as the pre-pass scalar fix: the loaded value is invariant;
+        // one physical broadcast register is all that's needed.
         Operation *clonedLoad = builder.clone(*load.getOperation(), mapping);
         Type elemTy = load.getType();
-        auto vecTy = VectorType::get({L_strip}, elemTy);
+        int64_t elemBytes = elemTy.getIntOrFloatBitWidth() / 8;
+        int64_t Ln = (elemBytes > 0)
+                         ? std::min(getRegisterLanesForType(target, elemBytes), L_strip)
+                         : L_strip;
+        int64_t numSubOps = (Ln > 0) ? (L_strip / Ln) : 1;
+        auto vecTy = VectorType::get({Ln}, elemTy);
         Value bc = vector::BroadcastOp::create(builder, loc, vecTy,
                                                clonedLoad->getResult(0));
+        SmallVector<Value> subs(numSubOps, bc);  // one broadcast, numSubOps refs
         mapping.map(load.getResult(), bc);
-        subVectorMap[load.getResult()] = {bc};
+        subVectorMap[load.getResult()] = std::move(subs);
       } else if (cls.kind == lego::AccessKind::CrossBlock) {
         // Two adjacent block reads + vector.shuffle.
         //

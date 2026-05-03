@@ -457,10 +457,17 @@ class CPUKernelBuilder:
                 # the speedup scalar_jit/vec_jit then measures our vectorizer's
                 # contribution versus LLVM's un-aided scalar code generation.
                 #
-                # For all other targets (x86, arm-neon, cpu): keep opt_level=2
-                # so the backend applies peephole + register allocation on the
-                # already-vectorized IR we hand it.
-                jit_opt = 0 if target == "scalar" else 2
+                # For all other targets (x86, arm-neon, cpu): use opt_level=3
+                # (not 2) so that LLVM aggressively CSEs the struct-field
+                # extractvalue chains that the memref-to-LLVM lowering emits.
+                # With opt_level=2, repeated `llvm.extractvalue %struct[1]` ops
+                # in the inner loop body survive as separate instructions because
+                # LLVM's O2 GVN/CSE stops short of hoisting them. opt_level=3
+                # runs the full optimizer (including AggressiveInstCombine and
+                # the full LoopOptimizer suite) which eliminates these redundant
+                # struct-field extractions and hoists the base-pointer into a
+                # register before the loop — matching what gcc -O3 does naturally.
+                jit_opt = 0 if target == "scalar" else 3
                 engine = ExecutionEngine(module, opt_level=jit_opt)
             self._engines[cache_key] = engine
 
@@ -540,7 +547,7 @@ class CPUKernelBuilder:
                     raise RuntimeError(
                         f"bench() compilation failed ({cpu_target.pipeline}):\n{e}"
                     ) from e
-                jit_opt = 0 if target == "scalar" else 2
+                jit_opt = 0 if target == "scalar" else 3
                 bench_engine = ExecutionEngine(module, opt_level=jit_opt)
             # Store both engine and callable.
             bench_fn = bench_builder._make_callable(bench_engine)
@@ -586,6 +593,47 @@ class CPUKernelBuilder:
             "i8":  ctypes.c_int8,
         }
 
+        # Hot-path optimisations
+        # ───────────────────────
+        # 4. **Pre-cached function pointer + packed array** — engine.invoke
+        #    does per-call: symbol lookup, CFUNCTYPE creation, packed-array
+        #    allocation, and N ctypes.cast calls.  Total: ~6-8 µs overhead.
+        #    Instead:
+        #      a) Call engine.lookup(name) ONCE at compile time → _ciface_fn.
+        #      b) For each (scalar, buffer) combination that appears in the
+        #         benchmark loop, build and cache a (c_void_p * N) packed
+        #         array with the addresses pre-computed.
+        #      c) On every hot-path call: key check + _ciface_fn(_pre_packed).
+        #    This reduces the per-call Python overhead from ~7 µs to ~1 µs.
+        #
+        # 5. **Single-slot last-call cache** — for the overwhelmingly common
+        #    benchmark pattern (same scalars + same arrays × 1000 calls),
+        #    one key equality check is faster than a dict lookup.
+        n_scalars = len(scalar_params)
+        n_buffers = len(buffers)
+        n_cargs = n_scalars + n_buffers
+
+        # Pre-build the ctypes callable once: avoids per-call symbol lookup
+        # and CFUNCTYPE construction inside engine.invoke.
+        try:
+            _ciface_fn = engine.lookup(name)   # ctypes callable for hot path
+        except RuntimeError:
+            _ciface_fn = None   # fall back to engine.invoke if lookup fails
+
+        _scalar_cache: dict = {}   # (dtype_str, py_val) → ctypes-array-1
+        # Cache maps key → (cargs_list, pre_packed_c_void_p_array)
+        # The cargs list keeps ctypes objects alive (prevents GC of descriptors).
+        # The pre_packed array is passed directly to _ciface_fn — no per-call cast.
+        _call_cache: dict = {}     # key → (cargs_list, packed_array | None)
+        _last: list = [None, None, None]  # [last_key, last_cargs, last_packed]
+
+        def _build_packed(cargs):
+            """Build a pre-cast (c_void_p * N) array from *cargs*."""
+            p = (ctypes.c_void_p * n_cargs)()
+            for j, v in enumerate(cargs):
+                p[j] = ctypes.cast(v, ctypes.c_void_p)
+            return p
+
         def jit_fn(*args):
             """Invoke the JIT-compiled CPU kernel.
 
@@ -593,32 +641,67 @@ class CPUKernelBuilder:
                 *args: scalar args (matching scalar_params types), then one
                        numpy array per LayoutBuffer (in declaration order).
             """
-            n_scalars = len(scalar_params)
-            scalar_args_py = args[:n_scalars]
-            buf_args = args[n_scalars:]
-
-            if len(buf_args) != len(buffers):
+            # Validate arg count once.
+            if len(args) != n_cargs:
                 raise ValueError(
-                    f"Expected {len(buffers)} buffer(s), got {len(buf_args)}"
+                    f"Expected {n_cargs} arg(s) "
+                    f"({n_scalars} scalar(s) + {n_buffers} buffer(s)), "
+                    f"got {len(args)}"
                 )
 
-            # Build ctypes args: scalars first, then ranked-memref pointers.
-            cargs = []
-            for dtype_str, py_val in zip(scalar_params, scalar_args_py):
-                c_ty = _dtype_to_ctype.get(dtype_str, ctypes.c_float)
-                cargs.append((c_ty * 1)(py_val))
+            # ── Single-slot last-call cache ──────────────────────────────────
+            # Build a cheap key using id() for O(1) object identity on arrays.
+            # On a hit: call _ciface_fn with the pre-built packed array directly
+            # — zero Python allocation, zero dict lookup, zero per-buffer work.
+            if n_scalars == 1 and n_buffers == 2:
+                key = (args[0], id(args[1]), id(args[2]))
+            elif n_scalars == 0 and n_buffers == 2:
+                key = (id(args[0]), id(args[1]))
+            else:
+                key = tuple(args[:n_scalars]) + tuple(id(a) for a in args[n_scalars:])
 
-            for arr in buf_args:
-                if isinstance(arr, np.ndarray):
-                    # Ensure C-contiguous layout before building descriptor.
-                    # np.ascontiguousarray is cheap (~0.1 µs) when already
-                    # contiguous; only copies on non-contiguous input.
-                    arr_c = arr if arr.flags['C_CONTIGUOUS'] else np.ascontiguousarray(arr)
-                    cargs.append(_cached_memref_ptr(arr_c))
+            if key == _last[0]:
+                if _ciface_fn is not None:
+                    _ciface_fn(_last[2])   # pre-packed, zero-overhead dispatch
                 else:
-                    # Non-numpy argument (e.g. raw ctypes pointer) — pass through.
-                    cargs.append(arr)
+                    engine.invoke(name, *_last[1])
+                return
 
-            engine.invoke(name, *cargs)
+            # ── Full _call_cache (multi-array sweeps, new combos) ────────────
+            cached = _call_cache.get(key)
+            if cached is not None:
+                cargs, packed = cached
+            else:
+                # Build cargs from scratch.
+                cargs = [None] * n_cargs
+
+                for i, (dtype_str, py_val) in enumerate(
+                        zip(scalar_params, args[:n_scalars])):
+                    kk = (dtype_str, py_val)
+                    c_wrap = _scalar_cache.get(kk)
+                    if c_wrap is None:
+                        c_ty = _dtype_to_ctype.get(dtype_str, ctypes.c_float)
+                        c_wrap = (c_ty * 1)(py_val)
+                        _scalar_cache[kk] = c_wrap
+                    cargs[i] = c_wrap
+
+                for i, arr in enumerate(args[n_scalars:]):
+                    if isinstance(arr, np.ndarray):
+                        arr_c = arr if arr.flags['C_CONTIGUOUS'] else np.ascontiguousarray(arr)
+                        cargs[n_scalars + i] = _cached_memref_ptr(arr_c)
+                    else:
+                        cargs[n_scalars + i] = arr
+
+                # Pre-cast addresses into the packed array once.
+                packed = _build_packed(cargs) if _ciface_fn is not None else None
+                _call_cache[key] = (cargs, packed)
+
+            _last[0] = key
+            _last[1] = cargs
+            _last[2] = packed
+            if _ciface_fn is not None:
+                _ciface_fn(packed)
+            else:
+                engine.invoke(name, *cargs)
 
         return jit_fn
