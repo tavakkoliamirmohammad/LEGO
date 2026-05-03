@@ -1271,9 +1271,22 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
       // Determine target sub-width for the result, clamped to L_strip.
       // Same reasoning as getLnForAccess: when T < R_T, L_strip < R_T and
       // using the unclamped R_T yields numSubOpsResult = 0.
+      //
+      // Special case for i1 (boolean) results: arith.cmpi / arith.cmpf return
+      // a mask type whose width matches the input operand lane count — one bit
+      // per lane, not one register per byte. Using bitWidth/8 = 0 here would
+      // make getRegisterLanesForType return 1 (the elementBytes=0 fallback),
+      // giving Ln_result=1 and subResTy=vector<1xi1> which is wrong.
+      // Fix: treat i1 as 1-bit-per-lane, use L_strip directly.
       int64_t resBytes = resTy.getIntOrFloatBitWidth() / 8;
-      int64_t Ln_result = std::min(getRegisterLanesForType(target, resBytes),
-                                   L_strip);
+      int64_t Ln_result;
+      if (resBytes == 0) {
+        // 1-bit result (i1 from cmpi/cmpf): one mask bit per lane.
+        Ln_result = L_strip;
+      } else {
+        Ln_result = std::min(getRegisterLanesForType(target, resBytes),
+                             L_strip);
+      }
       int64_t numSubOpsResult = L_strip / Ln_result;
 
       // Build per-operand sub-vector lists aligned to Ln_result.
@@ -1414,11 +1427,31 @@ class LegoVectorizePass
 
       // Body must contain only memref.load/store, arith ops, and scf.yield.
       // Anything else → skip (future tasks will widen the allowlist).
+      //
+      // Additional guard for arith comparison ops (cmpi / cmpf) that return
+      // i1: the arith catch-all vectorization path requires operands to be of
+      // isIntOrFloat type.  index-typed operands get scalar-cloned, which
+      // produces cmpi(index, index) -> vector<8xi1> — an invalid MLIR op.
+      // Until index vectorization lands, skip loops with cmpi/cmpf on index
+      // operands.  Loops with cmpi/cmpf on f32/f64 operands are fine.
       bool bodyOK = true;
       for (Operation &op : a.forOp.getBody()->getOperations()) {
         if (isa<memref::LoadOp, memref::StoreOp, scf::YieldOp>(op)) continue;
         if (op.getDialect() &&
-            isa<arith::ArithDialect>(op.getDialect())) continue;
+            isa<arith::ArithDialect>(op.getDialect())) {
+          // Reject arith.cmpi / arith.cmpf when any operand is index-typed.
+          // These require index vectorization to lower correctly.
+          if (isa<arith::CmpIOp, arith::CmpFOp>(op)) {
+            bool hasIndexOperand = llvm::any_of(op.getOperands(), [](Value v) {
+              return v.getType().isIndex();
+            });
+            if (hasIndexOperand) {
+              bodyOK = false;
+              break;
+            }
+          }
+          continue;
+        }
         bodyOK = false;
         break;
       }
