@@ -165,3 +165,26 @@ func.func @morton_gather(%A: memref<?xf64>, %B: memref<?xf64>, %i_outer: index) 
   }
   return
 }
+
+// -----
+
+// Self-update loop (writes and reads the same memref). Conservative
+// dep analysis must refuse to vectorize.
+// CHECK-LABEL: func.func @self_update
+// CHECK-NOT: vector.transfer_read
+// CHECK-NOT: vector.gather
+// CHECK: memref.load
+// CHECK: memref.store
+func.func @self_update(%A: memref<?xf64>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c1024 = arith.constant 1024 : index
+  scf.for %i = %c0 to %c1024 step %c1 {
+    %im1 = arith.subi %i, %c1 : index
+    %prev = memref.load %A[%im1] : memref<?xf64>
+    %cur  = memref.load %A[%i] : memref<?xf64>
+    %s = arith.addf %prev, %cur : f64
+    memref.store %s, %A[%i] : memref<?xf64>
+  }
+  return
+}
