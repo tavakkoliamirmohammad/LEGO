@@ -32,6 +32,13 @@ Isolation schema (new harnesses, apples-to-apples):
     }
 
 The top-level results.json is written alongside this script.
+
+C-baseline integration:
+    For each candidate, run_all.py also invokes the matching C-O3-march=native
+    binary from c_baselines/ before the Python benchmark. The JSON record gains
+    a "c_baseline_ms" field (NaN if no matching binary) and a "vs_c" column in
+    the dashboard: cpu_dsl_vec / c_baseline (ratio < 1 means we beat C-O3).
+    Binaries must be pre-built: cd c_baselines && make all
 """
 import json
 import math
@@ -42,6 +49,45 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 CANDIDATES_DIR = ROOT / "candidates"
+C_BASELINES_DIR = ROOT / "c_baselines"
+
+# Map candidate directory prefix → (c_binary_name, N_to_pass_or_None).
+# N_to_pass must match the actual N used in measure.py's timed section.
+# Candidates with N_BENCH=1<<20 (1M) use large N for timing; others use kernel N.
+_C_BASELINE_MAP = {
+    "01_saxpy":          ("saxpy",            1 << 20),   # measure.py N_BENCH=1M
+    "02_gemm_row_major": ("gemm",             64),        # kernel M=N=64
+    "03_3pt_stencil_1d": ("stencil_3pt",      1024),      # kernel N=1024
+    "04_col_major_inner":("col_major",        256),       # kernel M=N=256
+    "05_morton_2d":      (None,               None),      # no equivalent C kernel
+    "06_self_update":    ("self_update",       4096),      # kernel N=4096
+    "07_mixed_precision":("mixed_precision",  1 << 20),   # measure.py N_BENCH=1M
+    "08_brick_within_cell": ("brick_within_cell", 1 << 20),  # measure.py N_BENCH=1M
+}
+
+
+def run_c_baseline(cand_name: str) -> float:
+    """Run the C-baseline binary for `cand_name`, return ms_per_call or NaN."""
+    entry = _C_BASELINE_MAP.get(cand_name)
+    if entry is None:
+        return float('nan')
+    bin_name, N = entry
+    if bin_name is None:
+        return float('nan')
+    bin_path = C_BASELINES_DIR / bin_name
+    if not bin_path.exists():
+        return float('nan')
+    cmd = [str(bin_path)]
+    if N is not None:
+        cmd.append(str(N))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        stdout = proc.stdout.strip()
+        last_line = stdout.split("\n")[-1] if stdout else ""
+        data = json.loads(last_line)
+        return float(data.get("c_baseline_ms_per_call", math.nan))
+    except Exception:
+        return float('nan')
 
 # Prefer the venv Python so MLIR .so files resolve correctly.
 # Falls back to sys.executable if the venv Python is not present.
@@ -56,6 +102,11 @@ for cand_dir in sorted(CANDIDATES_DIR.iterdir()):
     if not measure_py.exists():
         continue
     print(f"Running {cand_dir.name}...", flush=True)
+
+    # Run the C baseline first (does NOT require the venv).
+    c_ms = run_c_baseline(cand_dir.name)
+    if not math.isnan(c_ms):
+        print(f"  C baseline: {c_ms:.4f} ms/call", flush=True)
     try:
         # Build a clean environment.  The LEGO pass pipelines (lego-to-x86-vector
         # etc.) are registered by the compiled C extension in
@@ -73,11 +124,14 @@ for cand_dir in sorted(CANDIDATES_DIR.iterdir()):
         new_pp = _build_lego + (":" + filtered if filtered else "")
         sub_env = dict(os.environ)
         sub_env["PYTHONPATH"] = new_pp
+        # Timeout raised from 120s to 300s: amortized harness runs 100 warmup +
+        # 1000 timed iterations; for large-N kernels (N=1M) this can take ~30s
+        # per compiled variant × 3 variants (numpy + scalar-jit + vec-jit).
         proc = subprocess.run(
             [PYTHON, str(measure_py)],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
             env=sub_env,
         )
         # measure.py prints a single JSON line as its last output line.
@@ -92,13 +146,18 @@ for cand_dir in sorted(CANDIDATES_DIR.iterdir()):
                 "notes": (proc.stdout[-400:] + "\n" + proc.stderr[-400:]).strip(),
             }
         rec.setdefault("name", cand_dir.name)
+        # Attach C-baseline timing to the record.
+        if not math.isnan(c_ms):
+            rec["c_baseline_ms"] = round(c_ms, 6)
         results.append(rec)
     except subprocess.TimeoutExpired:
         results.append({"name": cand_dir.name, "verdict": "ERROR",
-                        "notes": "timeout after 120s"})
+                        "notes": "timeout after 300s",
+                        **({"c_baseline_ms": round(c_ms, 6)} if not math.isnan(c_ms) else {})})
     except Exception as exc:
         results.append({"name": cand_dir.name, "verdict": "ERROR",
-                        "notes": str(exc)})
+                        "notes": str(exc),
+                        **({"c_baseline_ms": round(c_ms, 6)} if not math.isnan(c_ms) else {})})
 
 
 def _fmt_ms(v):
@@ -113,22 +172,62 @@ def _fmt_sp(v, width=10):
     return f"{'NaN':>{width}}"
 
 
+def _safe_ratio(a, b):
+    if (isinstance(a, float) and not math.isnan(a) and
+            isinstance(b, float) and not math.isnan(b) and b > 0):
+        return a / b
+    return float('nan')
+
+
+def _fv(v, w, fmt=".4f"):
+    """Format a float value with width w; NaN if not a valid float."""
+    if isinstance(v, float) and not math.isnan(v):
+        return f"{v:>{w}{fmt}}"
+    return f"{'NaN':>{w}}"
+
+
+def _fx(v, w):
+    """Format a ratio as Nx with width w."""
+    if isinstance(v, float) and not math.isnan(v):
+        return f"{v:>{w-1}.2f}x"
+    return f"{'NaN':>{w}}"
+
+
 # Check if any result uses the isolation schema.
 _has_isolation = any("vec_jit_ms" in r for r in results)
+# Check if any result has a C baseline.
+_has_c_baseline = any("c_baseline_ms" in r for r in results)
 
 print()
 if _has_isolation:
-    # Full isolation table.
-    hdr = (f"{'Name':<28} {'N':>8} {'numpy_ms':>13} {'scalar_jit':>13}"
-           f" {'vec_jit':>13} {'vec_isolated':>12} {'vs_numpy':>10} {'Verdict':>8}")
+    # Full isolation table with optional C-baseline column.
+    if _has_c_baseline:
+        hdr = (f"{'Name':<28} {'N':>8}"
+               f" {'numpy_ms':>10} {'scalar_jit':>10} {'vec_jit':>10}"
+               f" {'vec_iso':>9} {'vs_numpy':>9}"
+               f" {'c_base_ms':>10} {'vs_c':>7} {'Verdict':>7}")
+    else:
+        hdr = (f"{'Name':<28} {'N':>8}"
+               f" {'numpy_ms':>13} {'scalar_jit':>13} {'vec_jit':>13}"
+               f" {'vec_isolated':>12} {'vs_numpy':>10} {'Verdict':>8}")
     print(hdr)
     print("-" * len(hdr))
     for r in results:
         name = r.get("name", "?")
         verdict = r.get("verdict", "")
+        c_ms_r = r.get("c_baseline_ms", math.nan)
+        if not isinstance(c_ms_r, float):
+            c_ms_r = float('nan')
+
         if verdict == "ERROR":
-            note_snippet = r.get("notes", "")[:50]
-            print(f"{name:<28} {'(error)':>8} {'':>13} {'':>13} {'':>13} {'':>12} {'':>10} {verdict:>8}  {note_snippet}")
+            note_snippet = r.get("notes", "")[:60]
+            if _has_c_baseline:
+                print(f"{name:<28} {'(error)':>8}"
+                      f" {'':>10} {'':>10} {'':>10} {'':>9} {'':>9}"
+                      f" {_fv(c_ms_r, 10)} {'':>7} {verdict:>7}  {note_snippet}")
+            else:
+                print(f"{name:<28} {'(error)':>8}"
+                      f" {'':>13} {'':>13} {'':>13} {'':>12} {'':>10} {verdict:>8}  {note_snippet}")
             continue
 
         n_val = r.get("N", "")
@@ -136,20 +235,31 @@ if _has_isolation:
 
         # Isolation schema
         if "vec_jit_ms" in r:
-            t_numpy = r.get("numpy_ms", math.nan)
+            t_numpy  = r.get("numpy_ms",  math.nan)
             t_scalar = r.get("scalar_jit_ms", math.nan)
-            t_vec = r.get("vec_jit_ms", math.nan)
-            sp_iso = r.get("speedup_isolated_jit", math.nan)
-            sp_np = r.get("speedup_vs_numpy", math.nan)
-            print(f"{name:<28} {n_str} {_fmt_ms(t_numpy)} {_fmt_ms(t_scalar)}"
-                  f" {_fmt_ms(t_vec)} {_fmt_sp(sp_iso, 12)} {_fmt_sp(sp_np, 10)} {verdict:>8}")
+            t_vec    = r.get("vec_jit_ms", math.nan)
+            sp_iso   = r.get("speedup_isolated_jit", math.nan)
+            sp_np    = r.get("speedup_vs_numpy", math.nan)
+            if _has_c_baseline:
+                # vs_c = c_baseline_ms / vec_jit_ms
+                # ratio > 1.0 → cpu_dsl is FASTER than C-O3; < 1.0 → slower.
+                vs_c = _safe_ratio(c_ms_r, t_vec)
+                print(f"{name:<28} {n_str}"
+                      f" {_fv(t_numpy, 10)} {_fv(t_scalar, 10)} {_fv(t_vec, 10)}"
+                      f" {_fx(sp_iso, 9)} {_fx(sp_np, 9)}"
+                      f" {_fv(c_ms_r, 10)} {_fx(vs_c, 7)} {verdict:>7}")
+            else:
+                print(f"{name:<28} {n_str}"
+                      f" {_fv(t_numpy, 13, '.3f')} {_fv(t_scalar, 13, '.3f')} {_fv(t_vec, 13, '.3f')}"
+                      f" {_fx(sp_iso, 12)} {_fx(sp_np, 10)} {verdict:>8}")
         else:
             # Legacy schema fallback.
             base = r.get("baseline_ms", math.nan)
-            dsl = r.get("cpu_dsl_ms", math.nan)
-            sp = r.get("speedup", math.nan)
-            print(f"{name:<28} {'?':>8} {_fmt_ms(base)} {'NaN':>13}"
-                  f" {_fmt_ms(dsl)} {_fmt_sp(sp, 12)} {'NaN':>10} {verdict:>8}")
+            dsl  = r.get("cpu_dsl_ms", math.nan)
+            sp   = r.get("speedup", math.nan)
+            print(f"{name:<28} {'?':>8}"
+                  f" {_fv(base, 13, '.3f')} {'NaN':>13} {_fv(dsl, 13, '.3f')}"
+                  f" {_fx(sp, 12)} {'NaN':>10} {verdict:>8}")
 else:
     # Legacy table (no isolation results).
     print(f"{'Name':<28} {'Baseline ms':>14} {'cpu_dsl ms':>14} {'Speedup':>10} {'Verdict':>10}")
@@ -158,8 +268,8 @@ else:
         name = r.get("name", "?")
         verdict = r.get("verdict", "")
         base = r.get("baseline_ms", math.nan)
-        dsl = r.get("cpu_dsl_ms", math.nan)
-        sp = r.get("speedup", math.nan)
+        dsl  = r.get("cpu_dsl_ms", math.nan)
+        sp   = r.get("speedup", math.nan)
         if verdict == "ERROR":
             note_snippet = r.get("notes", "")[:50]
             print(f"{name:<28} {'(error)':>14} {'':>14} {'':>10} {verdict:>10}  {note_snippet}")

@@ -28,15 +28,22 @@ def _kernel_bench(a: float, X: Buffer[N_BENCH], Y: Buffer[N_BENCH]):
 from kernel import kernel_scalar, kernel_cpu_dsl, N as N_SMALL
 
 
-def _measure(fn, warmup=3, timed=20):
+def _measure(fn, warmup=100, timed=1000):
+    """Amortized measurement: compile-once, call many times in a hot loop.
+
+    JIT compilation happens once BEFORE this function is called (fn is
+    already a compiled callable). Only the kernel call cost is measured.
+    100 warm-up iterations flush instruction caches and branch predictors.
+    The full timed block is timed as ONE wall-clock interval and divided,
+    eliminating per-call timer overhead (~20ns / call on modern CPUs).
+    """
     for _ in range(warmup):
         fn()
-    times = []
+    t0 = time.perf_counter_ns()
     for _ in range(timed):
-        t0 = time.perf_counter_ns()
         fn()
-        times.append(time.perf_counter_ns() - t0)
-    return float(np.median(times)) / 1e6  # ms
+    t_total = time.perf_counter_ns() - t0
+    return (t_total / timed) / 1e6  # average ms per call
 
 
 def main():
