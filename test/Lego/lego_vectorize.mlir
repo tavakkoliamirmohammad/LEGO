@@ -82,6 +82,24 @@ func.func @mixed_precision(%X: memref<?xf32>, %C: memref<?xf64>, %N: index) {
 
 // -----
 
+// Column-major access in inner-row loop: stride is N (matrix row count).
+// Vectorizable as a strided gather.
+// CHECK-LABEL: func.func @col_major_strided
+// CHECK: vector.gather
+func.func @col_major_strided(%A: memref<?xf64>, %B: memref<?xf64>, %N: index) {
+  %c0 = arith.constant 0 : index
+  %c8 = arith.constant 8 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %c8 step %c1 {
+    %off = arith.muli %i, %N : index
+    %v = memref.load %A[%off] : memref<?xf64>
+    memref.store %v, %B[%i] : memref<?xf64>
+  }
+  return
+}
+
+// -----
+
 // Cross-brick read: the inner z loop sees an A[addr(z)] pattern where addr
 // uses a brick-style layout with brick_size=8 and brick_stride=16 (> within-
 // brick element stride 1):
@@ -125,3 +143,4 @@ func.func @cross_brick_stencil(%A: memref<?xf64>, %B: memref<?xf64>) {
   }
   return
 }
+

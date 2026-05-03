@@ -427,15 +427,159 @@ collectCandidateLoops(func::FuncOp func) {
   return result;
 }
 
+// Returns true if op1 and op2 reference distinct memref SSA roots
+// (different memref.alloc results, different function arguments). Walks
+// through memref.cast / memref.subview to find the root, then compares.
+static bool memrefBasesDisjoint(Operation *op1, Operation *op2) {
+  auto getMemRef = [](Operation *op) -> Value {
+    if (auto load = dyn_cast<memref::LoadOp>(op)) return load.getMemRef();
+    if (auto store = dyn_cast<memref::StoreOp>(op)) return store.getMemRef();
+    return Value{};
+  };
+  auto root = [](Value v) -> Value {
+    while (Operation *defOp = v.getDefiningOp()) {
+      if (auto cast = dyn_cast<memref::CastOp>(defOp)) v = cast.getSource();
+      else if (auto sv = dyn_cast<memref::SubViewOp>(defOp)) v = sv.getSource();
+      else break;
+    }
+    return v;
+  };
+  Value r1 = root(getMemRef(op1));
+  Value r2 = root(getMemRef(op2));
+  return r1 && r2 && r1 != r2;
+}
+
+static int64_t computeMinDepDistance(LoopAnalysis &a) {
+  // For each (store, other-access) pair that shares a memref root, compute
+  // the loop-carried dependence distance.
+  //
+  // Strategy: use Tier-A symbolic analysis to get (coeff, constant) for each
+  // index expression. A cross-iteration dependence exists when:
+  //   store_addr(k) == read_addr(k + d)  for some d > 0.
+  // For affine expressions f(k) = c*k + b:
+  //   store_addr(k) = cs*k + bs
+  //   read_addr(k+d) = cr*(k+d) + br = cr*k + cr*d + br
+  // For aliasing: cs*k + bs = cr*k + cr*d + br
+  // If cs == cr: bs = cr*d + br  →  d = (bs - br) / cr
+  // If cs != cr: may alias at some iteration (complex; conservatively Ld=1).
+  //
+  // Special case: if all accesses to the same memref have IDENTICAL affine
+  // expressions (same coeff and constant), they always hit the same element
+  // in each iteration — no cross-iteration dependence.
+
+  Value iv = a.forOp.getInductionVar();
+
+  // Build affine expressions for all accesses.
+  struct AccessInfo {
+    Operation *op;
+    bool isWrite;
+    Value memBase;
+    // Affine expression of the index (from Tier-A evaluator).
+    bool affineValid = false;
+    int64_t coeff = 0;
+    int64_t constant = 0;
+  };
+
+  llvm::SmallVector<AccessInfo> infos;
+  infos.reserve(a.accesses.size());
+  for (Operation *op : a.accesses) {
+    AccessInfo info;
+    info.op = op;
+    info.isWrite = isa<memref::StoreOp>(op);
+
+    Value addr;
+    if (auto load = dyn_cast<memref::LoadOp>(op)) {
+      info.memBase = load.getMemRef();
+      if (!load.getIndices().empty()) addr = load.getIndices().front();
+    } else if (auto store = dyn_cast<memref::StoreOp>(op)) {
+      info.memBase = store.getMemRef();
+      if (!store.getIndices().empty()) addr = store.getIndices().front();
+    }
+
+    // Root the memref base (walk through casts/subviews).
+    auto rootFn = [](Value v) -> Value {
+      while (Operation *defOp = v.getDefiningOp()) {
+        if (auto cast = dyn_cast<memref::CastOp>(defOp)) v = cast.getSource();
+        else if (auto sv = dyn_cast<memref::SubViewOp>(defOp)) v = sv.getSource();
+        else break;
+      }
+      return v;
+    };
+    info.memBase = rootFn(info.memBase);
+
+    if (addr) {
+      llvm::DenseMap<Value, lego::AffineVal> cache;
+      lego::AffineVal sym = lego::evalAffine(addr, iv, cache);
+      if (sym.valid) {
+        info.affineValid = true;
+        info.coeff = sym.coeff;
+        info.constant = sym.constant;
+      }
+    }
+    infos.push_back(info);
+  }
+
+  // Check each (store, other) pair sharing a memref root.
+  int64_t Ld = std::numeric_limits<int64_t>::max();
+  for (size_t i = 0; i < infos.size(); ++i) {
+    if (!infos[i].isWrite) continue;
+    for (size_t j = 0; j < infos.size(); ++j) {
+      if (i == j) continue;
+      // Skip if memref bases are disjoint.
+      if (infos[i].memBase != infos[j].memBase) continue;
+
+      // Same memref root. Check for cross-iteration dependence.
+      if (!infos[i].affineValid || !infos[j].affineValid) {
+        // NonAffine — conservatively Ld=1.
+        Ld = 1;
+        continue;
+      }
+
+      // If expressions are identical: same element every iteration → no dep.
+      if (infos[i].coeff == infos[j].coeff &&
+          infos[i].constant == infos[j].constant)
+        continue;
+
+      // Coefficients differ: conservative Ld=1.
+      if (infos[i].coeff != infos[j].coeff) {
+        Ld = 1;
+        continue;
+      }
+
+      // Same coefficient. d = (store_constant - read_constant) / coeff.
+      // (store at k: cs*k + bs; other at k+d: cs*(k+d) + br → d = (bs-br)/cs)
+      int64_t diff = infos[i].constant - infos[j].constant;
+      if (infos[i].coeff == 0) {
+        // Both constants: same element always → no dep.
+        continue;
+      }
+      if (diff % infos[i].coeff != 0) {
+        // Non-integer distance: no exact aliasing → no dep.
+        continue;
+      }
+      int64_t d = diff / infos[i].coeff;
+      if (d > 0) {
+        Ld = std::min(Ld, d);
+      }
+      // d <= 0: dependence is in the current or past iteration (WAR or WAW
+      // within same iteration) — safe to vectorize with masks; treat as no
+      // loop-carried dep.
+    }
+  }
+  return Ld;
+}
+
 // Compute the strip-mine factor L_strip for a single LoopAnalysis.
 //
 // L_strip = lcm(Ln_access) over all constraining accesses, where:
-//   Ln_access = min(R_T, T, Ld)  for Unit accesses.
-//   Broadcast accesses are skipped (they don't constrain).
-//   Strided / NonAffine / CrossBlock → L_strip = 1 (not vectorizable in v1).
+//   Ln_access = min(R_T, T, Ld)  for Unit, CrossBlock, Strided, and NonAffine
+//   accesses. Broadcast accesses are skipped (they don't constrain).
 //
-// Dep distance Ld is INT64_MAX for now — Task 16 will implement memref base
-// distinctness analysis to establish finite Ld where appropriate.
+// After computing the raw L_strip, a cost-factor penalty is applied for
+// Strided and NonAffine accesses: gather latency is ~5x (strided) or ~10x
+// (non-affine) that of unit-stride loads. If the adjusted score <= 1.0 the
+// loop is not worth vectorizing.
+//
 // NOTE: LoopAnalysis is taken by non-const reference because scf::ForOp
 // accessors (getLowerBound, getUpperBound, getStep) are non-const in this
 // MLIR version.  The function does not mutate `a`.
@@ -452,9 +596,8 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
         if (st.value() > 0)
           T = (ub.value() - lb.value()) / st.value();
 
-  // Dependence distance — Task 7 placeholder. Task 16 will implement memref
-  // base distinctness analysis. For now: assume infinite (no dep).
-  int64_t Ld = std::numeric_limits<int64_t>::max();
+  // Dependence distance — Task 16: memref base distinctness analysis.
+  int64_t Ld = computeMinDepDistance(a);
 
   int64_t L_strip = 1;
   bool sawConstraining = false;
@@ -468,18 +611,44 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
       // Doesn't constrain L_strip; skip.
       continue;
     } else if (cls.kind == lego::AccessKind::CrossBlock) {
-      // CrossBlock: emission lands in Task 12; use register lanes as L.
+      // CrossBlock: use register lanes as L.
+      Ln = std::min({R_T, T, Ld});
+      sawConstraining = true;
+    } else if (cls.kind == lego::AccessKind::Strided ||
+               cls.kind == lego::AccessKind::NonAffine) {
+      // Gather-eligible: use register lanes as L.
       Ln = std::min({R_T, T, Ld});
       sawConstraining = true;
     } else {
-      // Strided / NonAffine — not handled in Task 7.
-      // Tasks 14-15 will handle gather/strided emission.
       return 1;
     }
     if (Ln <= 1) return 1;
     L_strip = (L_strip == 1) ? Ln : lcm_i64(L_strip, Ln);
   }
   if (!sawConstraining) return 1;  // all Broadcasts — nothing to vectorize.
+
+  // Cost-factor penalty for gather-style accesses (Tasks 14-15).
+  // A strided gather is ~5x slower than unit-stride; non-affine ~10x.
+  // Only apply the cost penalty when ALL non-Broadcast accesses are
+  // Strided or NonAffine (pure-gather loop). Mixed loops (some unit-stride
+  // accesses alongside gather loads) are still worthwhile to vectorize.
+  bool hasUnit = false;
+  double worstPenalty = 1.0;
+  for (const auto &cls : a.classes) {
+    if (cls.kind == lego::AccessKind::Unit ||
+        cls.kind == lego::AccessKind::CrossBlock)
+      hasUnit = true;
+    else if (cls.kind == lego::AccessKind::NonAffine && worstPenalty < 10.0)
+      worstPenalty = 10.0;
+    else if (cls.kind == lego::AccessKind::Strided && worstPenalty < 5.0)
+      worstPenalty = 5.0;
+  }
+  if (!hasUnit) {
+    // Pure gather loop: apply cost penalty.
+    double score = static_cast<double>(L_strip) / worstPenalty;
+    if (score <= 1.0) return 1;
+  }
+
   return L_strip;
 }
 
@@ -517,6 +686,48 @@ static StripMineResult stripMineForOp(scf::ForOp forOp, int64_t L,
   auto tailLoop = scf::ForOp::create(builder, loc, alignedUb, ub, origStep);
 
   return {vecLoop, tailLoop};
+}
+
+// ---------------------------------------------------------------------------
+// Address DAG cloner for NonAffine gather emission (Task 15).
+//
+// Recursively clones the def-use DAG rooted at `v`, substituting operands
+// through `laneMap`. Stops at values defined outside `parentLoop` (uses them
+// as-is) or at block arguments (uses the mapped value or original).
+//
+// Returns the cloned (or reused) SSA value for the lane-specific address.
+// ---------------------------------------------------------------------------
+static Value cloneAddrDAG(Value v, IRMapping &laneMap, OpBuilder &builder,
+                          scf::ForOp parentLoop) {
+  // Already mapped (including the iv substitution)?
+  if (Value mapped = laneMap.lookupOrNull(v)) return mapped;
+
+  // Defined outside the loop (loop-invariant) — use as-is.
+  Operation *defOp = v.getDefiningOp();
+  if (!defOp || !parentLoop->isAncestor(defOp)) {
+    laneMap.map(v, v);
+    return v;
+  }
+
+  // Clone operands first (depth-first).
+  SmallVector<Value> newOperands;
+  newOperands.reserve(defOp->getNumOperands());
+  for (Value operand : defOp->getOperands())
+    newOperands.push_back(cloneAddrDAG(operand, laneMap, builder, parentLoop));
+
+  // Clone the op with the remapped operands.
+  OperationState state(defOp->getLoc(), defOp->getName());
+  state.addOperands(newOperands);
+  state.addAttributes(defOp->getAttrs());
+  state.addTypes(defOp->getResultTypes());
+  Operation *cloned = builder.create(state);
+
+  // Map all results (usually just one for arithmetic ops).
+  for (auto [orig, clonedRes] :
+       llvm::zip(defOp->getResults(), cloned->getResults()))
+    laneMap.map(orig, clonedRes);
+
+  return cloned->getResult(0);
 }
 
 /// Populate `vecLoop`'s body.
@@ -697,6 +908,99 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
           Operation *cloned = builder.clone(*load.getOperation(), mapping);
           mapping.map(load.getResult(), cloned->getResult(0));
         }
+      } else if (cls.kind == lego::AccessKind::Strided) {
+        // vector.gather for constant non-unit stride.
+        // Build index vector [base, base+stride, base+2*stride, ...] where
+        // stride is in element units (as stored in cls.stride for Tier-B).
+        int64_t Ln = getLnForAccess(idx);
+        int64_t stride = cls.stride;  // element-unit stride from Tier-B
+        Type elemTy = load.getType();
+        auto vecTy = VectorType::get({Ln}, elemTy);
+
+        Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
+        SmallVector<Value> indexElements;
+        indexElements.reserve(Ln);
+        for (int64_t j = 0; j < Ln; ++j) {
+          if (j == 0) {
+            indexElements.push_back(baseIv);
+          } else {
+            Value addend =
+                arith::ConstantIndexOp::create(builder, loc, j * stride);
+            indexElements.push_back(
+                arith::AddIOp::create(builder, loc, baseIv, addend));
+          }
+        }
+        auto idxVecTy = VectorType::get({Ln}, builder.getIndexType());
+        Value indexVec = vector::FromElementsOp::create(
+            builder, loc, idxVecTy, ValueRange(indexElements));
+
+        auto i1Ty = builder.getI1Type();
+        auto maskTy = VectorType::get({Ln}, i1Ty);
+        Value mask = arith::ConstantOp::create(
+            builder, loc, maskTy,
+            DenseElementsAttr::get(maskTy, builder.getBoolAttr(true)));
+        Value passThru = arith::ConstantOp::create(
+            builder, loc, vecTy,
+            DenseElementsAttr::get(vecTy, builder.getZeroAttr(elemTy)));
+
+        Value c0 = arith::ConstantIndexOp::create(builder, loc, 0);
+        Value gathered = vector::GatherOp::create(
+            builder, loc, vecTy, load.getMemRef(), ValueRange{c0}, indexVec,
+            mask, passThru, /*alignment=*/mlir::IntegerAttr{});
+
+        mapping.map(load.getResult(), gathered);
+        subVectorMap[load.getResult()] = {gathered};
+      } else if (cls.kind == lego::AccessKind::NonAffine) {
+        // vector.gather for non-affine (irregular) access.
+        // Build the index vector by cloning the address DAG Ln times with
+        // the induction variable substituted by iv+0, iv+1, ..., iv+Ln-1.
+        int64_t Ln = getLnForAccess(idx);
+        Type elemTy = load.getType();
+        auto vecTy = VectorType::get({Ln}, elemTy);
+
+        Value origIv = origLoop.getInductionVar();
+        Value origAddr = load.getIndices().front();
+        Value baseIv = mapping.lookupOrDefault(origIv);
+
+        SmallVector<Value> indexElements;
+        indexElements.reserve(Ln);
+        for (int64_t j = 0; j < Ln; ++j) {
+          Value laneIv;
+          if (j == 0) {
+            laneIv = baseIv;
+          } else {
+            Value addend = arith::ConstantIndexOp::create(builder, loc, j);
+            laneIv = arith::AddIOp::create(builder, loc, baseIv, addend);
+          }
+          // Clone the address DAG with origIv -> laneIv.
+          IRMapping laneMap;
+          laneMap.map(origIv, laneIv);
+          // Also forward any already-mapped values (loop-invariant scalars etc.)
+          // into the lane map so we don't re-clone them.
+          Value laneAddr =
+              cloneAddrDAG(origAddr, laneMap, builder, origLoop);
+          indexElements.push_back(laneAddr);
+        }
+        auto idxVecTy = VectorType::get({Ln}, builder.getIndexType());
+        Value indexVec = vector::FromElementsOp::create(
+            builder, loc, idxVecTy, ValueRange(indexElements));
+
+        auto i1Ty = builder.getI1Type();
+        auto maskTy = VectorType::get({Ln}, i1Ty);
+        Value mask = arith::ConstantOp::create(
+            builder, loc, maskTy,
+            DenseElementsAttr::get(maskTy, builder.getBoolAttr(true)));
+        Value passThru = arith::ConstantOp::create(
+            builder, loc, vecTy,
+            DenseElementsAttr::get(vecTy, builder.getZeroAttr(elemTy)));
+
+        Value c0 = arith::ConstantIndexOp::create(builder, loc, 0);
+        Value gathered = vector::GatherOp::create(
+            builder, loc, vecTy, load.getMemRef(), ValueRange{c0}, indexVec,
+            mask, passThru, /*alignment=*/mlir::IntegerAttr{});
+
+        mapping.map(load.getResult(), gathered);
+        subVectorMap[load.getResult()] = {gathered};
       } else {
         // Shouldn't reach here for vectorizable loops.
         Operation *cloned = builder.clone(*load.getOperation(), mapping);
