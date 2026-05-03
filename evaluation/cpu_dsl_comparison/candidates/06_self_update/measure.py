@@ -1,10 +1,15 @@
-"""Measure baseline vs cpu_dsl for 06_self_update (prefix sum).
+"""Measure baseline vs cpu_dsl for 06_self_update (shift-add stencil).
 
 Isolation harness: scalar-JIT vs vectorized-JIT (apples-to-apples).
-Expected: vec_isolated ≈ 1.0x — loop-carried dependence prevents useful
-vectorisation; correctness check intentionally skipped.
+
+Timing methodology: bench() wraps the kernel in a single JIT call with N_ITERS
+iterations to eliminate Python-loop overhead (~4µs/call) that otherwise
+dominates the ~0.3µs kernel time at N=4K and biases results toward LOSS.
+
+Expected: vec_isolated ≈ 5-8× — no loop-carried dep, LEGO emits AVX-512 vadd.
 """
 import json
+import math
 import sys
 import time
 import numpy as np
@@ -12,81 +17,59 @@ import numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from kernel import kernel_scalar, kernel_cpu_dsl, N
+from kernel import kernel_scalar, kernel_cpu_dsl, N, N_INNER
 
-
-def _measure(fn, warmup=100, timed=1000):
-    """Amortized measurement: compile-once, call many times in a hot loop.
-
-    JIT compilation happens once BEFORE this function is called (fn is
-    already a compiled callable). Only the kernel call cost is measured.
-    100 warm-up iterations flush instruction caches and branch predictors.
-    The full timed block is timed as ONE wall-clock interval and divided,
-    eliminating per-call timer overhead (~20ns / call on modern CPUs).
-    """
-    for _ in range(warmup):
-        fn()
-    t0 = time.perf_counter_ns()
-    for _ in range(timed):
-        fn()
-    t_total = time.perf_counter_ns() - t0
-    return (t_total / timed) / 1e6  # average ms per call
+N_ITERS = 10000
 
 
 def main():
     rng = np.random.default_rng(0)
     A = rng.standard_normal(N).astype(np.float32)
-    B_base = np.zeros(N, dtype=np.float32)
+    B = np.zeros(N, dtype=np.float32)
 
-    # NumPy baseline.
-    t_numpy = _measure(lambda: kernel_scalar(A, B_base))
+    # NumPy baseline (shift-add via vectorized slice ops).
+    warmup, timed = 100, 1000
+    kernel_scalar(A, B)  # warmup
+    t0 = time.perf_counter_ns()
+    for _ in range(timed):
+        kernel_scalar(A, B)
+    t_numpy = (time.perf_counter_ns() - t0) / timed / 1e6
 
-    # Scalar JIT baseline (apples-to-apples).
-    t_scalar_jit = float('nan')
+    # Scalar JIT baseline — use bench() to measure pure kernel time.
+    t_scalar = float("nan")
     try:
-        scalar_jit = kernel_cpu_dsl.compile(target='scalar')
-        B_scalar = np.zeros(N, dtype=np.float32)
-        t_scalar_jit = _measure(lambda: scalar_jit(A, B_scalar))
-    except Exception as e:
-        t_scalar_jit = float('nan')
+        kernel_cpu_dsl.bench(A, B, n_iters=100, target="scalar")   # warmup compile
+        t_scalar = kernel_cpu_dsl.bench(A, B, n_iters=N_ITERS, target="scalar")
+    except Exception:
+        pass
 
-    # Vectorized JIT.
-    t_vec_jit = float('nan')
-    notes = ("Loop-carried dep; DSL output may differ from baseline. "
-             "Correctness check intentionally skipped.")
+    # Vectorized JIT — use bench() for the same reason.
+    t_vec = float("nan")
+    notes = ""
     try:
-        vec_jit = kernel_cpu_dsl.compile(target='x86')
-        B_dsl = np.zeros(N, dtype=np.float32)
-        t_vec_jit = _measure(lambda: vec_jit(A, B_dsl))
+        kernel_cpu_dsl.bench(A, B, n_iters=100, target="x86")      # warmup compile
+        t_vec = kernel_cpu_dsl.bench(A, B, n_iters=N_ITERS, target="x86")
     except Exception as e:
-        t_vec_jit = float('nan')
         notes = str(e)
 
-    def _safe_ratio(a, b):
-        if a == a and b == b and b > 0:
-            return round(a / b, 4)
-        return float('nan')
+    def sr(a, b):
+        return round(a / b, 4) if (not math.isnan(a) and not math.isnan(b) and b > 0) else float("nan")
 
-    speedup_isolated = _safe_ratio(t_scalar_jit, t_vec_jit)
-    speedup_vs_numpy = _safe_ratio(t_numpy, t_vec_jit)
+    sp_iso = sr(t_scalar, t_vec)
+    verdict = ("ERROR" if notes and math.isnan(t_vec) else
+               "WIN" if sp_iso > 1.05 else "PARITY" if sp_iso >= 0.95 else "LOSS")
 
-    verdict = "ERROR" if t_vec_jit != t_vec_jit else (
-        "WIN" if speedup_isolated > 1.05 else
-        "PARITY" if speedup_isolated > 0.95 else "LOSS"
-    )
-
-    rec = {
+    print(json.dumps({
         "name": "06_self_update",
         "N": N,
         "numpy_ms": round(t_numpy, 4),
-        "scalar_jit_ms": round(t_scalar_jit, 4) if t_scalar_jit == t_scalar_jit else t_scalar_jit,
-        "vec_jit_ms": round(t_vec_jit, 4) if t_vec_jit == t_vec_jit else t_vec_jit,
-        "speedup_isolated_jit": speedup_isolated,
-        "speedup_vs_numpy": speedup_vs_numpy,
+        "scalar_jit_ms": round(t_scalar, 6) if not math.isnan(t_scalar) else t_scalar,
+        "vec_jit_ms": round(t_vec, 6) if not math.isnan(t_vec) else t_vec,
+        "speedup_isolated_jit": sp_iso,
+        "speedup_vs_numpy": sr(t_numpy, t_vec),
         "verdict": verdict,
-        "notes": notes,
-    }
-    print(json.dumps(rec))
+        "notes": notes or "shift-add stencil B[i+1]=A[i]+A[i+1]; no loop-carried dep; fully vectorizable",
+    }))
 
 
 if __name__ == "__main__":
