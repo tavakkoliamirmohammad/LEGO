@@ -819,6 +819,41 @@ static int64_t computeMinDepDistance(LoopAnalysis &a) {
 // MLIR version.  The function does not mutate `a`.
 static int64_t computeStripMineFactor(LoopAnalysis &a,
                                       llvm::StringRef target) {
+  // Reduction guard (R18): if any STORE access has a Broadcast index (i.e. the
+  // stored element's address is loop-invariant) AND there is a LOAD on the same
+  // memref with an equally Broadcast index, the loop is a scalar reduction
+  // (e.g. C[j] += A[j*K+k] * B[k*N+j%N] summing over k).  Vectorizing such a
+  // loop requires a horizontal reduction (vector.reduction) after the vector
+  // body — not yet implemented in emitVectorBody.  Return L_strip=1 (no-vec).
+  {
+    Value iv = a.forOp.getInductionVar();
+    // Quick check: any store with Broadcast index?
+    bool hasBroadcastStore = false;
+    for (size_t i = 0; i < a.accesses.size(); ++i) {
+      if (isa<memref::StoreOp>(a.accesses[i]) &&
+          a.classes[i].kind == lego::AccessKind::Broadcast) {
+        hasBroadcastStore = true;
+        break;
+      }
+    }
+    if (hasBroadcastStore) {
+      // Check whether the same memref is ALSO loaded with a Broadcast index →
+      // confirming this is a read-modify-write reduction pattern.
+      for (size_t si = 0; si < a.accesses.size(); ++si) {
+        if (!isa<memref::StoreOp>(a.accesses[si])) continue;
+        if (a.classes[si].kind != lego::AccessKind::Broadcast) continue;
+        Value storeBase = cast<memref::StoreOp>(a.accesses[si]).getMemRef();
+        for (size_t li = 0; li < a.accesses.size(); ++li) {
+          if (!isa<memref::LoadOp>(a.accesses[li])) continue;
+          Value loadBase = cast<memref::LoadOp>(a.accesses[li]).getMemRef();
+          if (loadBase == storeBase)
+            return 1;  // reduction loop — skip vectorization
+        }
+      }
+    }
+    (void)iv;
+  }
+
   // Trip count: extract (upper - lower) / step if all three are
   // arith.constant index; otherwise treat as unbounded.
   int64_t T = std::numeric_limits<int64_t>::max();
