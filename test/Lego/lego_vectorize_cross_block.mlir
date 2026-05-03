@@ -173,3 +173,99 @@ func.func @cross_brick_stencil_nonzero_lb(%A: memref<?xf64>, %B: memref<?xf64>) 
   }
   return
 }
+
+// -----
+
+// ---------------------------------------------------------------------------
+// R12: Multi-boundary CrossBlock — 3D 7-point stencil with TWO brick boundaries.
+//
+// Brick size = 3, brick stride = 6 (2× brick size, with padding).
+// addr(z) = (z / 3) * 6 + (z % 3).
+// Probing z=0..7 (L=8 for f64 avx512):
+//   z=0: 0, z=1: 1, z=2: 2,
+//   z=3: 6 (boundary at pos 3), z=4: 7, z=5: 8,
+//   z=6: 12 (boundary at pos 6), z=7: 13.
+// Diffs: 1,1,4(jump),1,1,4(jump),1 → 2 boundaries → multi-boundary CrossBlock.
+//
+// Expected emission: 3 transfer_reads (blocks 0,1,2) + 2 shuffles (chain).
+// CHECK-LABEL: func.func @cross_block_two_boundaries
+// CHECK: vector.transfer_read
+// CHECK: vector.transfer_read
+// CHECK: vector.transfer_read
+// CHECK: vector.shuffle
+// CHECK: vector.shuffle
+// ---------------------------------------------------------------------------
+func.func @cross_block_two_boundaries(%A: memref<?xf64>, %B: memref<?xf64>) {
+  %c0 = arith.constant 0 : index
+  %c8 = arith.constant 8 : index
+  %c3 = arith.constant 3 : index
+  %c6 = arith.constant 6 : index
+  %c1 = arith.constant 1 : index
+  scf.for %z = %c0 to %c8 step %c1 {
+    // Brick layout: brick_size=3, brick_stride=6.
+    // addr(z) = (z / 3) * 6 + (z % 3).
+    %brick_idx = arith.divui %z, %c3 : index
+    %inner     = arith.remui %z, %c3 : index
+    %brick_off = arith.muli %brick_idx, %c6 : index
+    %total     = arith.addi %inner, %brick_off : index
+    %v = memref.load %A[%total] : memref<?xf64>
+    memref.store %v, %B[%z] : memref<?xf64>
+  }
+  return
+}
+
+// -----
+
+// ---------------------------------------------------------------------------
+// R12: 3D 7-point stencil simulation — three independent CrossBlock reads.
+//
+// Models a vectorized inner-z loop of a 3D stencil in brick layout where:
+//   center A[flat]: unit-stride (simplest case)
+//   A[flat - 1] : CrossBlock (same brick, but position 0 of each brick
+//                  wraps to the previous brick's last element)
+//   A[flat + 1] : CrossBlock (same boundary issue on the high side)
+//
+// Here we use a small brick size to force multi-boundary access.
+// Brick size=4, brick stride=8. For L=8 lanes:
+//   A[flat - 1]: addr(z) = (z+3)/4*8 + (z+3)%4 - 4
+//                         for z=0..7 probing: varies with one boundary.
+//   A[flat + 1]: addr(z) = (z+5)/4*8 + (z+5)%4 - 4.
+//
+// This test verifies that EACH CrossBlock access independently emits its
+// own (M+1 reads + M shuffles) sequence, producing multiple shuffle ops total.
+//
+// CHECK-LABEL: func.func @cross_block_3d7pt_simulation
+// CHECK: vector.shuffle
+// CHECK: vector.shuffle
+// ---------------------------------------------------------------------------
+func.func @cross_block_3d7pt_simulation(%A: memref<?xf64>, %B: memref<?xf64>) {
+  %c0 = arith.constant 0 : index
+  %c8 = arith.constant 8 : index
+  %c4 = arith.constant 4 : index
+  %c8s = arith.constant 8 : index
+  %c1 = arith.constant 1 : index
+  scf.for %z = %c0 to %c8 step %c1 {
+    // Left neighbor: addr = (z+4)/4*8 + (z+4)%4 — CrossBlock with boundary.
+    %zp4        = arith.addi %z, %c4 : index
+    %bk_l = arith.divui %zp4, %c4 : index
+    %in_l = arith.remui %zp4, %c4 : index
+    %bo_l = arith.muli %bk_l, %c8s : index
+    %left_addr = arith.addi %in_l, %bo_l : index
+
+    // Right neighbor: addr = (z+1)/4*8 + (z+1)%4 — CrossBlock with boundary.
+    %zp1a       = arith.addi %z, %c1 : index
+    %bk_r = arith.divui %zp1a, %c4 : index
+    %in_r = arith.remui %zp1a, %c4 : index
+    %bo_r = arith.muli %bk_r, %c8s : index
+    %right_addr = arith.addi %in_r, %bo_r : index
+
+    // Center: unit-stride (z maps to flat index directly).
+    %vc = memref.load %A[%z]           : memref<?xf64>
+    %vl = memref.load %A[%left_addr]   : memref<?xf64>
+    %vr = memref.load %A[%right_addr]  : memref<?xf64>
+    %s1 = arith.addf %vc, %vl : f64
+    %s2 = arith.addf %s1, %vr : f64
+    memref.store %s2, %B[%z] : memref<?xf64>
+  }
+  return
+}
