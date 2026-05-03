@@ -58,15 +58,8 @@ _C_BASELINE_MAP = {
 }
 
 
-def run_c_baseline(cand_name: str) -> float:
-    """Run the C-baseline binary for `cand_name`, return ms_per_call or NaN."""
-    entry = _C_BASELINE_MAP.get(cand_name)
-    if entry is None:
-        return float('nan')
-    bin_name, N = entry
-    if bin_name is None:
-        return float('nan')
-    bin_path = C_BASELINES_DIR / bin_name
+def _run_c_binary(bin_path, N) -> float:
+    """Run a C baseline binary, return ms_per_call or NaN."""
     if not bin_path.exists():
         return float('nan')
     cmd = [str(bin_path)]
@@ -80,6 +73,28 @@ def run_c_baseline(cand_name: str) -> float:
         return float(data.get("c_baseline_ms_per_call", math.nan))
     except Exception:
         return float('nan')
+
+
+def run_c_baseline(cand_name: str) -> float:
+    """Run the GCC C-baseline binary for `cand_name`, return ms_per_call or NaN."""
+    entry = _C_BASELINE_MAP.get(cand_name)
+    if entry is None:
+        return float('nan')
+    bin_name, N = entry
+    if bin_name is None:
+        return float('nan')
+    return _run_c_binary(C_BASELINES_DIR / bin_name, N)
+
+
+def run_clang_baseline(cand_name: str) -> float:
+    """Run the Clang C-baseline binary for `cand_name`, return ms_per_call or NaN."""
+    entry = _C_BASELINE_MAP.get(cand_name)
+    if entry is None:
+        return float('nan')
+    bin_name, N = entry
+    if bin_name is None:
+        return float('nan')
+    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang", N)
 
 
 # Prefer the venv Python so MLIR .so files resolve correctly.
@@ -96,8 +111,11 @@ for cand_dir in sorted(CANDIDATES_DIR.iterdir()):
     print(f"Running {cand_dir.name}...", flush=True)
 
     c_ms = run_c_baseline(cand_dir.name)
+    clang_ms = run_clang_baseline(cand_dir.name)
     if not math.isnan(c_ms):
-        print(f"  C baseline: {c_ms:.4f} ms/call", flush=True)
+        print(f"  C baseline (gcc):   {c_ms:.4f} ms/call", flush=True)
+    if not math.isnan(clang_ms):
+        print(f"  C baseline (clang): {clang_ms:.4f} ms/call", flush=True)
 
     try:
         _build_lego = "/scratch/general/vast/u1419116/LEGO/build/python_packages/lego"
@@ -129,15 +147,19 @@ for cand_dir in sorted(CANDIDATES_DIR.iterdir()):
         rec.setdefault("name", cand_dir.name)
         if not math.isnan(c_ms):
             rec["c_baseline_ms"] = round(c_ms, 6)
+        if not math.isnan(clang_ms):
+            rec["c_clang_ms"] = round(clang_ms, 6)
         results.append(rec)
     except subprocess.TimeoutExpired:
         results.append({"name": cand_dir.name, "verdict": "ERROR",
                         "notes": "timeout after 300s",
-                        **({"c_baseline_ms": round(c_ms, 6)} if not math.isnan(c_ms) else {})})
+                        **({"c_baseline_ms": round(c_ms, 6)} if not math.isnan(c_ms) else {}),
+                        **({"c_clang_ms": round(clang_ms, 6)} if not math.isnan(clang_ms) else {})})
     except Exception as exc:
         results.append({"name": cand_dir.name, "verdict": "ERROR",
                         "notes": str(exc),
-                        **({"c_baseline_ms": round(c_ms, 6)} if not math.isnan(c_ms) else {})})
+                        **({"c_baseline_ms": round(c_ms, 6)} if not math.isnan(c_ms) else {}),
+                        **({"c_clang_ms": round(clang_ms, 6)} if not math.isnan(clang_ms) else {})})
 
 
 # ============================================================================
@@ -164,13 +186,14 @@ def _safe_ratio(a, b):
 
 
 _has_c = any("c_baseline_ms" in r for r in results)
+_has_clang = any("c_clang_ms" in r for r in results)
 _has_prior = any("prior_verdict" in r for r in results)
 _has_layout = any("layout_class" in r for r in results)
 
 print()
-print("=" * 140)
+print("=" * 160)
 print("  LEGO cpu_dsl_comparison — CASTLE Round-1 Full Coverage Dashboard")
-print("=" * 140)
+print("=" * 160)
 
 # Header
 hdr_parts = [f"{'Candidate':<32}"]
@@ -181,7 +204,9 @@ if _has_prior:
 hdr_parts += [f"{'N':>8}", f"{'numpy_ms':>11}", f"{'scalar_jit':>11}",
                f"{'vec_jit':>11}", f"{'vec_iso':>9}", f"{'vs_numpy':>9}"]
 if _has_c:
-    hdr_parts += [f"{'c_base_ms':>11}", f"{'vs_c':>7}"]
+    hdr_parts += [f"{'c_gcc_ms':>11}", f"{'vs_gcc':>8}"]
+if _has_clang:
+    hdr_parts += [f"{'c_clang_ms':>11}", f"{'vs_clang':>9}"]
 hdr_parts.append(f"{'Verdict':>8}")
 hdr = "  ".join(hdr_parts)
 print(hdr)
@@ -201,6 +226,9 @@ for r in results:
     c_ms_r = r.get("c_baseline_ms", float('nan'))
     if not isinstance(c_ms_r, float):
         c_ms_r = float('nan')
+    clang_ms_r = r.get("c_clang_ms", float('nan'))
+    if not isinstance(clang_ms_r, float):
+        clang_ms_r = float('nan')
 
     t_numpy  = r.get("numpy_ms",  float('nan'))
     t_scalar = r.get("scalar_jit_ms", float('nan'))
@@ -208,6 +236,7 @@ for r in results:
     sp_iso   = r.get("speedup_isolated_jit", float('nan'))
     sp_np    = r.get("speedup_vs_numpy", float('nan'))
     vs_c     = _safe_ratio(c_ms_r, t_vec)
+    vs_clang = _safe_ratio(clang_ms_r, t_vec)
 
     # Tally
     if verdict == "WIN":
@@ -247,7 +276,9 @@ for r in results:
     row_parts += [n_str, _fv(t_numpy, 11, '.3f'), _fv(t_scalar, 11, '.3f'),
                    _fv(t_vec, 11, '.3f'), _fx(sp_iso, 9), _fx(sp_np, 9)]
     if _has_c:
-        row_parts += [_fv(c_ms_r, 11, '.3f'), _fx(vs_c, 7)]
+        row_parts += [_fv(c_ms_r, 11, '.3f'), _fx(vs_c, 8)]
+    if _has_clang:
+        row_parts += [_fv(clang_ms_r, 11, '.3f'), _fx(vs_clang, 9)]
     row_parts.append(f"{verdict:>8}")
     print("  ".join(row_parts))
 
