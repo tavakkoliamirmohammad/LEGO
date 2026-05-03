@@ -1450,6 +1450,39 @@ class LegoVectorizePass
               break;
             }
           }
+          // Reject arith.index_cast / arith.index_castui when the SOURCE is a
+          // non-index integer (e.g. i32→index for Morton-style gather kernels).
+          // The catch-all vectorization path can't handle these correctly:
+          // it would try to emit index_cast(vector<16xi32>) → index (shape
+          // mismatch) or index_cast(index) → vector<16xi32> (also invalid).
+          // The NonAffine gather path handles address computation via
+          // cloneAddrDAG; the catch-all interfering here produces broken IR.
+          if (isa<arith::IndexCastOp, arith::IndexCastUIOp>(op)) {
+            // If the source is non-index (e.g. i32) or the result is non-index
+            // and the source involves the IV: this loop has complex index
+            // arithmetic (bitwise / Morton-style) — skip vectorization.
+            // These loops will be handled correctly by the tail (scalar) loop.
+            bool srcNonIndex = !op.getOperand(0).getType().isIndex();
+            bool resNonIndex = !op.getResult(0).getType().isIndex();
+            if (srcNonIndex || resNonIndex) {
+              // One of the directions involves a non-standard int type.
+              // Check if the source or result depends on the loop IV.
+              // If yes, skip vectorization (can't safely vectorize index_cast
+              // chains through the catch-all path).
+              bool ivDependent = llvm::any_of(op.getOperands(), [&](Value v) {
+                // Transitive check: is v the IV or does it depend on the IV?
+                // Simplified: check if v == iv (direct) or if its defining op
+                // is inside the loop (indirect, conservative).
+                if (v == a.forOp.getInductionVar()) return true;
+                Operation *defOp = v.getDefiningOp();
+                return defOp && a.forOp->isAncestor(defOp);
+              });
+              if (ivDependent) {
+                bodyOK = false;
+                break;
+              }
+            }
+          }
           continue;
         }
         bodyOK = false;

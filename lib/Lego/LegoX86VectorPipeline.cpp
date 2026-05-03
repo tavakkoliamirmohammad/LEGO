@@ -43,7 +43,18 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
   // convert-vector-to-llvm must precede SCF→CF so that the vector loop body
   // (produced by lego-vectorize) still exists as scf.for at this point.
-  pm.addPass(createConvertVectorToLLVMPass());
+  //
+  // reassociate-fp-reductions=true: allow LLVM to reorder floating-point
+  // reductions (e.g. for saxpy-style accumulators). This is semantically
+  // equivalent to -ffast-math's reassoc flag and is needed to close the
+  // vs-C gap since gcc -O3 -march=native uses reassociated SIMD reductions.
+  //
+  // NOTE: use-vector-alignment is intentionally NOT set here because
+  // numpy/ctypes allocations are only 16-byte aligned, not 64-byte.
+  // Emitting "align 64" load instructions for misaligned buffers causes SIGSEGV.
+  ConvertVectorToLLVMPassOptions vecToLLVMOpts;
+  vecToLLVMOpts.reassociateFPReductions = true;
+  pm.addPass(createConvertVectorToLLVMPass(vecToLLVMOpts));
   pm.addPass(createSCFToControlFlowPass());
   pm.addPass(createArithToLLVMConversionPass());
   pm.addPass(createFinalizeMemRefToLLVMConversionPass());
