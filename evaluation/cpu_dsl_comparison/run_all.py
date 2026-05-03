@@ -59,7 +59,7 @@ _C_BASELINE_MAP = {
     "02_gemm_row_major": ("gemm",             64),        # kernel M=N=64
     "03_3pt_stencil_1d": ("stencil_3pt",      1024),      # kernel N=1024
     "04_col_major_inner":("col_major",        256),       # kernel M=N=256
-    "05_morton_2d":      (None,               None),      # no equivalent C kernel
+    "05_morton_2d":      ("morton",            1 << 16),   # N=65536 (256×256 grid)
     "06_self_update":    ("self_update",       4096),      # kernel N=4096
     "07_mixed_precision":("mixed_precision",  1 << 20),   # measure.py N_BENCH=1M
     "08_brick_within_cell": ("brick_within_cell", 1 << 20),  # measure.py N_BENCH=1M

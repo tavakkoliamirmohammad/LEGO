@@ -101,8 +101,74 @@ func.func @xor_pattern(%A: memref<?xf64>, %B: memref<?xf64>) {
 
 // -----
 
+// -----
+
 // ---------------------------------------------------------------------------
-// Test 5: divui/remui brick pattern (same computation as cross_brick_stencil
+// Test 5: Two indirects from same array: B[i] = A[idx[i]] + A[idx[i+1]]
+//
+// idx[i] is unit-stride → vector.transfer_read for the index load.
+// A[idx[i]] and A[idx[i+1]] are NonAffine (runtime address depends on idx
+// values) → both become vector.gather.
+// The store B[i] is unit-stride → vector.transfer_write.
+//
+// Verifies that when TWO NonAffine loads target the same source array but with
+// different index sub-vectors (idx[i..i+7] vs idx[i+1..i+8]), the vectorizer
+// emits a separate vector.gather for each — not one gather reused for both.
+// ---------------------------------------------------------------------------
+// CHECK-LABEL: func.func @two_indirects
+// CHECK-COUNT-2: vector.gather
+func.func @two_indirects(%A: memref<?xf64>, %idx: memref<?xindex>, %B: memref<?xf64>, %N: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  scf.for %i = %c0 to %c8 step %c1 {
+    %i1 = arith.addi %i, %c1 : index
+    %a_idx = memref.load %idx[%i] : memref<?xindex>
+    %b_idx = memref.load %idx[%i1] : memref<?xindex>
+    %a = memref.load %A[%a_idx] : memref<?xf64>
+    %b = memref.load %A[%b_idx] : memref<?xf64>
+    %s = arith.addf %a, %b : f64
+    memref.store %s, %B[%i] : memref<?xf64>
+  }
+  return
+}
+
+// -----
+
+// ---------------------------------------------------------------------------
+// Test 6: @cpu_kernel(grid, tile) Morton-like: outer loop tile_id is invariant
+// w.r.t. inner loop; inner addr = tile_id * TILE + local_i (unit-stride w.r.t.
+// local_i). Task 1 fix: outer block arg (tile_id) treated as loop-invariant →
+// coeff = 1 (unit stride) → vector.transfer_read, NOT vector.gather.
+//
+// This is the key regression test for the Task-1 fix: before the fix, tile_id
+// was classified NonAffine (block arg not recognized as invariant), causing the
+// inner loop to emit vector.gather instead of vector.transfer_read.
+// ---------------------------------------------------------------------------
+// CHECK-LABEL: func.func @cpu_kernel_proxy_morton
+// CHECK: vector.transfer_read
+// CHECK-NOT: vector.gather
+func.func @cpu_kernel_proxy_morton(%A: memref<?xf32>, %B: memref<?xf32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  %c32 = arith.constant 32 : index
+  scf.for %tile_id = %c0 to %c32 step %c1 {
+    scf.for %local = %c0 to %c8 step %c1 {
+      %tile_size = arith.constant 8 : index
+      %base = arith.muli %tile_id, %tile_size : index
+      %i = arith.addi %base, %local : index
+      %v = memref.load %A[%i] : memref<?xf32>
+      memref.store %v, %B[%i] : memref<?xf32>
+    }
+  }
+  return
+}
+
+// -----
+
+// ---------------------------------------------------------------------------
+// Test 7: divui/remui brick pattern (same computation as cross_brick_stencil
 // in lego_vectorize.mlir, but with boundary at z=6 (mod 7) creating a
 // non-standard cross-block case with > 1 jump → NonAffine → gather).
 // addr(z) = (z+1)/7*13 + (z+1)%7  for z=0..7

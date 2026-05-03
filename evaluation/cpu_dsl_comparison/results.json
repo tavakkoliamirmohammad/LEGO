@@ -1,66 +1,98 @@
 [
   {
     "name": "01_saxpy",
-    "baseline_ms": 0.0039,
-    "cpu_dsl_ms": 0.1095,
-    "speedup": 0.0358,
-    "verdict": "LOSS",
-    "notes": ""
+    "N": 1048576,
+    "numpy_ms": 0.2805,
+    "scalar_jit_ms": 1.4065,
+    "vec_jit_ms": 0.2454,
+    "speedup_isolated_jit": 5.7308,
+    "speedup_vs_numpy": 1.1429,
+    "verdict": "WIN",
+    "notes": "",
+    "c_baseline_ms": 0.074947
   },
   {
     "name": "02_gemm_row_major",
-    "baseline_ms": 0.0065,
-    "cpu_dsl_ms": 0.2731,
-    "speedup": 0.0239,
-    "verdict": "LOSS",
-    "notes": ""
+    "N": 64,
+    "numpy_ms": 0.0065,
+    "scalar_jit_ms": 0.3101,
+    "vec_jit_ms": NaN,
+    "speedup_isolated_jit": NaN,
+    "speedup_vs_numpy": NaN,
+    "verdict": "ERROR",
+    "notes": "CPU compilation failed (lego-to-x86-vector):\nFailure while executing pass pipeline:\nerror: unknown: 'memref.store' op failed to verify that type of 'value' matches element type of 'memref'\n note: unknown: see current operation: \"memref.store\"(%73, %arg2, %9) : (vector<16xf32>, memref<4096xf32>, index) -> ()",
+    "c_baseline_ms": 0.018414
   },
   {
     "name": "03_3pt_stencil_1d",
-    "baseline_ms": 0.0023,
-    "cpu_dsl_ms": NaN,
-    "speedup": NaN,
+    "N": 1024,
+    "numpy_ms": 0.0021,
+    "scalar_jit_ms": 0.1114,
+    "vec_jit_ms": NaN,
+    "speedup_isolated_jit": NaN,
+    "speedup_vs_numpy": NaN,
     "verdict": "ERROR",
-    "notes": "CPU compilation failed (lego-to-x86-vector):\nFailure while executing pass pipeline:\nerror: unknown: 'memref.store' op failed to verify that type of 'value' matches element type of 'memref'\n note: unknown: see current operation: \"memref.store\"(%259, %arg1, %90) : (vector<16xf32>, memref<1024xf32>, index) -> ()"
+    "notes": "\nNot equal to tolerance rtol=0.0001, atol=0\n3pt stencil correctness mismatch\nMismatched elements: 14 / 1022 (1.37%)\nMax absolute difference among violations: 2.370737\nMax relative difference among violations: 1.\n ACTUAL: array([0.634048, 0.613218, 0.209653, ..., 0.      , 0.      , 0.      ],\n      dtype=float32)\n DESIRED: array([ 0.634048,  0.613218,  0.209653, ...,  0.710489, -1.744553,\n       -0.899454], dtype=float32)",
+    "c_baseline_ms": 0.000279
   },
   {
     "name": "04_col_major_inner",
-    "baseline_ms": 0.0465,
-    "cpu_dsl_ms": 0.1517,
-    "speedup": 0.3066,
+    "N": 256,
+    "numpy_ms": 0.0473,
+    "scalar_jit_ms": 0.1671,
+    "vec_jit_ms": 0.1987,
+    "speedup_isolated_jit": 0.8411,
+    "speedup_vs_numpy": 0.2383,
     "verdict": "LOSS",
-    "notes": ""
+    "notes": "",
+    "c_baseline_ms": 0.066233
   },
   {
     "name": "05_morton_2d",
-    "baseline_ms": 0.1184,
-    "cpu_dsl_ms": 0.1798,
-    "speedup": 0.6584,
-    "verdict": "LOSS",
-    "notes": "DSL uses identity index (z\u2192z); Morton decode blocked by missing bitwise ops in v1 DSL.  Correctness check skipped."
+    "N": 65536,
+    "numpy_ms": 0.1161,
+    "scalar_jit_ms": 0.1915,
+    "vec_jit_ms": 0.144,
+    "speedup_isolated_jit": 1.3294,
+    "speedup_vs_numpy": 0.8062,
+    "verdict": "WIN",
+    "notes": "DSL uses identity index (z\u2192z); Morton decode blocked by missing bitwise ops in v1 DSL. Correctness check skipped.",
+    "c_baseline_ms": 0.170659
   },
   {
     "name": "06_self_update",
-    "baseline_ms": 0.0152,
-    "cpu_dsl_ms": 0.1049,
-    "speedup": 0.1451,
+    "N": 4096,
+    "numpy_ms": 0.0152,
+    "scalar_jit_ms": 0.1168,
+    "vec_jit_ms": 0.1396,
+    "speedup_isolated_jit": 0.8365,
+    "speedup_vs_numpy": 0.109,
     "verdict": "LOSS",
-    "notes": "Loop-carried dep; DSL output may differ from baseline. Correctness check intentionally skipped."
+    "notes": "Loop-carried dep; DSL output may differ from baseline. Correctness check intentionally skipped.",
+    "c_baseline_ms": 0.00112
   },
   {
     "name": "07_mixed_precision",
-    "baseline_ms": 0.004,
-    "cpu_dsl_ms": 0.1074,
-    "speedup": 0.0369,
-    "verdict": "LOSS",
-    "notes": "scale=1.5 baked as f32 constant; 2-buffer form avoids v1 R12 store bug"
+    "N": 1048576,
+    "numpy_ms": 0.2872,
+    "scalar_jit_ms": 1.4075,
+    "vec_jit_ms": 0.2467,
+    "speedup_isolated_jit": 5.7043,
+    "speedup_vs_numpy": 1.1641,
+    "verdict": "WIN",
+    "notes": "scale=1.5 baked as f32 constant; 2-buffer form avoids v1 R12 store bug",
+    "c_baseline_ms": 0.111644
   },
   {
     "name": "08_brick_within_cell",
-    "baseline_ms": 0.0722,
-    "cpu_dsl_ms": 0.1305,
-    "speedup": 0.5529,
+    "N": 1048576,
+    "numpy_ms": 0.2923,
+    "scalar_jit_ms": 0.2221,
+    "vec_jit_ms": 0.2408,
+    "speedup_isolated_jit": 0.9221,
+    "speedup_vs_numpy": 1.2135,
     "verdict": "LOSS",
-    "notes": "NumPy BLAS loop is heavily optimised; beating it requires FMA intrinsic quality (R12 roadmap)."
+    "notes": "NumPy BLAS loop is heavily optimised; isolation shows JIT vectorization benefit",
+    "c_baseline_ms": 0.000293
   }
 ]

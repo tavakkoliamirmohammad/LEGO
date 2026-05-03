@@ -13,7 +13,7 @@ CC     = gcc
 CFLAGS = -O3 -march=native -mavx512f -ffast-math -Wall -Wno-unused-result
 
 SRCS = saxpy.c vecadd.c gemm.c stencil_3pt.c brick_within_cell.c \
-       mixed_precision.c col_major.c self_update.c
+       mixed_precision.c col_major.c self_update.c morton.c
 BINS = $(SRCS:.c=)
 
 all: $(BINS)
