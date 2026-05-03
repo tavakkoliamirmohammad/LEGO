@@ -97,9 +97,10 @@ func.func @i64_sitofp_f64(%X: memref<?xi64>, %Y: memref<?xf64>, %N: index) {
 // Similar to Test 1 but with a scalar factor broadcast to f64 width.
 // Tests that mixed-precision + scalar broadcast compose correctly.
 // ---------------------------------------------------------------------------
-// L_strip = lcm(16_f32, 8_f64) = 16. Broadcast to L_strip=16, then sliced.
+// L_strip = lcm(16_f32, 8_f64) = 16. scalar arg broadcast to natural Ln=8
+// (one vpbroadcastsd reused for both sub-ops, rather than vector<16xf64>).
 // CHECK-LABEL: func.func @f32_extf_saxpy
-// CHECK: vector.broadcast {{.*}} : f64 to vector<16xf64>
+// CHECK: vector.broadcast {{.*}} : f64 to vector<8xf64>
 // CHECK: vector.transfer_read {{.*}} : memref<?xf32>, vector<16xf32>
 // CHECK: arith.extf {{.*}} : vector<8xf32> to vector<8xf64>
 // CHECK: arith.mulf {{.*}} : vector<8xf64>
