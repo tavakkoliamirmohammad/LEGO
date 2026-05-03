@@ -12,6 +12,13 @@
 > v1 proof-point results. R12 (cross-brick shuffle) is now the highest
 > priority open item.
 >
+> **R19 (strided-gather scalar-index bug) is CLOSED** — fixed 2026-05-03
+> in commit 8f0b325. The Strided path in `emitVectorBody` was using
+> byte-stride offsets to build the index vector, producing wrong addresses.
+> Fix: use `cloneAddrDAG` with a fresh per-lane IRMapping (mirroring the
+> NonAffine path). 9 candidates moved from PENDING → VERIFIED.
+> Post-fix dashboard: 41/42 VERIFIED, 3 WIN, 30 PARITY, 9 LOSS.
+>
 > **The CASTLE/TACO paper Section 7.5 is HELD** until either each item
 > below is closed (infra implemented + affected candidates re-measured)
 > or definitively classified as architectural-limit (paper Section 9).
@@ -358,6 +365,49 @@ patterns from existing measure.py files, parameterize, write to
 
 **Re-test list when closed:** none — pure refactor for the next round.
 
+## R20 — Strided constant-stride: use deinterleave/vpgatherdd instead of gather
+
+**Status:** open.
+
+**Severity:** medium. Affects all strided-gather candidates where the
+stride is a compile-time constant and is small (2x, 4x, 8x).
+
+**Motivating evidence (2026-05-03, post-R19 dashboard):**
+- 23_symm_rfp: vec_iso=0.70x (LOSS, prior=LOSS). Stride=2, N=16384.
+- 24_syrk_rfp: vec_iso=0.68x (LOSS, prior=WIN). Stride=2, N=16384.
+- 25_nw_antidiag: vec_iso=0.69x (LOSS, prior=LOSS). Stride=2, N=16384.
+- 29_particlefilter_aosoA: vec_iso=0.75x (LOSS, prior=PARITY). Stride=4.
+- 30_lulesh_aosoA: vec_iso=0.76x (LOSS, prior=LOSS). Stride=4.
+- 31_hpccg_aosoA: vec_iso=0.74x (LOSS, prior=LOSS). Stride=4.
+- 38_nussinov_nonpow2_skew: vec_iso=0.68x (LOSS, prior=MIXED). Stride=2.
+
+Root cause: for a constant stride s, the correct vectorization is NOT
+`vector.gather` (which uses individual gather instructions, latency ~10 cycles
+per lane on Intel) but rather a load of s consecutive elements followed by
+a deinterleave shuffle (e.g. `_mm256_i32gather_ps` vs. `_mm256_loadu_ps` +
+`_mm256_permutevar8x32_ps`). The scalar LLVM JIT (target="scalar") goes
+through LLVM's own vectorizer at opt_level=2, which knows this trick and
+auto-vectorizes to deinterleave+shuffle. Our explicit gather is slower.
+
+**Proposed fix.**
+In `emitVectorBody`, for `AccessKind::Strided` with a constant element
+stride `s` that is a power of 2 (or small ≤ 8):
+1. Emit `s` consecutive `vector.transfer_read`s of width `Ln` starting at
+   addresses `[base, base+1, base+2, ...]`.
+2. Emit `vector.shuffle` to deinterleave: pick every `s`-th element.
+3. This produces the same logical result as gather but with sequential
+   loads (1 cycle each, vs ~10 cycles for gather).
+
+For non-power-of-2 or large strides (s > 8), fall back to gather (current
+behavior).
+
+**Effort:** 1–2 weeks (implement deinterleave path + lit tests).
+
+**Dependencies:** R19 (CLOSED — correct Strided path is now in place).
+
+**Re-test list when closed:** 23, 24, 25, 29, 30, 31, 38 — expect vec_iso
+> 1.0x after deinterleave replaces gather.
+
 ## R7 — Lock contention diagnosis & DEFAULT_LOCK_PATH absolute by default
 
 **Severity:** closed (already addressed mid-round).
@@ -494,7 +544,9 @@ include this effect.
 | ID | Severity | Effort | Affected candidates | Status |
 |---|---|---|---|---|
 | **R1 CPU vector pipeline** | high | — | 11, 12, 13, 14, 29 | **CLOSED (shipped v1, 2026-05-01)** |
+| **R19 Strided-gather scalar-index** | high | — | 23–27, 29–31, 38 | **CLOSED (2026-05-03, commit 8f0b325)** |
 | **R12 Cross-brick shuffle** | **high** | **1–2 wk** | **11, 12, 13, 14, 29** | **imminent (IR scaffold done; stride + store lowering needed)** |
+| **R20 Strided → deinterleave lowering** | **medium** | **1–2 wk** | **23–25, 29–31, 38** | **open** |
 | R2 Anti-diagonal scoping | medium | 1–2 wk | 17, 20 | open |
 | R3 AoSoA scoping | medium | 0.5 day | 22, 21, 23 | open (cross-arch nuance added) |
 | R4 Z-Morton triangular | medium | 1 wk (a) / 0.5 day (b) | 03 | open |
