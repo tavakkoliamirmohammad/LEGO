@@ -1,9 +1,8 @@
 """Measure baseline vs cpu_dsl for 05_morton_2d.
 
 Isolation harness: scalar-JIT vs vectorized-JIT (apples-to-apples).
-Note: v1 DSL does not support bitwise AND/shift, so the cpu_dsl version
-uses a proxy index (z → z). The baseline uses proper Morton decode.
-Verdict will be LOSS or ERROR until bitwise ops land in the DSL.
+Real Morton decode via bitwise ops (&, >>, |) in the DSL.
+The cpu_dsl version should emit vector.gather via the NonAffine path.
 """
 import json
 import sys
@@ -13,7 +12,7 @@ import numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from kernel import kernel_scalar, kernel_cpu_dsl, _NN
+from kernel import kernel_scalar, kernel_cpu_dsl, N
 
 
 def _measure(fn, warmup=100, timed=1000):
@@ -36,29 +35,34 @@ def _measure(fn, warmup=100, timed=1000):
 
 def main():
     rng = np.random.default_rng(0)
-    M_buf = rng.standard_normal(_NN).astype(np.float32)
-    out_base = np.zeros(_NN, dtype=np.float32)
+    A_buf = rng.standard_normal(N).astype(np.float32)
+    B_base = np.zeros(N, dtype=np.float32)
 
-    # NumPy baseline.
-    t_numpy = _measure(lambda: kernel_scalar(M_buf, out_base))
+    # NumPy baseline (kernel_scalar uses A, B naming).
+    t_numpy = _measure(lambda: kernel_scalar(A_buf, B_base))
 
     # Scalar JIT baseline (apples-to-apples).
     t_scalar_jit = float('nan')
+    notes = ""
     try:
         scalar_jit = kernel_cpu_dsl.compile(target='scalar')
-        out_scalar = np.zeros(_NN, dtype=np.float32)
-        t_scalar_jit = _measure(lambda: scalar_jit(M_buf, out_scalar))
+        out_scalar = np.zeros(N, dtype=np.float32)
+        t_scalar_jit = _measure(lambda: scalar_jit(A_buf, out_scalar))
     except Exception as e:
         t_scalar_jit = float('nan')
+        notes = f"scalar compile error: {e}"
 
     # Vectorized JIT.
     t_vec_jit = float('nan')
-    notes = ("DSL uses identity index (z→z); Morton decode blocked by missing "
-             "bitwise ops in v1 DSL. Correctness check skipped.")
     try:
         vec_jit = kernel_cpu_dsl.compile(target='x86')
-        out_dsl = np.zeros(_NN, dtype=np.float32)
-        t_vec_jit = _measure(lambda: vec_jit(M_buf, out_dsl))
+        out_dsl = np.zeros(N, dtype=np.float32)
+        t_vec_jit = _measure(lambda: vec_jit(A_buf, out_dsl))
+        # Quick correctness check: outputs should match the NumPy reference.
+        if not np.allclose(B_base, out_dsl, atol=1e-4):
+            notes = "WARNING: DSL output differs from NumPy reference"
+        else:
+            notes = notes or "real Morton gather via bitwise DSL ops"
     except Exception as e:
         t_vec_jit = float('nan')
         notes = str(e)
@@ -78,7 +82,7 @@ def main():
 
     rec = {
         "name": "05_morton_2d",
-        "N": _NN,
+        "N": N,
         "numpy_ms": round(t_numpy, 4),
         "scalar_jit_ms": round(t_scalar_jit, 4) if t_scalar_jit == t_scalar_jit else t_scalar_jit,
         "vec_jit_ms": round(t_vec_jit, 4) if t_vec_jit == t_vec_jit else t_vec_jit,
