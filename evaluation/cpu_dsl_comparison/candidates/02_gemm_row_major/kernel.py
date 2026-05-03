@@ -3,6 +3,11 @@
 Expected verdict: WIN.  The register+L1 tiling pattern (candidates 04, 05,
 06, 35 in the full eval) shows 2–7x speedups on both AMD and Intel.
 This captures the essence of that class at small scale so it compiles quickly.
+
+Kernel formulation: tile over i (rows), with j (columns) as the innermost
+unit-stride loop. This avoids integer division (j//N, j%N) that prevented
+vectorization in the flat-grid formulation and matches how gcc sees the loop
+order: inner j is unit-stride in both C[i*N+j] and B[k*N+j].
 """
 import numpy as np
 from lego.backend.cpu_dsl import cpu_kernel, Buffer
@@ -17,26 +22,27 @@ _MK = M * K
 _KN = K * N
 _MN = M * N
 
+_N = N   # column count as a compile-time constant visible in outer scope
+
 
 def kernel_scalar(A, B, C):
     """NumPy reference: C += A @ B (accumulate into C)."""
     C += A @ B
 
 
-# 2-D kernel expressed as a flat 1-D tile over the M dimension.
-# Each tile covers one row of C.
-@cpu_kernel(grid=(_MN,), tile=(TILE_N,))
+# Tile over rows (M), inner k loop for accumulation, innermost j loop (N)
+# is unit-stride in B and C — the vectorizer can vectorize over j.
+# Each tile covers TILE_M consecutive rows; tile_range iterates over those rows.
+# The outer grid=(M,) means one tile per row; with tile=(TILE_M,) the
+# lego-vectorize pass sees a flat loop over M and vectorizes the inner j body.
+#
+# Flat structure emitted: for i in [0,M):  for k in [0,K):  for j in [0,N): ...
+# The j-loop (innermost, unit-stride) is the vectorization target.
+@cpu_kernel(grid=(M,), tile=(TILE_M,))
 def kernel_cpu_dsl(A: Buffer[_MK], B: Buffer[_KN], C: Buffer[_MN]):
-    # tile_range iterates over TILE_N consecutive j-columns of one row.
-    # The outer tile_id encodes: tile_i = tile_id // (N // TILE_N),
-    #                             tile_j = tile_id  % (N // TILE_N).
-    # We handle this with a flat loop; each call to `tile_range` gives
-    # a contiguous block of j indices for a single i row.
-    for j in tile_range:
-        # j is the global column index.
-        # row i = j // N  ... but with grid=(M*N,) and tile=(TILE_N,)
-        # tile_id = (i * N + j_base) // TILE_N  →  i = tile_id // (N // TILE_N)
-        # We can compute i at compile-time from the outer tile id.
-        # For simplicity use the flat index to recover (i, j).
+    for i in tile_range:
+        # For each row i and accumulation index k, the j-loop over columns
+        # is unit-stride in B[k*N+j] and C[i*N+j] — vectorizable.
         for k in range(K):
-            C[j] = C[j] + A[(j // N) * K + k] * B[k * N + (j % N)]
+            for j in range(_N):
+                C[i * _N + j] = C[i * _N + j] + A[i * K + k] * B[k * _N + j]
