@@ -1,8 +1,0 @@
-{
-  "_doc": "Compiler flags applied identically to baseline and LEGO-rewritten kernels. The flags are intentionally the suite-default '-O3 -march=native -fopenmp' shape so that a layout-level win cannot be confused with a flag-tuning win.",
-  "c": ["-O3", "-march=native", "-fopenmp"],
-  "cpp": ["-O3", "-march=native", "-fopenmp", "-std=c++17"],
-  "fortran": ["-O3", "-march=native", "-fopenmp"],
-  "rust": ["-C", "opt-level=3", "-C", "target-cpu=native"],
-  "julia": ["--check-bounds=no", "-O3"]
-}
