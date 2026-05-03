@@ -1384,6 +1384,35 @@ class LegoVectorizePass
                    << func.getName() << "'"
                    << " — L_strip=" << a.L_strip
                    << " (reason: cost-model or reduction guard)\n");
+        // [G5] Diagnostic hint for flattened-iteration pattern (divui/remui on IV).
+        // Detects: loop body contains arith.divui or arith.remui where one operand
+        // is the induction variable (or IV-dependent). This is the hallmark of
+        // "flat-grid" kernels with `i = ij/N; j = ij%N`.  In LEGO v1, these
+        // produce NonAffine gather accesses which the cost model may reject.
+        // Emit a remark so the user understands the limitation and the fix.
+        {
+          Value iv = a.forOp.getInductionVar();
+          for (Operation &op : a.forOp.getBody()->getOperations()) {
+            if (!isa<arith::DivUIOp, arith::RemUIOp, arith::DivSIOp,
+                     arith::RemSIOp>(&op))
+              continue;
+            bool ivDep = llvm::any_of(op.getOperands(), [&](Value v) {
+              if (v == iv) return true;
+              Operation *defOp = v.getDefiningOp();
+              return defOp && a.forOp->isAncestor(defOp);
+            });
+            if (ivDep) {
+              op.emitRemark(
+                  "lego-vectorize: loop body contains integer division on the "
+                  "induction variable (flattened-iteration pattern: i=ij/N, "
+                  "j=ij%N). This produces NonAffine gather accesses which are "
+                  "~10x slower than unit-stride loads. Rewrite as nested loops "
+                  "(for i in tile_range: for k in range(K): for j in range(N))"
+                  " to enable unit-stride vectorization.");
+              break;
+            }
+          }
+        }
         continue;
       }
 

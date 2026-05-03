@@ -8,6 +8,42 @@ Kernel formulation: tile over i (rows), with j (columns) as the innermost
 unit-stride loop. This avoids integer division (j//N, j%N) that prevented
 vectorization in the flat-grid formulation and matches how gcc sees the loop
 order: inner j is unit-stride in both C[i*N+j] and B[k*N+j].
+
+--- LEGO v1 LIMITATION: flattened-iteration form (documented below) ---
+
+The "natural" flat-grid form for a 2-D kernel over (M, N) is:
+    @cpu_kernel(grid=(M*N,))
+    def kernel(A, B, C):
+        for ij in tile_range:
+            i = ij // N   # integer division of the induction variable
+            j = ij % N
+            C[i*N+j] = C[i*N+j] + A[i*K+k] * B[k*N+j]
+
+This form is SEMANTICALLY EQUIVALENT to nested loops and produces CORRECT
+results. However, LEGO v1 cannot vectorize it at full speed:
+
+    Why LICM doesn't help: `ij // N` changes every N iterations, so it is
+    NOT loop-invariant — LICM cannot hoist it. Only strength-reduction (LSR)
+    or loop strip-mining would help.
+
+    What actually happens in LEGO v1: Tier-A analysis sees divui(ij, N) as
+    non-linear in ij and classifies the access NonAffine. Tier-B probes
+    concrete values and also classifies NonAffine (non-uniform strides).
+    The vectorizer emits vector.gather, which is ~10x slower than the
+    unit-stride vector.transfer_read that nested loops produce.
+
+    The nested form below is valid and equivalent. For kernels where the
+    row index is derived from a flat loop counter via integer division,
+    write nested loops instead:
+        for i in tile_range:
+            for k in range(K):
+                for j in range(N):
+                    C[i*N+j] = ...
+
+    Future work (LEGO roadmap): a "flat-to-nested" canonicalization pass
+    that recognizes `i = ij/N; j = ij%N` and rewrites to nested loops
+    automatically (similar to LLVM's loop-strength-reduction + index
+    substitution). This would make both forms produce equivalent IR.
 """
 import numpy as np
 from lego.backend.cpu_dsl import cpu_kernel, Buffer
@@ -38,6 +74,10 @@ def kernel_scalar(A, B, C):
 #
 # Flat structure emitted: for i in [0,M):  for k in [0,K):  for j in [0,N): ...
 # The j-loop (innermost, unit-stride) is the vectorization target.
+#
+# NOTE: the flattened form (grid=(M*N,) with i=ij//N, j=ij%N) is semantically
+# identical but produces NonAffine gather accesses in LEGO v1 because divui/remui
+# on the induction variable is non-linear. See docstring for details.
 @cpu_kernel(grid=(M,), tile=(TILE_M,))
 def kernel_cpu_dsl(A: Buffer[_MK], B: Buffer[_KN], C: Buffer[_MN]):
     for i in tile_range:
