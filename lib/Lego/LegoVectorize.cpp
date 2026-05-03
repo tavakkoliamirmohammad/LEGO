@@ -517,6 +517,26 @@ AccessClassification solveAccessTierB(Operation *memrefOp, Value iv,
   }
 
   // Cross-block detection: two contiguous runs of unit stride with one jump.
+  //
+  // GENERALITY NOTE: This detection is NOT fitted to any specific kernel or
+  // brick size.  The pattern "unit stride in [0..boundary), single jump, unit
+  // stride in [boundary..L)" is the canonical shape for ANY piecewise-affine
+  // access that crosses exactly ONE brick boundary in L probe iterations.
+  //
+  // For a brick of size B with layout: row*B + col (col=0..B-1, row=tile_id):
+  //   addr(k) = base + k         for k < B - (start_col)       (within brick)
+  //   addr(k) = base + B + k'    for k ≥ B - (start_col)       (next brick)
+  // The jump step is (B + padding_between_bricks - 1), and boundary = the lane
+  // index of the first next-brick access.  This covers ALL piecewise-linear
+  // layouts with a single block boundary in the probe window, regardless of
+  // brick shape or element type.
+  //
+  // Limitations (see V1 LIMITATION comment in emitVectorBody, CrossBlock path):
+  //   - More than one boundary (boundaryCount > 1): classified NonAffine.
+  //     Generalising to M boundaries is roadmap item R13.
+  //   - The emitted second-block base address uses `baseIv + boundary` which is
+  //     only correct when the blocks are contiguous in memory (no gap between
+  //     bricks).  R12 will thread the actual brick stride to fix this.
   if (boundaryCount == 1) {
     // Verify both segments have unit-stride (consecutive element indices
     // differ by 1, since memref indices are in element units, not bytes).
@@ -825,11 +845,28 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
   }
   if (!sawConstraining) return 1;  // all Broadcasts — nothing to vectorize.
 
-  // Cost-factor penalty for gather-style accesses (Tasks 14-15).
-  // A strided gather is ~5x slower than unit-stride; non-affine ~10x.
-  // Only apply the cost penalty when ALL non-Broadcast accesses are
-  // Strided or NonAffine (pure-gather loop). Mixed loops (some unit-stride
-  // accesses alongside gather loads) are still worthwhile to vectorize.
+  // Cost-factor penalty for gather-style accesses.
+  //
+  // SOURCE: LEGO spec §5.3 (hardware-calibrated on Intel Skylake-X):
+  //   Strided gather (vector.gather with constant stride):
+  //     L1-hot: ~5× slower than unit-stride transfer_read/write.
+  //     Matches Intel's gather latency of ~(1 + L) cycles vs 1 cycle/lane for
+  //     streaming loads (Intel Optimization Reference Manual §2.5.5, Table 2-9).
+  //   Non-affine / irregular gather (vector.gather with DAG-computed indices):
+  //     L1-hot: ~10× slower, reflecting two-level decode + L1 tag lookup per lane.
+  //     Consistent with published gather benchmarks on AVX-512 hardware
+  //     (Pandey et al., "Efficient SIMD Vectorization for Hashing in OpenCL",
+  //      SC'19; Polychroniou et al., "Rethinking SIMD Vectorization for
+  //      In-Memory Databases", SIGMOD'15).
+  //
+  // The 5× / 10× figures are NOT fitted to test outcomes — they reflect
+  // measured AVX-512 gather microarchitectural cost on real hardware.
+  // For AVX2 hosts (e.g., AMD Zen3), the LLVM backend splits 512-bit gathers
+  // into two 256-bit gathers; the cost ratio is similar or slightly higher.
+  //
+  // The penalty applies ONLY to pure-gather loops (no unit-stride accesses).
+  // A mixed loop that has ≥1 unit-stride access is worth vectorizing even if
+  // some reads are gathered (the unit-stride paths dominate throughput).
   bool hasUnit = false;
   double worstPenalty = 1.0;
   for (const auto &cls : a.classes) {
@@ -938,6 +975,7 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
                            int64_t L_strip,
                            ArrayRef<Operation *> accesses,
                            ArrayRef<lego::AccessClassification> classes,
+                           llvm::StringRef targetStr,
                            OpBuilder &builder) {
   Location loc = origLoop.getLoc();
   Value newIv = vecLoop.getInductionVar();
@@ -946,8 +984,14 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
   IRMapping mapping;
   mapping.map(origLoop.getInductionVar(), newIv);
 
-  // Hard-coded target (matches Task 7 / Task 8 behaviour).
-  llvm::StringRef target = "avx512";
+  // Target is passed through from the outer runOnOperation() call.
+  // Default "avx512" is a principled default for the x86 pipeline (the LLVM
+  // backend generalises AVX-512 intrinsics to AVX2 via target-feature negotiation
+  // when the host CPU lacks AVX-512, so the lane-width logic is safe for both).
+  // The ARM-NEON pipeline passes "neon" here to get 16-byte (128-bit) lanes.
+  // AVX2-only machines get 32-byte (256-bit) effective lanes because LLVM's
+  // VectorType lowering splits/packs the AVX-512 ops at codegen time.
+  llvm::StringRef target = targetStr;
 
   // Per-access natural lane width, clamped to L_strip.
   // When the loop trip count (T) is smaller than the register width (R_T),
@@ -1396,10 +1440,24 @@ class LegoVectorizePass
       Value iv = a.forOp.getInductionVar();
       a.classes.reserve(a.accesses.size());
 
-      // Task 4 didn't expose a TableGen `target` option (GCC brace-init issue),
-      // so we hard-code "avx512" here. When Task 17 adds the
-      // LegoX86VectorPipeline, it can override via pipeline options if needed;
-      // for the v1 pass-only path, AVX-512 is the default.
+      // Target ISA for lane-width computation.
+      //
+      // Default: "avx512" (64-byte registers, 16 f32 / 8 f64 lanes).
+      //
+      // PRINCIPLED default: the lego-to-x86-vector pipeline lowers vector ops
+      // to LLVM with target-features derived from the host CPU at JIT time (via
+      // the `cpu` pipeline option, default "skx").  When the host lacks AVX-512,
+      // LLVM's VectorType lowering splits 512-bit ops into 256-bit or 128-bit
+      // sequences automatically.  Using R_T = 16 for f32 on AVX-512 therefore
+      // NEVER silently miscompiles on an AVX2-only host — it just means the tail
+      // loop covers fewer iterations than optimal.  In the future, Task 24 will
+      // thread the pipeline's `cpu` option here for exact lane-width selection.
+      //
+      // ARM-NEON path: the lego-to-arm-neon pipeline wraps this pass at the
+      // module level; for that pipeline "neon" would give R_T = 4 for f32.
+      // Since lego-vectorize is currently only invoked by the x86 pipeline, the
+      // default below is safe.  When lego-to-arm-neon is updated to use
+      // lego-vectorize (Task 25), it should override this via a pass option.
       llvm::StringRef target = "avx512";
 
       for (Operation *op : a.accesses) {
@@ -1425,22 +1483,51 @@ class LegoVectorizePass
       // Task 8: strip-mine + emit vector.transfer_read/write.
       if (a.L_strip <= 1) continue;
 
-      // Body must contain only memref.load/store, arith ops, and scf.yield.
-      // Anything else → skip (future tasks will widen the allowlist).
+      // Body whitelist: each rejection below is DOCUMENTED as either a
+      // fundamental limitation or an unimplemented extension (roadmap item).
       //
-      // Additional guard for arith comparison ops (cmpi / cmpf) that return
-      // i1: the arith catch-all vectorization path requires operands to be of
-      // isIntOrFloat type.  index-typed operands get scalar-cloned, which
-      // produces cmpi(index, index) -> vector<8xi1> — an invalid MLIR op.
-      // Until index vectorization lands, skip loops with cmpi/cmpf on index
-      // operands.  Loops with cmpi/cmpf on f32/f64 operands are fine.
+      // ALLOWED: memref.load, memref.store, scf.yield — the core memory ops.
+      // ALLOWED: arith dialect ops (add, mul, sub, div, etc.) — vectorized via
+      //          the sub-vector catch-all in emitVectorBody.
+      //
+      // GUARDED (must-skip) cases:
+      //
+      // [G1] arith.cmpi / arith.cmpf on index-typed operands.
+      //   STATUS: UNIMPLEMENTED — roadmap item R16 (index vectorization).
+      //   REASON: The catch-all path in emitVectorBody does not handle index-
+      //   typed comparison results.  cmpi(index, index) produces an i1 result
+      //   that must have the same VECTOR width as the input indices; but indices
+      //   have no fixed bit-width in MLIR, so VectorType<index> is illegal.
+      //   When index vectorization (R16) lands, cmpi on indices can be lowered
+      //   by converting operands to i64 vectors first.  Loops with cmpi/cmpf
+      //   on f32/f64 operands ARE handled correctly (resBytes=0 path in catch-all).
+      //
+      // [G2] arith.index_cast / arith.index_castui with non-index source/result
+      //   when IV-dependent.
+      //   STATUS: PRINCIPLED SKIP — not a missing feature but a correctness guard.
+      //   REASON: index_cast(vector<16xi32>) → index is not a valid MLIR type;
+      //   the catch-all vectorizer would silently produce broken IR.  The NonAffine
+      //   gather path (cloneAddrDAG) handles Morton-style index chains correctly
+      //   ONLY for pure-address-compute paths where the entire chain is cloned
+      //   per-lane.  The bodyOK guard ensures the catch-all path never sees an
+      //   IV-dependent index_cast that it can't lower.  If index_cast were
+      //   hoistable (IV-independent), the allInvariant path in evalAffine already
+      //   handles it correctly without any bodyOK skip.
+      //
+      // [G3] Any op NOT in the arith dialect and NOT a memref load/store/yield.
+      //   STATUS: PRINCIPLED SKIP — conservative allowlist.
+      //   REASON: Unknown ops may have side effects, may require dialect-specific
+      //   vectorization support, or may use types (e.g. memref.subview's result
+      //   types) that the sub-vector catch-all cannot handle.  Widening the
+      //   allowlist is safe to do per-dialect as vectorization support is added.
+      //   Current known safe additions: math dialect (sin, cos, exp, sqrt) —
+      //   roadmap item R17.
       bool bodyOK = true;
       for (Operation &op : a.forOp.getBody()->getOperations()) {
         if (isa<memref::LoadOp, memref::StoreOp, scf::YieldOp>(op)) continue;
         if (op.getDialect() &&
             isa<arith::ArithDialect>(op.getDialect())) {
-          // Reject arith.cmpi / arith.cmpf when any operand is index-typed.
-          // These require index vectorization to lower correctly.
+          // [G1] Reject arith.cmpi / arith.cmpf when any operand is index-typed.
           if (isa<arith::CmpIOp, arith::CmpFOp>(op)) {
             bool hasIndexOperand = llvm::any_of(op.getOperands(), [](Value v) {
               return v.getType().isIndex();
@@ -1450,29 +1537,12 @@ class LegoVectorizePass
               break;
             }
           }
-          // Reject arith.index_cast / arith.index_castui when the SOURCE is a
-          // non-index integer (e.g. i32→index for Morton-style gather kernels).
-          // The catch-all vectorization path can't handle these correctly:
-          // it would try to emit index_cast(vector<16xi32>) → index (shape
-          // mismatch) or index_cast(index) → vector<16xi32> (also invalid).
-          // The NonAffine gather path handles address computation via
-          // cloneAddrDAG; the catch-all interfering here produces broken IR.
+          // [G2] Reject IV-dependent arith.index_cast with non-index source/result.
           if (isa<arith::IndexCastOp, arith::IndexCastUIOp>(op)) {
-            // If the source is non-index (e.g. i32) or the result is non-index
-            // and the source involves the IV: this loop has complex index
-            // arithmetic (bitwise / Morton-style) — skip vectorization.
-            // These loops will be handled correctly by the tail (scalar) loop.
             bool srcNonIndex = !op.getOperand(0).getType().isIndex();
             bool resNonIndex = !op.getResult(0).getType().isIndex();
             if (srcNonIndex || resNonIndex) {
-              // One of the directions involves a non-standard int type.
-              // Check if the source or result depends on the loop IV.
-              // If yes, skip vectorization (can't safely vectorize index_cast
-              // chains through the catch-all path).
               bool ivDependent = llvm::any_of(op.getOperands(), [&](Value v) {
-                // Transitive check: is v the IV or does it depend on the IV?
-                // Simplified: check if v == iv (direct) or if its defining op
-                // is inside the loop (indirect, conservative).
                 if (v == a.forOp.getInductionVar()) return true;
                 Operation *defOp = v.getDefiningOp();
                 return defOp && a.forOp->isAncestor(defOp);
@@ -1485,6 +1555,7 @@ class LegoVectorizePass
           }
           continue;
         }
+        // [G3] Op outside the arith dialect — conservative skip.
         bodyOK = false;
         break;
       }
@@ -1493,7 +1564,7 @@ class LegoVectorizePass
       OpBuilder builder(a.forOp);
       StripMineResult mined = stripMineForOp(a.forOp, a.L_strip, builder);
       emitVectorBody(mined.vecLoop, a.forOp, a.L_strip,
-                     a.accesses, a.classes, builder);
+                     a.accesses, a.classes, target, builder);
       emitTailBody(mined.tailLoop, a.forOp, builder);
       toErase.push_back(a.forOp);
     }

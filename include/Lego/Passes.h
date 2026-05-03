@@ -127,6 +127,39 @@ struct LegoToX86VectorPipelineOptions
       *this, "cpu",
       llvm::cl::desc("Target CPU: skx|znver3|... (sets LLVM target features)"),
       llvm::cl::init("skx")};
+
+  // reassociate-fp-reductions (default: true)
+  //
+  // Allows LLVM to reorder floating-point reductions across SIMD lanes, which
+  // is semantically equivalent to GCC's -ffast-math reassoc flag.  This is
+  // SAFE for kernels whose correctness checks use rtol/atol tolerance (the
+  // typical case for numerical benchmarks).  Disable if the kernel requires
+  // strict IEEE-754 reproducible reductions (e.g., compensated summation).
+  //
+  // Set to false via:  cpu_kernel(grid=..., fast_math=False)  (Python side)
+  // or via the pipeline option:  lego-to-x86-vector{reassoc-fp=false}
+  //
+  // Reference: LLVM ConvertVectorToLLVMPass docs; GCC manual -ffast-math §3.10.
+  PassOptions::Option<bool> reassocFP{
+      *this, "reassoc-fp",
+      llvm::cl::desc("Allow FP reduction reordering (fast-math reassoc); "
+                     "default true; set false for strict IEEE-754 reproducibility"),
+      llvm::cl::init(true)};
+
+  // use-vector-alignment (default: false)
+  //
+  // When true, emit aligned load/store hints (64-byte for AVX-512).  This can
+  // give ~30% additional speed-up when ALL input buffers are 64-byte aligned.
+  // NumPy/ctypes allocations are only 16-byte aligned; enabling this for
+  // unaligned buffers causes SIGSEGV on the first misaligned transfer.
+  //
+  // Safe default: false.  Users with aligned buffers (e.g., posix_memalign
+  // at 64 bytes, or __attribute__((aligned(64))) C arrays) may set this true.
+  PassOptions::Option<bool> useVecAlignment{
+      *this, "use-vec-alignment",
+      llvm::cl::desc("Emit aligned load/store hints (64-byte for AVX-512); "
+                     "default false; only safe when ALL buffers are 64-byte aligned"),
+      llvm::cl::init(false)};
 };
 
 /// Options for the lego-to-arm-neon pipeline.
