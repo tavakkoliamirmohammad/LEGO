@@ -1,21 +1,26 @@
-"""Candidate 18_tblis_notranspose: simplified tiled matrix multiply (TBLIS pattern).
+"""Candidate 18_tblis_notranspose: tiled matrix multiply (TBLIS/ikj pattern).
 
 CASTLE candidate 10. Layout class: TBLIS.
 Prior verdicts: AMD WIN, Intel LOSS.
 
 The full TBLIS library uses runtime microkernel selection (blocked GEBP algorithm
 with architecture-specific register tiles), which is not directly expressible in
-cpu_dsl v1. This simplified version captures the core layout pattern:
-- Matrix multiply with explicit K-dimension tiling (column-strip of B).
-- Inner loop over K is a scalar reduction (no vectorization of k-axis).
-- Outer loop over the flat M*N grid is the vectorizable tile_range.
+cpu_dsl v1. This version captures the core layout pattern using the ikj (outer-product)
+decomposition:
+- Vectorize over j (column dimension of C and B) using tile_range.
+- Inner loop over combined i,k pairs (range(M*K)) is a scalar reduction.
+- Each j-tile processes all M*K outer-product contributions to C[:,j_tile].
 
-The LEGO-expressible version: C[i] += A[i%M * K + k] * B[k * N + i//M]
-where i encodes both (row, col) dimensions flatly.
+This formulation enables:
+- Unit-stride vector access to C[i*N+j] (j is tile_range, unit stride in j)
+- Broadcast scalar load of A[ik] (loop-invariant in j)
+- Unit-stride vector access to B[(ik%K)*N+j] (j is tile_range, unit stride in j)
 
-Verdict: PARITY — this pattern is similar to 02_gemm_row_major; scalar JIT
-matches vec_jit because the k-loop reduction guard prevents vectorization
-of the reduction axis, and the outer loop is a simple 1D tile.
+R20 fix: the R20 vectorizer extension (outer-loop vectorization with inner
+reduction scf.for) enables the inner M*K range() loop to remain scalar while
+the outer j tile_range is vectorized.
+
+Verdict target: WIN vs C O3 (vectorized GEBP-style inner loop).
 """
 import numpy as np
 from lego.backend.cpu_dsl import cpu_kernel, Buffer
@@ -35,10 +40,16 @@ def kernel_scalar(A, B, C):
     C += A @ B
 
 
-@cpu_kernel(grid=(_MN,), tile=(16,))
+@cpu_kernel(grid=(N,), tile=(16,))
 def kernel_cpu_dsl(A: Buffer[_MK], B: Buffer[_KN], C: Buffer[_MN]):
-    """Flat tile over C elements; inner k-reduction is scalar."""
-    for ij in tile_range:
-        # ij encodes (i, j): i = ij // N, j = ij % N
-        for k in range(K):
-            C[ij] = C[ij] + A[(ij // N) * K + k] * B[k * N + (ij % N)]
+    """Vectorize over j (columns); inner ik loop processes all outer-product pairs.
+
+    Access pattern (with j as tile_range outer IV):
+      C[(ik//K)*N+j]  — unit-stride in j, broadcast row offset (ik//K)*N
+      A[ik]           — broadcast (loop-invariant in j)
+      B[(ik%K)*N+j]   — unit-stride in j, broadcast column offset (ik%K)*N
+    All three are Unit or Broadcast → no gathers, full AVX-512 throughput.
+    """
+    for j in tile_range:
+        for ik in range(_MK):
+            C[(ik // K) * N + j] = C[(ik // K) * N + j] + A[ik] * B[(ik % K) * N + j]

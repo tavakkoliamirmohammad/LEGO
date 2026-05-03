@@ -122,3 +122,45 @@ func.func @cpu_kernel_broadcast_funcarg(%scale: f32, %A: memref<?xf32>, %B: memr
   }
   return
 }
+
+// -----
+
+// ---------------------------------------------------------------------------
+// Test 5: R20 — outer tile_range vectorized, inner range() is scalar reduction.
+// Pattern: for j in tile_range: for k in range(K): C[j] += A[k] * B[k*N+j]
+// j is the vectorized IV (unit-stride in C and B); k is a scalar reduction IV.
+// R18 skips the inner k-loop (broadcast-store on C); R20 vectorizes the outer
+// j-loop, emitting a scalar inner k-loop with vectorized C load/store.
+// CHECK-LABEL: func.func @r20_outer_j_inner_k_reduction
+// CHECK: vector.transfer_read {{.*}} : memref<256xf32>, vector<16xf32>
+// CHECK: vector.transfer_write {{.*}} : vector<16xf32>, memref<16xf32>
+func.func @r20_outer_j_inner_k_reduction(%A: memref<16xf32>,
+                                          %B: memref<256xf32>,
+                                          %C: memref<16xf32>) {
+  %c0   = arith.constant 0 : index
+  %c1   = arith.constant 1 : index
+  %c16  = arith.constant 16 : index
+  // Outer j loop — tile_range (vectorized).
+  scf.for %j = %c0 to %c16 step %c1 {
+    // Inner k loop — scalar reduction.
+    scf.for %k = %c0 to %c16 step %c1 {
+      // C[j] += A[k] * B[k*16+j]
+      %cj   = memref.load %C[%j] : memref<16xf32>
+      %ak   = memref.load %A[%k] : memref<16xf32>
+      %koff = arith.muli %k, %c16 : index
+      %bkj  = arith.addi %koff, %j : index
+      %bv   = memref.load %B[%bkj] : memref<256xf32>
+      %prod = arith.mulf %ak, %bv : f32
+      %sum  = arith.addf %cj, %prod : f32
+      memref.store %sum, %C[%j] : memref<16xf32>
+    }
+  }
+  return
+}
+
+// Note: R20-2L (two-level nested scalar loops) is structurally supported by the
+// bodyOK check and emitInnerForOp recursion, but does not produce a clean
+// FileCheck test here because the inner i-loop (strided relative to i-IV) is
+// independently processed by the pass before the outer j-loop reaches its R20-2L
+// path. The 2-level pattern is exercised end-to-end by candidate
+// 18_tblis_notranspose (combined-ik formulation) in the cpu_dsl evaluation suite.

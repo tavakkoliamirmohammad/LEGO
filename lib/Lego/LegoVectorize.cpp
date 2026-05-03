@@ -595,6 +595,10 @@ struct EmitContext {
   OpBuilder &builder;
   IRMapping mapping;
   DenseMap<Value, SmallVector<Value>> subVectorMap;
+  // Extra scalar (non-vectorized) IV mappings from inner reduction loops.
+  // Used by emitGatherLoad to seed per-lane address chain cloning with the
+  // correct scalar IV mappings (e.g., inner loop IV → new inner loop IV).
+  IRMapping innerScalarMappings;
 
   // -------------------------------------------------------------------------
   // Shared helpers
@@ -658,30 +662,62 @@ struct EmitContext {
   // natural Ln width and replicate the SSA value numSubOps times so the
   // catch-all's getSubsFor() returns pre-sliced lists.
   // -------------------------------------------------------------------------
+  // Helper: broadcast a single external scalar (factored out for reuse).
+  void broadcastOneExternalScalar(Value operand) {
+    if (subVectorMap.contains(operand)) return;
+    Type t = operand.getType();
+    if (!t.isIntOrFloat()) return;
+
+    int64_t elemBits = t.getIntOrFloatBitWidth();
+    int64_t elemBytes = elemBits / 8;
+    int64_t Ln;
+    if (elemBytes <= 0) {
+      Ln = L_strip;  // i1 or sub-byte: one bit per lane
+    } else {
+      Ln = std::min(getRegisterLanesForType(target, elemBytes), L_strip);
+    }
+    int64_t numSubOps = (Ln > 0) ? (L_strip / Ln) : 1;
+
+    // Emit ONE broadcast op at vector<Ln x T>; reuse it numSubOps times.
+    // One physical vpbroadcastss; LLVM can hoist and share across ILP slots.
+    auto vecTy = VectorType::get({Ln}, t);
+    Value bc = vector::BroadcastOp::create(builder, loc, vecTy, operand);
+    SmallVector<Value> subs(numSubOps, bc);
+    mapVec(operand, std::move(subs));
+  }
+
   void broadcastExternalScalars() {
+    // Scan the direct body ops and (up to two levels deep) any nested scf.for
+    // loops.  Nested scf.for loops arise when range() loops are written inside
+    // tile_range; the inner IVs are scalar but their bodies may reference the
+    // outer IV which is vectorized.  We must broadcast those outer-scope
+    // references.  R20 supports up to 2 levels (outer tile_range → inner
+    // reduction loop → innermost reduction loop).
     for (Operation &op : origLoop.getBody()->getOperations()) {
+      // If this op is an inner reduction scf.for, scan its body too.
+      if (auto innerFor = dyn_cast<scf::ForOp>(&op)) {
+        for (Operation &innerOp : innerFor.getBody()->getOperations()) {
+          // R20-2L: also scan two-level nested scf.for inside the inner loop.
+          if (auto innermostFor = dyn_cast<scf::ForOp>(&innerOp)) {
+            for (Operation &innermostOp :
+                 innermostFor.getBody()->getOperations()) {
+              for (Value operand : innermostOp.getOperands()) {
+                if (!isOutsideLoop(operand)) continue;
+                broadcastOneExternalScalar(operand);
+              }
+            }
+            continue;
+          }
+          for (Value operand : innerOp.getOperands()) {
+            if (!isOutsideLoop(operand)) continue;
+            broadcastOneExternalScalar(operand);
+          }
+        }
+        continue;
+      }
       for (Value operand : op.getOperands()) {
         if (!isOutsideLoop(operand)) continue;
-        if (subVectorMap.contains(operand)) continue;
-        Type t = operand.getType();
-        if (!t.isIntOrFloat()) continue;
-
-        int64_t elemBits = t.getIntOrFloatBitWidth();
-        int64_t elemBytes = elemBits / 8;
-        int64_t Ln;
-        if (elemBytes <= 0) {
-          Ln = L_strip;  // i1 or sub-byte: one bit per lane
-        } else {
-          Ln = std::min(getRegisterLanesForType(target, elemBytes), L_strip);
-        }
-        int64_t numSubOps = (Ln > 0) ? (L_strip / Ln) : 1;
-
-        // Emit ONE broadcast op at vector<Ln x T>; reuse it numSubOps times.
-        // One physical vpbroadcastss; LLVM can hoist and share across ILP slots.
-        auto vecTy = VectorType::get({Ln}, t);
-        Value bc = vector::BroadcastOp::create(builder, loc, vecTy, operand);
-        SmallVector<Value> subs(numSubOps, bc);
-        mapVec(operand, std::move(subs));
+        broadcastOneExternalScalar(operand);
       }
     }
   }
@@ -917,7 +953,11 @@ struct EmitContext {
         Value addend = arith::ConstantIndexOp::create(builder, loc, j);
         laneIv = arith::AddIOp::create(builder, loc, baseIv, addend);
       }
-      IRMapping laneMap;
+      // Seed laneMap with the outer IV substitution and any inner scalar IV
+      // mappings (R20: when an inner reduction loop IV appears in the address
+      // chain, it must be remapped to the new inner loop's IV, not left as
+      // the original block argument which will be erased).
+      IRMapping laneMap = innerScalarMappings;
       laneMap.map(origIv, laneIv);
       Value laneAddr = cloneAddrChain(origAddr, laneMap, builder, origLoop);
       indexElements.push_back(laneAddr);
@@ -1224,6 +1264,107 @@ struct EmitContext {
     }
     mapVec(origResult, std::move(resultSubs));
   }
+
+  // -------------------------------------------------------------------------
+  // R20: Outer-loop vectorization with inner reduction loop(s).
+  //
+  // Emits a vectorized copy of an inner scf.for (reduction loop) found inside
+  // the tile_range outer loop.  The inner loop is cloned verbatim except:
+  //   - loads/stores are replaced with their vectorized counterparts.
+  //   - arith ops are replaced with their vector equivalents.
+  //   - nested scf.for ops are handled recursively (R20-2L).
+  //
+  // This enables patterns such as:
+  //   for j in tile_range:
+  //     for i in range(M):            ← inner-1 (scalar i)
+  //       for k in range(K):          ← inner-2 (scalar k, R20-2L)
+  //         C[i*N+j] += A[i*K+k] * B[k*N+j]
+  //
+  // where j is vectorized across lanes and i,k are kept scalar.
+  // C[i*N+j:j+16] is held in vector registers across all k iterations.
+  //
+  // Design: the outer loop's mapping already maps the outer IV to the vectorized
+  // IV (ctx.newIv).  We add the inner IV mapping (scalar → new scalar IV) and
+  // process the inner loop body ops using the existing per-kind emit helpers.
+  // Recursion handles arbitrarily many levels of scalar reduction loops,
+  // limited in practice to 2 by the bodyOK check.
+  // -------------------------------------------------------------------------
+  void emitInnerForOp(scf::ForOp innerFor,
+                      ArrayRef<Operation *> accesses,
+                      ArrayRef<lego::AccessClassification> classes) {
+    // Clone the inner loop's bounds/step using the current mapping.
+    Value lb = mapping.lookupOrDefault(innerFor.getLowerBound());
+    Value ub = mapping.lookupOrDefault(innerFor.getUpperBound());
+    Value step = mapping.lookupOrDefault(innerFor.getStep());
+
+    auto newInnerFor = scf::ForOp::create(builder, loc, lb, ub, step);
+    builder.setInsertionPointToStart(newInnerFor.getBody());
+
+    // Add the inner IV to both the main mapping (for emitArithOp cloning) and
+    // innerScalarMappings (for seeding gather lane maps in emitGatherLoad).
+    mapping.map(innerFor.getInductionVar(), newInnerFor.getInductionVar());
+    innerScalarMappings.map(innerFor.getInductionVar(),
+                            newInnerFor.getInductionVar());
+
+    // Process each op in the inner loop body.  The outer mapping already
+    // contains the vectorized outer IV and broadcasts of outer-scope scalars
+    // (populated in broadcastExternalScalars which was extended to scan inside
+    // nested scf.for loops).
+    for (Operation &innerOp : innerFor.getBody()->getOperations()) {
+      if (isa<scf::YieldOp>(&innerOp)) continue;
+
+      // R20-2L: recursively handle a further-nested scf.for (e.g. k-loop
+      // inside the i-loop).  This keeps C[i*N+j] in vector registers across
+      // the entire k reduction.
+      if (auto nestedFor = dyn_cast<scf::ForOp>(&innerOp)) {
+        emitInnerForOp(nestedFor, accesses, classes);
+        continue;
+      }
+
+      if (auto load = dyn_cast<memref::LoadOp>(&innerOp)) {
+        auto it = std::find(accesses.begin(), accesses.end(), &innerOp);
+        if (it == accesses.end()) {
+          // Not in accesses list — clone scalar.
+          builder.clone(innerOp, mapping);
+          continue;
+        }
+        const auto &cls = classes[it - accesses.begin()];
+        switch (cls.kind) {
+          case lego::AccessKind::Unit:       emitUnitLoad(load, cls);       break;
+          case lego::AccessKind::Broadcast:  emitBroadcastLoad(load, cls);  break;
+          case lego::AccessKind::CrossBlock: emitCrossBlockLoad(load, cls); break;
+          case lego::AccessKind::Strided:    emitStridedLoad(load, cls);    break;
+          case lego::AccessKind::NonAffine:  emitGatherLoad(load, cls);     break;
+          default: {
+            Operation *cloned = builder.clone(*load.getOperation(), mapping);
+            mapping.map(load.getResult(), cloned->getResult(0));
+            break;
+          }
+        }
+        continue;
+      }
+
+      if (auto store = dyn_cast<memref::StoreOp>(&innerOp)) {
+        auto it = std::find(accesses.begin(), accesses.end(), &innerOp);
+        if (it == accesses.end()) {
+          builder.clone(innerOp, mapping);
+          continue;
+        }
+        const auto &cls = classes[it - accesses.begin()];
+        if (cls.kind == lego::AccessKind::Unit)
+          emitUnitStore(store, cls);
+        else
+          builder.clone(*store.getOperation(), mapping);
+        continue;
+      }
+
+      // arith ops and other non-load/store ops: emit using the arith catch-all.
+      emitArithOp(innerOp);
+    }
+
+    // Restore insertion point to after the new inner loop.
+    builder.setInsertionPointAfter(newInnerFor);
+  }
 };  // struct EmitContext
 
 /// Populate `vecLoop`'s body by dispatching each original loop op to the
@@ -1306,6 +1447,16 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
     // -------------------------------------------------------------------
     } else if (auto ifOp = dyn_cast<scf::IfOp>(&op)) {
       ctx.emitMaskedStore(ifOp, accesses, classes);
+
+    // -------------------------------------------------------------------
+    // scf.for -- R20 outer-loop vectorization with inner reduction loop.
+    // The inner scf.for (range() loop) is a scalar reduction loop whose body
+    // contains loads/stores that reference the outer vectorized IV.  Clone
+    // the inner loop into the vectorized body, replacing each inner-body
+    // load/store with its vectorized equivalent.
+    // -------------------------------------------------------------------
+    } else if (auto innerFor = dyn_cast<scf::ForOp>(&op)) {
+      ctx.emitInnerForOp(innerFor, accesses, classes);
 
     // -------------------------------------------------------------------
     // arith and all other ops -- mixed-precision aware pass-through
@@ -1538,7 +1689,68 @@ class LegoVectorizePass
           }
           continue;
         }
-        // [G3] Op outside the arith dialect and not an allowed scf.if.
+        // R20: allow a single-level nested scf.for (scalar reduction loop)
+        // whose body contains only arith/memref ops or a single further level
+        // of nested scf.for (R20-2L: e.g. outer i-loop containing inner k-loop).
+        // The inner loop is vectorized by emitInnerForOp when the outer loop
+        // is strip-mined; all inner IVs remain scalar.
+        if (auto innerFor = dyn_cast<scf::ForOp>(&op)) {
+          bool innerOK = true;
+          for (Operation &innerOp : innerFor.getBody()->getOperations()) {
+            if (isa<memref::LoadOp, memref::StoreOp, scf::YieldOp>(innerOp))
+              continue;
+            if (innerOp.getDialect() &&
+                isa<arith::ArithDialect>(innerOp.getDialect()))
+              continue;
+            // R20-2L: allow a second level of nested scf.for (innermost
+            // reduction loop, e.g. k-loop inside i-loop), provided its body
+            // contains only arith/memref ops.
+            if (auto innermostFor = dyn_cast<scf::ForOp>(&innerOp)) {
+              bool innermostOK = true;
+              for (Operation &innermostOp :
+                   innermostFor.getBody()->getOperations()) {
+                if (isa<memref::LoadOp, memref::StoreOp, scf::YieldOp>(
+                        innermostOp))
+                  continue;
+                if (innermostOp.getDialect() &&
+                    isa<arith::ArithDialect>(innermostOp.getDialect()))
+                  continue;
+                LLVM_DEBUG(llvm::dbgs()
+                           << "[lego-vectorize] skip loop in '"
+                           << func.getName()
+                           << "' — innermost reduction loop body contains "
+                              "unsupported op: "
+                           << innermostOp.getName().getStringRef() << "\n");
+                innermostOK = false;
+                break;
+              }
+              if (!innermostOK) { innerOK = false; break; }
+              LLVM_DEBUG(llvm::dbgs()
+                         << "[lego-vectorize] allowing 2-level nested scf.for "
+                            "in '" << func.getName()
+                         << "' — innermost reduction loop (R20-2L)\n");
+              continue;
+            }
+            // Anything else inside the inner loop — too complex.
+            LLVM_DEBUG(llvm::dbgs()
+                       << "[lego-vectorize] skip loop in '"
+                       << func.getName()
+                       << "' — inner reduction loop body contains unsupported op: "
+                       << innerOp.getName().getStringRef() << "\n");
+            innerOK = false;
+            break;
+          }
+          if (!innerOK) {
+            bodyOK = false;
+            break;
+          }
+          LLVM_DEBUG(llvm::dbgs()
+                     << "[lego-vectorize] allowing nested scf.for in '"
+                     << func.getName()
+                     << "' — inner reduction loop with arith/memref body (R20)\n");
+          continue;
+        }
+        // [G3] Op outside the arith dialect and not an allowed scf.if or scf.for.
         LLVM_DEBUG(llvm::dbgs()
                    << "[lego-vectorize] skip loop in '" << func.getName()
                    << "' — body contains op outside allowlist: "
