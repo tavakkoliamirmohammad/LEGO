@@ -34,7 +34,7 @@ import numpy as np
 from lego.mlir.ir import (
     Context, Location, Module, InsertionPoint,
     IndexType, MemRefType, FunctionType, StringAttr, UnitAttr,
-    F32Type,
+    F32Type, F64Type, IntegerType,
 )
 from lego.mlir.dialects import func as func_dialect
 from lego.mlir.dialects import scf as scf_dialect
@@ -558,6 +558,197 @@ class CPUKernelBuilder:
         bench_fn(*args)
         elapsed_ns = _time.perf_counter_ns() - t0
         return elapsed_ns / n_iters / 1e6   # ms per iteration
+
+    def bench_self_timed(self, *args, n_iters: int = 1000, n_warmup: int = 100,
+                         target: str = "cpu",
+                         cpu: Optional[str] = None) -> float:
+        """Timing harness whose measurement happens INSIDE the JIT'd MLIR module.
+
+        Unlike ``bench()``, which wraps Python's ``time.perf_counter_ns()``
+        around a single ``engine.invoke()`` call, ``bench_self_timed`` emits
+        ``clock_gettime(CLOCK_MONOTONIC)`` calls as MLIR ops inside the JIT'd
+        module:
+
+        1. Warmup loop: *n_warmup* iterations of the kernel body (warms icache,
+           branch predictor, TLB — eliminates first-call bias).
+        2. Start timestamp: ``clock_gettime(CLOCK_MONOTONIC)`` → (sec, nsec).
+        3. Timed loop: *n_iters* iterations of the kernel body.
+        4. End timestamp: ``clock_gettime(CLOCK_MONOTONIC)`` → (sec, nsec).
+        5. Elapsed nanoseconds = (end_sec - start_sec) * 1e9 + (end_nsec - start_nsec).
+        6. Per-iteration time (ms) = elapsed_ns / n_iters / 1e6.
+        7. Result written to an output memref<1xf64> that Python reads back.
+
+        This eliminates ALL Python-level timing overhead — the number returned
+        is the actual JIT'd kernel's per-iteration cost as measured by the
+        hardware's monotonic clock from within the running JIT'd code.
+
+        The function calls ``func.func private @clock_gettime(i32, memref<2xi64>)``
+        which the MLIR ExecutionEngine resolves to the libc symbol at JIT time
+        (libc is already loaded in the Python process).
+
+        Parameters
+        ----------
+        *args:
+            Same arguments as the compiled kernel (scalars first, then numpy
+            arrays for each LayoutBuffer).
+        n_iters:
+            Number of timed iterations.  Default 1000.
+        n_warmup:
+            Number of warmup iterations (excluded from timing).  Default 100.
+        target / cpu:
+            Compilation target (forwarded to ``compile()``).
+
+        Returns
+        -------
+        float
+            Per-iteration time in **milliseconds** as measured by
+            ``clock_gettime(CLOCK_MONOTONIC)`` inside the JIT'd code.
+        """
+        import numpy as _np
+
+        bench_key = (target, cpu, n_iters, n_warmup, "bench_self_timed")
+        if bench_key not in self._engines:
+            orig_kernel_body = self._kernel_body
+            orig_scalar_params = list(self._scalar_params)
+            orig_buffers = list(self._buffers)
+            n_warmup_const = n_warmup
+            n_iters_const = n_iters
+
+            def self_timed_body(ctx):
+                """Emit warmup + clock_gettime-timed loop + write result."""
+                # CLOCK_MONOTONIC = 1 on Linux.
+                i32_ty = IntegerType.get(32)
+                i64_ty = IntegerType.get(64)
+                f64_ty = F64Type.get()
+                ts_ty  = MemRefType.get([2], i64_ty)
+
+                clk_id = arith_dialect.ConstantOp(i32_ty, 1).result
+
+                # Allocate two timespecs (start and end).
+                start_ts = memref_dialect.AllocaOp(ts_ty, [], []).result
+                end_ts   = memref_dialect.AllocaOp(ts_ty, [], []).result
+
+                # Warmup loop.
+                nw = _index_const(n_warmup_const)
+                c0 = _index_const(0)
+                c1 = _index_const(1)
+                warmup = scf_dialect.ForOp(c0, nw, c1)
+                with InsertionPoint(warmup.body):
+                    orig_kernel_body(ctx)
+                    scf_dialect.YieldOp([])
+
+                # clock_gettime(CLOCK_MONOTONIC, &start_ts).
+                func_dialect.CallOp(
+                    [i32_ty], "clock_gettime",
+                    [clk_id, start_ts])
+
+                # Timed loop.
+                ni = _index_const(n_iters_const)
+                timed = scf_dialect.ForOp(c0, ni, c1)
+                with InsertionPoint(timed.body):
+                    orig_kernel_body(ctx)
+                    scf_dialect.YieldOp([])
+
+                # clock_gettime(CLOCK_MONOTONIC, &end_ts).
+                func_dialect.CallOp(
+                    [i32_ty], "clock_gettime",
+                    [clk_id, end_ts])
+
+                # Compute elapsed nanoseconds:
+                #   elapsed_sec  = end_ts[0] - start_ts[0]
+                #   elapsed_nsec = end_ts[1] - start_ts[1]
+                #   elapsed_ns   = elapsed_sec * 1_000_000_000 + elapsed_nsec
+                idx0 = _index_const(0)
+                idx1 = _index_const(1)
+                start_sec  = memref_dialect.LoadOp(start_ts, [idx0]).result
+                start_nsec = memref_dialect.LoadOp(start_ts, [idx1]).result
+                end_sec    = memref_dialect.LoadOp(end_ts,   [idx0]).result
+                end_nsec   = memref_dialect.LoadOp(end_ts,   [idx1]).result
+
+                ns_per_sec = arith_dialect.ConstantOp(i64_ty, 1_000_000_000).result
+                diff_sec   = arith_dialect.SubIOp(end_sec, start_sec).result
+                diff_nsec  = arith_dialect.SubIOp(end_nsec, start_nsec).result
+                sec_ns     = arith_dialect.MulIOp(diff_sec, ns_per_sec).result
+                elapsed_ns = arith_dialect.AddIOp(sec_ns, diff_nsec).result
+
+                # Convert to f64 and divide: per_iter_ms = elapsed_ns / n_iters / 1e6.
+                elapsed_f64 = arith_dialect.SIToFPOp(f64_ty, elapsed_ns).result
+                n_iters_f64 = arith_dialect.ConstantOp(
+                    f64_ty, float(n_iters_const)).result
+                ns_per_ms   = arith_dialect.ConstantOp(f64_ty, 1_000_000.0).result
+                per_iter_ns = arith_dialect.DivFOp(elapsed_f64, n_iters_f64).result
+                per_iter_ms = arith_dialect.DivFOp(per_iter_ns, ns_per_ms).result
+
+                # Write result to the last buffer (a special output memref<1xf64>).
+                # The output buffer is the last element in ctx._buf_vals.
+                out_buf = ctx._buf_vals[-1]
+                out_idx = _index_const(0)
+                memref_dialect.StoreOp(per_iter_ms, out_buf, [out_idx])
+
+            # The self-timed builder adds one extra buffer for the f64 result.
+            # We use a LayoutBuffer with dtype="f64" and numel=1 for the output.
+            result_buf = LayoutBuffer(
+                layout=None, shape=(1,), dtype="f64", shared=False)
+            # Override numel so CPUKernelBuilder uses memref<1xf64>.
+            result_buf = type('_ResultBuf', (), {
+                'numel': 1, 'dtype': 'f64', 'layout': None,
+                'shape': (1,), 'shared': False,
+            })()
+
+            timed_buffers = orig_buffers + [result_buf]
+
+            timed_builder = CPUKernelBuilder(
+                buffers=timed_buffers,
+                kernel_body=self_timed_body,
+                name=self._name + "_self_timed",
+                scalar_params=orig_scalar_params,
+            )
+
+            cpu_target = _CPU_TARGETS.get(target)
+            if cpu_target is None:
+                raise ValueError(
+                    f"Unknown CPU target '{target}'. "
+                    f"Available: {list(_CPU_TARGETS)}"
+                )
+
+            # Build the module and inject the clock_gettime extern declaration.
+            # build_module() emits the main function; we then prepend the extern
+            # @clock_gettime so that the func.call in self_timed_body resolves.
+            ctx_mlir, module = timed_builder.build_module()
+            pipeline_str = cpu_target.pipeline_string(cpu=cpu)
+
+            with ctx_mlir, Location.unknown():
+                # Inject clock_gettime extern at the BEGINNING of the module body
+                # (before the main function) using InsertionPoint.at_block_begin.
+                # Ordering: extern first, then user func — required by MLIR verifier.
+                i32_ty = IntegerType.get(32)
+                i64_ty = IntegerType.get(64)
+                ts_ty  = MemRefType.get([2], i64_ty)
+                clk_fn_ty = FunctionType.get([i32_ty, ts_ty], [i32_ty])
+                with InsertionPoint.at_block_begin(module.body):
+                    clk_fn = func_dialect.FuncOp("clock_gettime", clk_fn_ty)
+                    clk_fn.sym_visibility = StringAttr.get("private")
+
+                try:
+                    pm = PassManager.parse(pipeline_str)
+                    pm.run(module.operation)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"bench_self_timed compilation failed ({pipeline_str}):\n{e}"
+                    ) from e
+                jit_opt = 0 if target == "scalar" else 3
+                timed_engine = ExecutionEngine(module, opt_level=jit_opt)
+
+            # Build the callable for the self-timed function.
+            timed_fn = timed_builder._make_callable(timed_engine)
+            self._engines[bench_key] = timed_fn
+
+        timed_fn = self._engines[bench_key]
+
+        # Create the output result buffer.
+        result_arr = _np.zeros(1, dtype=_np.float64)
+        timed_fn(*args, result_arr)
+        return float(result_arr[0])
 
     def _make_callable(self, engine):
         """Build a Python wrapper that invokes the JIT-compiled function.
