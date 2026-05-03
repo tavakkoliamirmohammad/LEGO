@@ -547,1004 +547,737 @@ static Value cloneAddrDAG(Value v, IRMapping &laneMap, OpBuilder &builder,
   return cloned->getResult(0);
 }
 
-/// Populate `vecLoop`'s body.
-/// For each memref.load/store in the original body that has unit-stride
-/// classification, emit vector.transfer_read / vector.transfer_write.
-/// Broadcast loads get cloned as scalar then vector.broadcast.
-/// Mixed-precision: when an access has element width < L_strip, emit
-/// (L_strip / Ln_access) sub-vector ops at sequential offsets.
-static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
-                           int64_t L_strip,
-                           ArrayRef<Operation *> accesses,
-                           ArrayRef<lego::AccessClassification> classes,
-                           llvm::StringRef targetStr,
-                           OpBuilder &builder) {
-  Location loc = origLoop.getLoc();
-  Value newIv = vecLoop.getInductionVar();
-  builder.setInsertionPointToStart(vecLoop.getBody());
 
+// ---------------------------------------------------------------------------
+// EmitContext — holds all shared state for the vector body emission pass.
+//
+// Each per-kind emit method (emitUnitLoad, emitBroadcastLoad, etc.) is a
+// member of this struct so they can access loc, builder, mapping, and
+// subVectorMap without threading them through every call.
+// ---------------------------------------------------------------------------
+struct EmitContext {
+  Location loc;
+  Value newIv;
+  llvm::StringRef target;
+  int64_t L_strip;
+  scf::ForOp origLoop;
+  OpBuilder &builder;
   IRMapping mapping;
-  mapping.map(origLoop.getInductionVar(), newIv);
+  DenseMap<Value, SmallVector<Value>> subVectorMap;
 
-  // Target is passed through from the outer runOnOperation() call.
-  // Default "avx512" is a principled default for the x86 pipeline (the LLVM
-  // backend generalises AVX-512 intrinsics to AVX2 via target-feature negotiation
-  // when the host CPU lacks AVX-512, so the lane-width logic is safe for both).
-  // The ARM-NEON pipeline passes "neon" here to get 16-byte (128-bit) lanes.
-  // AVX2-only machines get 32-byte (256-bit) effective lanes because LLVM's
-  // VectorType lowering splits/packs the AVX-512 ops at codegen time.
-  llvm::StringRef target = targetStr;
+  // -------------------------------------------------------------------------
+  // Shared helpers
+  // -------------------------------------------------------------------------
 
   // Per-access natural lane width, clamped to L_strip.
   // When the loop trip count (T) is smaller than the register width (R_T),
   // L_strip = T < R_T.  Using R_T directly would give numSubOps = 0 which
   // produces empty vector bodies.  Clamp to L_strip so we always emit exactly
   // one vector op covering the full strip-mined span.
-  auto getLnForAccess = [&](size_t idx) -> int64_t {
-    int64_t R_T = getRegisterLanesForType(target, classes[idx].elementBytes);
+  int64_t getLnForAccess(const lego::AccessClassification &cls) const {
+    int64_t R_T = getRegisterLanesForType(target, cls.elementBytes);
     return std::min(R_T, L_strip);
-  };
+  }
 
-  // Sub-vector tracking: for each original Value, store the list of
-  // sub-vectors that cover the L_strip-wide span.  When Ln == L_strip the
-  // list has exactly one element (the full-width vector); when Ln < L_strip
-  // the list has L_strip/Ln elements at offsets 0, Ln, 2*Ln, …
-  DenseMap<Value, SmallVector<Value>> subVectorMap;
-
-  // Helper: return the sub-vector list for an original operand.
-  // Falls back to a 1-element list containing the IRMapping result.
-  auto getSubsFor = [&](Value origOperand) -> SmallVector<Value> {
-    if (auto it = subVectorMap.find(origOperand); it != subVectorMap.end())
-      return it->second;
-    return {mapping.lookupOrDefault(origOperand)};
-  };
-
-  // Helper: build an index Value for (baseIv + j * Ln), or just baseIv if j==0.
-  auto makeOffset = [&](Value baseIv, int64_t j, int64_t Ln) -> Value {
+  // Build an index Value for (baseIv + j * Ln), or just baseIv if j==0.
+  Value makeOffset(Value baseIv, int64_t j, int64_t Ln) {
     if (j == 0) return baseIv;
     Value addend = arith::ConstantIndexOp::create(builder, loc, j * Ln);
     return arith::AddIOp::create(builder, loc, baseIv, addend);
-  };
+  }
 
-  // Pre-pass: identify loop-invariant scalar SSA values used in the body and
-  // pre-broadcast them to the NATURAL sub-vector width (Ln), NOT to L_strip.
-  //
-  // Previous approach: broadcast to L_strip (e.g. vector<64xf32>), then let the
-  // arith catch-all slice it into numSubOpsResult pieces via
-  // vector.extract_strided_slice. This generated:
-  //   insertelement + shufflevector(64-wide) + 4× shufflevector(16-wide slice)
-  // = 6 instructions just to splat a scalar `a` that GCC splats in 1
-  // vpbroadcastss. At N=1M, this 6× instruction inflation dominated the
-  // per-element FMA cost and caused LEGO to be ~14% slower than gcc -O3.
-  //
-  // Fixed approach: broadcast each scalar directly to vector<Ln x T> and
-  // populate subVectorMap with numSubOps copies.  The catch-all path then
-  // sees (int64_t)subs.size() == numSubOpsResult and takes the "already the
-  // right number of pieces" branch — zero slicing overhead.
-  //
-  // Ln is the natural register width for the element type on this target.
-  // For f32 on AVX-512: Ln = 64/4 = 16 → vector<16xf32> = one ZMM register.
-  // numSubOps = L_strip / Ln: for L_strip=64, numSubOps=4 (ILP unroll).
-  // We emit numSubOps independent broadcast vectors; each uses a distinct
-  // SSA name → distinct register → full ILP.
-  //
-  // IMPORTANT: we also need to store numSubOps sub-vectors in subVectorMap
-  // for each scalar (not just map in IRMapping) so that the catch-all's
-  // getSubsFor() returns the pre-sliced list directly.
-  auto isOutsideLoop = [&](Value v) {
+  // Return the sub-vector list for an original operand.
+  // Falls back to a 1-element list containing the IRMapping result.
+  SmallVector<Value> getSubsFor(Value origOperand) {
+    if (auto it = subVectorMap.find(origOperand); it != subVectorMap.end())
+      return it->second;
+    return {mapping.lookupOrDefault(origOperand)};
+  }
+
+  // Check whether `v` is defined outside origLoop.
+  bool isOutsideLoop(Value v) {
     Operation *defOp = v.getDefiningOp();
     if (!defOp) {
       if (v == origLoop.getInductionVar()) return false;
       return true;
     }
     return !origLoop->isAncestor(defOp);
-  };
+  }
 
-  // Collect all loop-external scalar operands and determine their Ln.
-  // We scan the body for any scalar (intOrFloat) value used from outside.
-  for (Operation &op : origLoop.getBody()->getOperations()) {
-    for (Value operand : op.getOperands()) {
-      if (!isOutsideLoop(operand)) continue;
-      if (subVectorMap.contains(operand)) continue;  // already handled
-      Type t = operand.getType();
-      if (!t.isIntOrFloat()) continue;
+  // -------------------------------------------------------------------------
+  // Pre-pass: broadcast loop-external scalars to natural sub-vector width.
+  //
+  // Previous approach: broadcast to L_strip (e.g. vector<64xf32>), then let the
+  // arith catch-all slice it into numSubOpsResult pieces via
+  // vector.extract_strided_slice. This generated 6 instructions to splat a
+  // scalar that GCC splats in 1 vpbroadcastss. Fixed: broadcast directly to
+  // natural Ln width and replicate the SSA value numSubOps times so the
+  // catch-all's getSubsFor() returns pre-sliced lists.
+  // -------------------------------------------------------------------------
+  void broadcastExternalScalars() {
+    for (Operation &op : origLoop.getBody()->getOperations()) {
+      for (Value operand : op.getOperands()) {
+        if (!isOutsideLoop(operand)) continue;
+        if (subVectorMap.contains(operand)) continue;
+        Type t = operand.getType();
+        if (!t.isIntOrFloat()) continue;
 
-      // Compute the natural sub-vector width for this element type.
-      int64_t elemBits = t.getIntOrFloatBitWidth();
-      int64_t elemBytes = elemBits / 8;
-      int64_t Ln;
-      if (elemBytes <= 0) {
-        // i1 or sub-byte type: use L_strip directly (one bit per lane).
-        Ln = L_strip;
-      } else {
-        Ln = std::min(getRegisterLanesForType(target, elemBytes), L_strip);
+        int64_t elemBits = t.getIntOrFloatBitWidth();
+        int64_t elemBytes = elemBits / 8;
+        int64_t Ln;
+        if (elemBytes <= 0) {
+          Ln = L_strip;  // i1 or sub-byte: one bit per lane
+        } else {
+          Ln = std::min(getRegisterLanesForType(target, elemBytes), L_strip);
+        }
+        int64_t numSubOps = (Ln > 0) ? (L_strip / Ln) : 1;
+
+        // Emit ONE broadcast op at vector<Ln x T>; reuse it numSubOps times.
+        // One physical vpbroadcastss; LLVM can hoist and share across ILP slots.
+        auto vecTy = VectorType::get({Ln}, t);
+        Value bc = vector::BroadcastOp::create(builder, loc, vecTy, operand);
+        SmallVector<Value> subs(numSubOps, bc);
+        mapping.map(operand, bc);
+        subVectorMap[operand] = std::move(subs);
       }
-      int64_t numSubOps = (Ln > 0) ? (L_strip / Ln) : 1;
-
-      // Emit ONE broadcast op at vector<Ln x T> and replicate the SSA value
-      // reference numSubOps times in subVectorMap.
-      //
-      // Rationale: multiple identical `vector.broadcast %same_scalar` ops lower
-      // to multiple `vpbroadcastss` instructions, but they are ALL computing the
-      // same value. Emitting a single broadcast and reusing the SSA value gives
-      // LLVM a single vpbroadcastss (or equivalent) that it can hoist before the
-      // inner loop and reuse across all 4 ILP-unroll slots — exactly what GCC
-      // does with `vmovaps .LC0(%rip), %xmm1` before the hot loop.
-      //
-      // The ILP benefit of the 4× unroll comes from having 4 independent load
-      // addresses and 4 independent FMA result registers — not from having 4
-      // separate broadcast registers for the same constant.  LLVM's register
-      // allocator handles the one-broadcast-many-uses case correctly.
-      auto vecTy = VectorType::get({Ln}, t);
-      Value bc = vector::BroadcastOp::create(builder, loc, vecTy, operand);
-      SmallVector<Value> subs(numSubOps, bc);  // numSubOps refs to the SAME Value
-
-      // Map the broadcast into IRMapping (for any single-lookup path),
-      // and store all numSubOps refs in subVectorMap (for the catch-all path).
-      mapping.map(operand, bc);
-      subVectorMap[operand] = std::move(subs);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Per-kind load emit helpers
+  // -------------------------------------------------------------------------
+
+  void emitUnitLoad(memref::LoadOp load,
+                    const lego::AccessClassification &cls) {
+    int64_t Ln = getLnForAccess(cls);
+    int64_t numSubOps = L_strip / Ln;
+    Type elemTy = load.getType();
+    auto vecTy = VectorType::get({Ln}, elemTy);
+    Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
+
+    SmallVector<Value> subs;
+    subs.reserve(numSubOps);
+    for (int64_t j = 0; j < numSubOps; ++j) {
+      Value off = makeOffset(baseIv, j, Ln);
+      auto subVec = vector::TransferReadOp::create(
+          builder, loc, vecTy, load.getMemRef(), ValueRange{off},
+          /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
+      subs.push_back(subVec.getVector());
+    }
+    // Map first sub-vector for any single-lookup consumer paths.
+    mapping.map(load.getResult(), subs[0]);
+    subVectorMap[load.getResult()] = std::move(subs);
+  }
+
+  void emitBroadcastLoad(memref::LoadOp load,
+                         const lego::AccessClassification &cls) {
+    // Loop-invariant load -- clone as scalar then broadcast at natural Ln width.
+    // Emit ONE broadcast (one vpbroadcastss) and reuse it numSubOps times.
+    Operation *clonedLoad = builder.clone(*load.getOperation(), mapping);
+    Type elemTy = load.getType();
+    int64_t elemBytes = elemTy.getIntOrFloatBitWidth() / 8;
+    int64_t Ln = (elemBytes > 0)
+                     ? std::min(getRegisterLanesForType(target, elemBytes), L_strip)
+                     : L_strip;
+    int64_t numSubOps = (Ln > 0) ? (L_strip / Ln) : 1;
+    auto vecTy = VectorType::get({Ln}, elemTy);
+    Value bc = vector::BroadcastOp::create(builder, loc, vecTy,
+                                           clonedLoad->getResult(0));
+    SmallVector<Value> subs(numSubOps, bc);
+    mapping.map(load.getResult(), bc);
+    subVectorMap[load.getResult()] = std::move(subs);
+  }
+
+  void emitCrossBlockLoad(memref::LoadOp load,
+                          const lego::AccessClassification &cls) {
+    // Two adjacent block reads + vector.shuffle.
+    //
+    // Cross-block pattern: addr(iv+0..L-1) is unit-stride for the first
+    // `boundary` lanes, then jumps to the next block for the remaining
+    // (L - boundary) lanes. Synthesise by:
+    //   1. Reading L lanes from block N (starting at addr(0)).
+    //   2. Reading L lanes from block N+1 (starting at addr(boundary)).
+    //   3. vector.shuffle selects [0..boundary) from blockN and
+    //      [0..L-boundary) from blockNp1.
+    //
+    // v1 restriction: only Ln == L_strip. If CrossBlock is combined with
+    // mixed-precision (Ln < L_strip), fall through to scalar-clone fallback.
+    int64_t Ln = getLnForAccess(cls);
+    if (Ln != L_strip) {
+      Operation *cloned = builder.clone(*load.getOperation(), mapping);
+      mapping.map(load.getResult(), cloned->getResult(0));
+      return;
+    }
+
+    int64_t boundary = cls.boundary;
+    Type elemTy = load.getType();
+    auto vecTy = VectorType::get({Ln}, elemTy);
+    Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
+
+    // R12a: use cls.boundaryJump (actual address delta from addrs[0] to
+    // addrs[boundary]) to compute the second block's base address.
+    // boundaryJump = addrs[boundary] - addrs[0] (element-unit offset).
+    Value boundaryJumpConst =
+        arith::ConstantIndexOp::create(builder, loc, cls.boundaryJump);
+    Value blockNp1Iv =
+        arith::AddIOp::create(builder, loc, baseIv, boundaryJumpConst);
+
+    Value blockN = vector::TransferReadOp::create(
+        builder, loc, vecTy, load.getMemRef(), ValueRange{baseIv},
+        /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
+    Value blockNp1 = vector::TransferReadOp::create(
+        builder, loc, vecTy, load.getMemRef(), ValueRange{blockNp1Iv},
+        /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
+
+    // Shuffle: [0..boundary) from blockN, then [0..L-boundary) from blockNp1.
+    SmallVector<int64_t> shuffleIndices;
+    shuffleIndices.reserve(Ln);
+    for (int64_t lane = 0; lane < Ln; ++lane) {
+      if (lane < boundary)
+        shuffleIndices.push_back(lane);
+      else
+        shuffleIndices.push_back(Ln + (lane - boundary));
+    }
+    Value shuffled = vector::ShuffleOp::create(builder, loc, blockN,
+                                               blockNp1, shuffleIndices);
+    subVectorMap[load.getResult()] = {shuffled};
+    mapping.map(load.getResult(), shuffled);
+  }
+
+  void emitStridedLoad(memref::LoadOp load,
+                       const lego::AccessClassification &cls) {
+    // R20: Deinterleave path for small constant strides (2, 4, 8).
+    //
+    // For stride=S: load S consecutive blocks of Ln elements, then shuffle
+    // to extract every S-th element. Maps to vpermt2ps (1-3 cycles) rather
+    // than vpgatherdps (10+ cycles for L1-hot data on x86 AVX-512).
+    //
+    // Conditions: S in {2,4,8} and S*Ln <= 256. Otherwise falls through to
+    // the gather path (emitGatherLoad).
+    int64_t stride = cls.stride / cls.elementBytes;  // stride in elements
+    int64_t Ln = getLnForAccess(cls);
+    bool useDeinterleave = (stride == 2 || stride == 4 || stride == 8) &&
+                           (stride * Ln <= 256);
+
+    if (!useDeinterleave) {
+      emitGatherLoad(load, cls);
+      return;
+    }
+
+    Type elemTy = load.getType();
+    auto vecTy = VectorType::get({Ln}, elemTy);
+
+    // Compute physBase = addr(newIv) via lane-0 address DAG clone.
+    Value origIv = origLoop.getInductionVar();
+    Value curIv = mapping.lookupOrDefault(origIv);
+    IRMapping lane0Map;
+    lane0Map.map(origIv, curIv);
+    Value physBase = cloneAddrDAG(load.getIndices().front(),
+                                  lane0Map, builder, origLoop);
+
+    // Load S blocks of Ln elements each: Block[b] starts at physBase + b*Ln.
+    SmallVector<Value> blocks;
+    blocks.reserve(stride);
+    for (int64_t b = 0; b < stride; ++b) {
+      Value blockBase;
+      if (b == 0) {
+        blockBase = physBase;
+      } else {
+        Value bOff = arith::ConstantIndexOp::create(builder, loc, b * Ln);
+        blockBase = arith::AddIOp::create(builder, loc, physBase, bOff);
+      }
+      auto block = vector::TransferReadOp::create(
+          builder, loc, vecTy, load.getMemRef(), ValueRange{blockBase},
+          /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
+      blocks.push_back(block.getVector());
+    }
+
+    // Deinterleave: select element k*stride from the concatenated blocks.
+    Value result;
+    if (stride == 2) {
+      // indices [0, 2, 4, ..., 2*(Ln-1)] selects even elements from [B0|B1].
+      SmallVector<int64_t> shuffleIdx;
+      shuffleIdx.reserve(Ln);
+      for (int64_t k = 0; k < Ln; ++k)
+        shuffleIdx.push_back(k * 2);
+      result = vector::ShuffleOp::create(builder, loc, blocks[0],
+                                         blocks[1], shuffleIdx);
+    } else if (stride == 4) {
+      // Two half-width shuffles then a merge.
+      int64_t half = Ln / 2;
+      SmallVector<int64_t> halfIdx;
+      halfIdx.reserve(half);
+      for (int64_t k = 0; k < half; ++k)
+        halfIdx.push_back(k * stride);
+      auto sh1Raw = vector::ShuffleOp::create(builder, loc, blocks[0],
+                                              blocks[1], halfIdx);
+      auto sh2Raw = vector::ShuffleOp::create(builder, loc, blocks[2],
+                                              blocks[3], halfIdx);
+      SmallVector<int64_t> combineIdx;
+      combineIdx.reserve(Ln);
+      for (int64_t k = 0; k < half; ++k) combineIdx.push_back(k);
+      for (int64_t k = 0; k < half; ++k) combineIdx.push_back(half + k);
+      result = vector::ShuffleOp::create(builder, loc, sh1Raw, sh2Raw,
+                                         combineIdx);
+    } else {
+      // stride == 8: four quarter-width shuffles, two pair-merges, one final.
+      int64_t qtr = Ln / 4;
+      SmallVector<int64_t> qtrIdx;
+      qtrIdx.reserve(qtr);
+      for (int64_t k = 0; k < qtr; ++k)
+        qtrIdx.push_back(k * stride);
+      SmallVector<Value> halves;
+      for (int64_t p = 0; p < 4; ++p) {
+        auto sh = vector::ShuffleOp::create(builder, loc,
+                                            blocks[2*p], blocks[2*p+1],
+                                            qtrIdx);
+        halves.push_back(sh);
+      }
+      SmallVector<int64_t> pairIdx;
+      pairIdx.reserve(Ln / 2);
+      for (int64_t k = 0; k < qtr; ++k) pairIdx.push_back(k);
+      for (int64_t k = 0; k < qtr; ++k) pairIdx.push_back(qtr + k);
+      auto mid01 = vector::ShuffleOp::create(builder, loc,
+                                             halves[0], halves[1], pairIdx);
+      auto mid23 = vector::ShuffleOp::create(builder, loc,
+                                             halves[2], halves[3], pairIdx);
+      SmallVector<int64_t> finalIdx;
+      finalIdx.reserve(Ln);
+      for (int64_t k = 0; k < Ln/2; ++k) finalIdx.push_back(k);
+      for (int64_t k = 0; k < Ln/2; ++k) finalIdx.push_back(Ln/2 + k);
+      result = vector::ShuffleOp::create(builder, loc, mid01, mid23, finalIdx);
+    }
+
+    mapping.map(load.getResult(), result);
+    subVectorMap[load.getResult()] = {result};
+  }
+
+  // vector.gather for constant non-unit stride (large strides or non-power-of-2)
+  // or for non-affine (irregular) access. Builds per-lane indices by cloning
+  // the ORIGINAL scalar address DAG with origIv substituted by (newIv + j).
+  //
+  // R19 fix: use a fresh per-lane IRMapping (not the outer `mapping` which has
+  // vector subs for float values) so cloneAddrDAG produces scalar element-unit
+  // addresses for each lane.
+  void emitGatherLoad(memref::LoadOp load,
+                      const lego::AccessClassification &cls) {
+    int64_t Ln = getLnForAccess(cls);
+    Type elemTy = load.getType();
+    auto vecTy = VectorType::get({Ln}, elemTy);
+
+    Value origIv = origLoop.getInductionVar();
+    Value origAddr = load.getIndices().front();
+    Value baseIv = mapping.lookupOrDefault(origIv);
+
+    SmallVector<Value> indexElements;
+    indexElements.reserve(Ln);
+    for (int64_t j = 0; j < Ln; ++j) {
+      Value laneIv;
+      if (j == 0) {
+        laneIv = baseIv;
+      } else {
+        Value addend = arith::ConstantIndexOp::create(builder, loc, j);
+        laneIv = arith::AddIOp::create(builder, loc, baseIv, addend);
+      }
+      IRMapping laneMap;
+      laneMap.map(origIv, laneIv);
+      Value laneAddr = cloneAddrDAG(origAddr, laneMap, builder, origLoop);
+      indexElements.push_back(laneAddr);
+    }
+    auto idxVecTy = VectorType::get({Ln}, builder.getIndexType());
+    Value indexVec = vector::FromElementsOp::create(
+        builder, loc, idxVecTy, ValueRange(indexElements));
+
+    auto i1Ty = builder.getI1Type();
+    auto maskTy = VectorType::get({Ln}, i1Ty);
+    Value mask = arith::ConstantOp::create(
+        builder, loc, maskTy,
+        DenseElementsAttr::get(maskTy, builder.getBoolAttr(true)));
+    Value passThru = arith::ConstantOp::create(
+        builder, loc, vecTy,
+        DenseElementsAttr::get(vecTy, builder.getZeroAttr(elemTy)));
+
+    Value c0 = arith::ConstantIndexOp::create(builder, loc, 0);
+    Value gathered = vector::GatherOp::create(
+        builder, loc, vecTy, load.getMemRef(), ValueRange{c0}, indexVec,
+        mask, passThru, /*alignment=*/mlir::IntegerAttr{});
+
+    mapping.map(load.getResult(), gathered);
+    subVectorMap[load.getResult()] = {gathered};
+  }
+
+  // -------------------------------------------------------------------------
+  // Per-kind store emit helpers
+  // -------------------------------------------------------------------------
+
+  void emitUnitStore(memref::StoreOp store,
+                     const lego::AccessClassification &cls) {
+    int64_t Ln = getLnForAccess(cls);
+    int64_t numSubOps = L_strip / Ln;
+    auto subs = getSubsFor(store.getValue());
+
+    if ((int64_t)subs.size() == numSubOps) {
+      Value baseIv = mapping.lookupOrDefault(store.getIndices().front());
+      for (int64_t j = 0; j < numSubOps; ++j) {
+        Value off = makeOffset(baseIv, j, Ln);
+        vector::TransferWriteOp::create(
+            builder, loc, subs[j], store.getMemRef(), ValueRange{off},
+            /*inBounds=*/ArrayRef<bool>{true});
+      }
+    } else {
+      // Sub-vector count mismatch -- scalar fallback.
+      builder.clone(*store.getOperation(), mapping);
+    }
+  }
+
+  // R17: scf.if predicated maskedstore.
+  // Supports the pattern:
+  //   scf.if %cond {
+  //     memref.store %val, %B[%i] : memref<?xT>
+  //   }
+  // where %cond is a scalar i1 produced by arith.cmpf/cmpi in this loop.
+  // Lowers to: vector.maskedstore with the vectorised condition as mask.
+  void emitMaskedStore(scf::IfOp ifOp,
+                       ArrayRef<Operation *> accesses,
+                       ArrayRef<lego::AccessClassification> classes) {
+    Value cond = ifOp.getCondition();
+    Value vecCond = mapping.lookupOrDefault(cond);
+    // If the condition didn't get vectorized (still scalar), broadcast it.
+    if (!dyn_cast<VectorType>(vecCond.getType())) {
+      auto maskTy = VectorType::get({L_strip}, builder.getI1Type());
+      vecCond = vector::BroadcastOp::create(builder, loc, maskTy, vecCond);
+    }
+    for (Operation &thenOp : ifOp.getThenRegion().front().getOperations()) {
+      if (isa<scf::YieldOp>(thenOp)) continue;
+      auto store = dyn_cast<memref::StoreOp>(&thenOp);
+      if (!store) continue;
+      auto it = std::find(accesses.begin(), accesses.end(), &thenOp);
+      Value valueToStore;
+      Value baseIdx;
+      if (it != accesses.end()) {
+        auto subs = getSubsFor(store.getValue());
+        valueToStore = subs.empty() ? mapping.lookupOrDefault(store.getValue())
+                                    : subs[0];
+        baseIdx = mapping.lookupOrDefault(store.getIndices().front());
+      } else {
+        valueToStore = mapping.lookupOrDefault(store.getValue());
+        baseIdx = mapping.lookupOrDefault(store.getIndices().front());
+      }
+      // Ensure value is a vector<L_strip x T> type.
+      Type elemTy = store.getValue().getType();
+      if (!dyn_cast<VectorType>(valueToStore.getType())) {
+        auto vecTy = VectorType::get({L_strip}, elemTy);
+        valueToStore = vector::BroadcastOp::create(builder, loc, vecTy,
+                                                   valueToStore);
+      }
+      vector::MaskedStoreOp::create(builder, loc, store.getMemRef(),
+                                    ValueRange{baseIdx}, vecCond, valueToStore,
+                                    /*alignment=*/mlir::IntegerAttr{});
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // arith catch-all -- mixed-precision aware pass-through.
+  // Handles: R16 index-typed cmpi/cmpf/select, and general scalar->vector
+  // widening for all other arith ops.
+  // -------------------------------------------------------------------------
+  void emitArithOp(Operation &op) {
+    // R16: arith.cmpi / arith.cmpf on index-typed operands.
+    // Index has no fixed bit width in MLIR; convert to i64 vectors first.
+    if (isa<arith::CmpIOp, arith::CmpFOp>(&op)) {
+      bool hasIndexOperand = llvm::any_of(op.getOperands(), [](Value v) {
+        return v.getType().isIndex();
+      });
+      if (hasIndexOperand) {
+        auto i64Ty = builder.getI64Type();
+        SmallVector<Value> convertedOperands;
+        for (Value operand : op.getOperands()) {
+          Value mapped = mapping.lookupOrDefault(operand);
+          if (operand.getType().isIndex()) {
+            if (dyn_cast<VectorType>(mapped.getType())) {
+              // Index vectors are invalid in MLIR; this path shouldn't be hit.
+              convertedOperands.push_back(mapped);
+            } else {
+              auto i64Val = arith::IndexCastOp::create(builder, loc, i64Ty, mapped);
+              auto vecI64Ty = VectorType::get({L_strip}, i64Ty);
+              auto bc = vector::BroadcastOp::create(builder, loc, vecI64Ty, i64Val);
+              convertedOperands.push_back(bc);
+            }
+          } else {
+            auto subs = getSubsFor(operand);
+            convertedOperands.push_back(subs.empty() ? mapped : subs[0]);
+          }
+        }
+        auto maskTy = VectorType::get({L_strip}, builder.getI1Type());
+        OperationState state(loc, op.getName());
+        state.addOperands(convertedOperands);
+        state.addAttributes(op.getAttrs());
+        state.addTypes(maskTy);
+        Operation *newCmp = builder.create(state);
+        Value resultVec = newCmp->getResult(0);
+        mapping.map(op.getResult(0), resultVec);
+        subVectorMap[op.getResult(0)] = {resultVec};
+        return;
+      }
+      // Non-index cmpi/cmpf falls through to the general arith path below.
+    }
+
+    // R16: arith.select on index-typed result.
+    if (isa<arith::SelectOp>(&op)) {
+      Value origResult = op.getResult(0);
+      Type resTy = origResult.getType();
+      if (resTy.isIndex()) {
+        Value cond = op.getOperand(0);
+        Value trueVal = op.getOperand(1);
+        Value falseVal = op.getOperand(2);
+
+        auto i64Ty = builder.getI64Type();
+        auto vecI64Ty = VectorType::get({L_strip}, i64Ty);
+        auto maskTy = VectorType::get({L_strip}, builder.getI1Type());
+
+        auto condSubs = getSubsFor(cond);
+        Value vecCond = condSubs.empty() ? mapping.lookupOrDefault(cond)
+                                         : condSubs[0];
+        if (!dyn_cast<VectorType>(vecCond.getType()))
+          vecCond = vector::BroadcastOp::create(builder, loc, maskTy, vecCond);
+
+        auto trueSubs = getSubsFor(trueVal);
+        Value vecTrue = trueSubs.empty() ? mapping.lookupOrDefault(trueVal)
+                                         : trueSubs[0];
+        if (trueVal.getType().isIndex() &&
+            !dyn_cast<VectorType>(vecTrue.getType())) {
+          auto cast = arith::IndexCastOp::create(builder, loc, i64Ty, vecTrue);
+          vecTrue = vector::BroadcastOp::create(builder, loc, vecI64Ty, cast);
+        }
+
+        auto falseSubs = getSubsFor(falseVal);
+        Value vecFalse = falseSubs.empty() ? mapping.lookupOrDefault(falseVal)
+                                           : falseSubs[0];
+        if (falseVal.getType().isIndex() &&
+            !dyn_cast<VectorType>(vecFalse.getType())) {
+          auto cast = arith::IndexCastOp::create(builder, loc, i64Ty, vecFalse);
+          vecFalse = vector::BroadcastOp::create(builder, loc, vecI64Ty, cast);
+        }
+
+        Value selected = arith::SelectOp::create(builder, loc, vecCond,
+                                                  vecTrue, vecFalse);
+        mapping.map(origResult, selected);
+        subVectorMap[origResult] = {selected};
+        return;
+      }
+      // Non-index select falls through to the general arith path below.
+    }
+
+    // General arith pass-through: widen scalar result to sub-vector width.
+    if (op.getNumResults() != 1) {
+      builder.clone(op, mapping);
+      return;
+    }
+    Value origResult = op.getResult(0);
+    Type resTy = origResult.getType();
+
+    if (!resTy.isIntOrFloat()) {
+      // Index, memref, etc. -- clone with mapping.
+      Operation *cloned = builder.clone(op, mapping);
+      mapping.map(origResult, cloned->getResult(0));
+      return;
+    }
+
+    // Determine natural sub-width for the result, clamped to L_strip.
+    // Special case for i1: one mask bit per lane, use L_strip directly.
+    int64_t resBytes = resTy.getIntOrFloatBitWidth() / 8;
+    int64_t Ln_result;
+    if (resBytes == 0) {
+      Ln_result = L_strip;
+    } else {
+      Ln_result = std::min(getRegisterLanesForType(target, resBytes), L_strip);
+    }
+    int64_t numSubOpsResult = L_strip / Ln_result;
+
+    // Build per-operand sub-vector lists aligned to Ln_result.
+    SmallVector<SmallVector<Value>> operandSubs;
+    bool sizingFailed = false;
+    for (Value operand : op.getOperands()) {
+      auto subs = getSubsFor(operand);
+      SmallVector<Value> sized;
+
+      if ((int64_t)subs.size() == numSubOpsResult) {
+        sized = subs;
+      } else if (subs.size() == 1) {
+        Value v = subs[0];
+        auto vecTy = dyn_cast<VectorType>(v.getType());
+        if (!vecTy) {
+          for (int64_t j = 0; j < numSubOpsResult; ++j) sized.push_back(v);
+        } else {
+          int64_t srcW = vecTy.getShape()[0];
+          if (srcW == Ln_result) {
+            sized.push_back(v);
+          } else if (srcW > Ln_result) {
+            for (int64_t j = 0; j < numSubOpsResult; ++j) {
+              Value piece = vector::ExtractStridedSliceOp::create(
+                  builder, loc, v,
+                  /*offsets=*/ArrayRef<int64_t>{j * Ln_result},
+                  /*sizes=*/ArrayRef<int64_t>{Ln_result},
+                  /*strides=*/ArrayRef<int64_t>{1});
+              sized.push_back(piece);
+            }
+          } else {
+            // srcW < Ln_result: narrower than result -- fall back to scalar.
+            sizingFailed = true;
+            break;
+          }
+        }
+      } else {
+        // Multi-piece operand list but wrong count: unsupported in v1.
+        sizingFailed = true;
+        break;
+      }
+      operandSubs.push_back(std::move(sized));
+    }
+
+    if (sizingFailed) {
+      Operation *cloned = builder.clone(op, mapping);
+      mapping.map(origResult, cloned->getResult(0));
+      return;
+    }
+
+    // Fast-math contract flag injection for arith.mulf / arith.addf.
+    //
+    // The `contract` flag allows the backend to fuse fmul+fadd -> vfmadd213ps
+    // without enabling full -ffast-math semantics (no-nan, no-inf, etc.).
+    // Only inject when contract is not already present (MLIR canonicalizer
+    // adds `fastmath<none>` automatically, so we check existing flags).
+    bool injectContractFMF = false;
+    if (mlir::isa<FloatType, VectorType>(resTy)) {
+      if (isa<arith::MulFOp, arith::AddFOp>(op)) {
+        auto existingFMF = arith::FastMathFlags::none;
+        if (auto fmfAttr =
+                op.getAttrOfType<arith::FastMathFlagsAttr>("fastmath"))
+          existingFMF = fmfAttr.getValue();
+        if (!static_cast<bool>(existingFMF & arith::FastMathFlags::contract))
+          injectContractFMF = true;
+      }
+    }
+    Attribute mergedFMFAttr;
+    if (injectContractFMF) {
+      MLIRContext *ctx = builder.getContext();
+      auto existingFMF = arith::FastMathFlags::none;
+      if (auto fmfAttr = op.getAttrOfType<arith::FastMathFlagsAttr>("fastmath"))
+        existingFMF = fmfAttr.getValue();
+      mergedFMFAttr = arith::FastMathFlagsAttr::get(
+          ctx, existingFMF | arith::FastMathFlags::contract);
+    }
+
+    // Emit numSubOpsResult instances of the op at sub-vector width.
+    Type subResTy = VectorType::get({Ln_result}, resTy);
+    SmallVector<Value> resultSubs;
+    resultSubs.reserve(numSubOpsResult);
+    for (int64_t j = 0; j < numSubOpsResult; ++j) {
+      SmallVector<Value> opOperands;
+      for (auto &operandList : operandSubs) opOperands.push_back(operandList[j]);
+      OperationState state(loc, op.getName());
+      state.addOperands(opOperands);
+      state.addAttributes(op.getAttrs());
+      state.addTypes(subResTy);
+      if (mergedFMFAttr) {
+        state.attributes.set(
+            mlir::StringAttr::get(builder.getContext(), "fastmath"),
+            mergedFMFAttr);
+      }
+      Operation *newOp = builder.create(state);
+      resultSubs.push_back(newOp->getResult(0));
+    }
+    mapping.map(origResult, resultSubs[0]);
+    subVectorMap[origResult] = std::move(resultSubs);
+  }
+};  // struct EmitContext
+
+/// Populate `vecLoop`'s body by dispatching each original loop op to the
+/// appropriate per-kind emit helper in EmitContext.
+static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
+                           int64_t L_strip,
+                           ArrayRef<Operation *> accesses,
+                           ArrayRef<lego::AccessClassification> classes,
+                           llvm::StringRef targetStr,
+                           OpBuilder &builder) {
+  builder.setInsertionPointToStart(vecLoop.getBody());
+
+  // Construct context; map orig IV -> new IV upfront.
+  EmitContext ctx{origLoop.getLoc(),
+                  vecLoop.getInductionVar(),
+                  targetStr,
+                  L_strip,
+                  origLoop,
+                  builder,
+                  IRMapping{},
+                  DenseMap<Value, SmallVector<Value>>{}};
+  ctx.mapping.map(origLoop.getInductionVar(), ctx.newIv);
+
+  // Pre-pass: broadcast loop-external scalars to natural sub-vector width.
+  ctx.broadcastExternalScalars();
 
   for (Operation &op : origLoop.getBody()->getOperations()) {
     if (isa<scf::YieldOp>(op))
       continue;  // vecLoop already has its own yield
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------
     // memref.load
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------
     if (auto load = dyn_cast<memref::LoadOp>(&op)) {
       auto it = std::find(accesses.begin(), accesses.end(), &op);
       assert(it != accesses.end() && "load not found in accesses");
       size_t idx = it - accesses.begin();
       const auto &cls = classes[idx];
 
-      if (cls.kind == lego::AccessKind::Unit) {
-        int64_t Ln = getLnForAccess(idx);
-        int64_t numSubOps = L_strip / Ln;
-        Type elemTy = load.getType();
-        auto vecTy = VectorType::get({Ln}, elemTy);
-        Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
-
-        SmallVector<Value> subs;
-        subs.reserve(numSubOps);
-        for (int64_t j = 0; j < numSubOps; ++j) {
-          Value off = makeOffset(baseIv, j, Ln);
-          auto subVec = vector::TransferReadOp::create(
-              builder, loc, vecTy, load.getMemRef(), ValueRange{off},
-              /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
-          subs.push_back(subVec.getVector());
+      switch (cls.kind) {
+        case lego::AccessKind::Unit:
+          ctx.emitUnitLoad(load, cls);
+          break;
+        case lego::AccessKind::Broadcast:
+          ctx.emitBroadcastLoad(load, cls);
+          break;
+        case lego::AccessKind::CrossBlock:
+          ctx.emitCrossBlockLoad(load, cls);
+          break;
+        case lego::AccessKind::Strided:
+          ctx.emitStridedLoad(load, cls);
+          break;
+        case lego::AccessKind::NonAffine:
+          ctx.emitGatherLoad(load, cls);
+          break;
+        default: {
+          // Shouldn't reach here for vectorizable loops.
+          Operation *cloned = builder.clone(*load.getOperation(), ctx.mapping);
+          ctx.mapping.map(load.getResult(), cloned->getResult(0));
+          break;
         }
-        // If numSubOps == 1, we emitted a single vector at Ln == L_strip.
-        // Also map the first sub-vector into IRMapping so that consumers that
-        // look up via mapping (e.g. broadcast loads) still work.
-        mapping.map(load.getResult(), subs[0]);
-        subVectorMap[load.getResult()] = std::move(subs);
-      } else if (cls.kind == lego::AccessKind::Broadcast) {
-        // Loop-invariant load — clone as scalar then broadcast at natural Ln width.
-        // Emit ONE broadcast (one vpbroadcastss) and reuse it numSubOps times.
-        // Same reasoning as the pre-pass scalar fix: the loaded value is invariant;
-        // one physical broadcast register is all that's needed.
-        Operation *clonedLoad = builder.clone(*load.getOperation(), mapping);
-        Type elemTy = load.getType();
-        int64_t elemBytes = elemTy.getIntOrFloatBitWidth() / 8;
-        int64_t Ln = (elemBytes > 0)
-                         ? std::min(getRegisterLanesForType(target, elemBytes), L_strip)
-                         : L_strip;
-        int64_t numSubOps = (Ln > 0) ? (L_strip / Ln) : 1;
-        auto vecTy = VectorType::get({Ln}, elemTy);
-        Value bc = vector::BroadcastOp::create(builder, loc, vecTy,
-                                               clonedLoad->getResult(0));
-        SmallVector<Value> subs(numSubOps, bc);  // one broadcast, numSubOps refs
-        mapping.map(load.getResult(), bc);
-        subVectorMap[load.getResult()] = std::move(subs);
-      } else if (cls.kind == lego::AccessKind::CrossBlock) {
-        // Two adjacent block reads + vector.shuffle.
-        //
-        // Cross-block pattern: addr(iv+0..L-1) is unit-stride for the first
-        // `boundary` lanes, then jumps to the next block for the remaining
-        // (L - boundary) lanes. Synthesise this by:
-        //   1. Reading L lanes from block N (starting at addr(0)).
-        //   2. Reading L lanes from block N+1 (starting at addr(boundary)).
-        //   3. vector.shuffle selects lanes [0..boundary) from blockN and
-        //      lanes [0..L-boundary) from blockNp1.
-        //
-        // v1 restriction: only handle the case where Ln == L_strip.
-        // If CrossBlock is combined with mixed-precision (Ln < L_strip),
-        // fall through to the scalar-clone fallback.
-        int64_t Ln = getLnForAccess(idx);
-        if (Ln == L_strip) {
-          int64_t boundary = cls.boundary;
-          Type elemTy = load.getType();
-          auto vecTy = VectorType::get({Ln}, elemTy);
-          Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
-
-          // R12a: use cls.boundaryJump (the actual address delta from addrs[0]
-          // to addrs[boundary]) to compute the second block's base address.
-          //
-          // Tier-B probes at iv=0..L-1 and records:
-          //   addrs[0]        = address at iv=0  (= base for first block)
-          //   addrs[boundary] = address at iv=boundary (= base for second block)
-          // In the vector body, baseIv = strip-mined iv (runtime).  The first
-          // transfer_read starts at baseIv (which corresponds to addrs[0] at
-          // probe time).  The second block starts boundaryJump elements further:
-          //   blockNp1Iv = baseIv + boundaryJump
-          // where boundaryJump = addrs[boundary] - addrs[0].
-          //
-          // This is correct even for non-contiguous bricks because boundaryJump
-          // encodes the REAL address gap (including any inter-brick padding)
-          // rather than just the lane index.
-          Value boundaryJumpConst =
-              arith::ConstantIndexOp::create(builder, loc, cls.boundaryJump);
-          Value blockNp1Iv =
-              arith::AddIOp::create(builder, loc, baseIv, boundaryJumpConst);
-
-          Value blockN = vector::TransferReadOp::create(
-              builder, loc, vecTy, load.getMemRef(), ValueRange{baseIv},
-              /*padding=*/std::nullopt,
-              /*inBounds=*/ArrayRef<bool>{true});
-          Value blockNp1 = vector::TransferReadOp::create(
-              builder, loc, vecTy, load.getMemRef(), ValueRange{blockNp1Iv},
-              /*padding=*/std::nullopt,
-              /*inBounds=*/ArrayRef<bool>{true});
-
-          // Shuffle indices: [0..boundary) from blockN (concatenation indices
-          // 0..boundary-1), then [0..L-boundary) from blockNp1 (indices
-          // Ln..Ln+(L-boundary)-1 in the concatenation).
-          SmallVector<int64_t> shuffleIndices;
-          shuffleIndices.reserve(Ln);
-          for (int64_t lane = 0; lane < Ln; ++lane) {
-            if (lane < boundary)
-              shuffleIndices.push_back(lane);
-            else
-              shuffleIndices.push_back(Ln + (lane - boundary));
-          }
-          Value shuffled = vector::ShuffleOp::create(builder, loc, blockN,
-                                                     blockNp1, shuffleIndices);
-
-          SmallVector<Value> subs = {shuffled};
-          subVectorMap[load.getResult()] = std::move(subs);
-          mapping.map(load.getResult(), shuffled);
-        } else {
-          // CrossBlock + mixed precision: too complex for v1 — scalar fallback.
-          Operation *cloned = builder.clone(*load.getOperation(), mapping);
-          mapping.map(load.getResult(), cloned->getResult(0));
-        }
-      } else if (cls.kind == lego::AccessKind::Strided) {
-        // R20: Deinterleave path for small constant strides (2, 4, 8).
-        //
-        // For stride=S (where addr(iv+k) = base + k*S):
-        //   1. Load S consecutive blocks of Ln elements each from memory.
-        //      Block b starts at: base + b  (contiguous, stride=1 in physical mem)
-        //      These Ln-element blocks span S*Ln physical elements total.
-        //   2. Use vector.shuffle to extract every S-th element (the elements
-        //      at physical positions 0, S, 2S, 3S, ...).
-        //
-        // This matches how modern compilers (clang, gcc ≥ 10) auto-vectorize
-        // constant-stride loops: they use "load + shuffle-deinterleave" rather
-        // than gather. On x86 AVX-512, the shuffle maps to `vpermt2ps` (1–3
-        // cycles) rather than `vpgatherdps` (10+ cycles for L1-hot data).
-        //
-        // Conditions for the deinterleave path:
-        //   - Stride S is a small constant power-of-2: 2, 4, or 8.
-        //   - S * Ln ≤ some reasonable bound (prevents excessive spilling).
-        //     We cap at S * Ln ≤ 256 lanes (= 8 × 16 = 128 AVX-512 floats
-        //     × 2 blocks for stride-2 = max 32 registers, manageable).
-        //   - The access is a LOAD (not a store — deinterleave applies to reads;
-        //     stores use the inverse interleave, not yet implemented).
-        //
-        // For stride=2, Ln=16:
-        //   Load 32 consecutive floats (2 blocks of 16).
-        //   Shuffle indices: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
-        //   → picks even-indexed elements = every stride-2 element.
-        //
-        // Future: stride-1 is handled by the Unit path. Stride > 8 falls through
-        // to the gather path below (R19).
-
-        int64_t stride = cls.stride / cls.elementBytes;  // stride in elements
-        int64_t Ln = getLnForAccess(idx);
-        bool useDeinterleave = (stride == 2 || stride == 4 || stride == 8) &&
-                               (stride * Ln <= 256);
-
-        if (useDeinterleave) {
-          // Deinterleave path (R20): load S blocks, shuffle to extract stride-S.
-          //
-          // Physical memory layout (stride=2, Ln=16):
-          //   Block 0: A[base+0], A[base+1], ..., A[base+15]   (16 floats = Ln)
-          //   Block 1: A[base+16], ..., A[base+31]             (16 floats = Ln)
-          //   ...
-          //   Block S-1: A[base+(S-1)*Ln], ..., A[base+S*Ln-1]
-          //
-          // We want: result[k] = A[base + k*S]  for k = 0..Ln-1
-          //          = element at physical index k*S
-          //          = Block[k*S / Ln][ k*S % Ln ]
-          //
-          // For stride=2, Ln=16:
-          //   result[0]  = A[base+0]  = Block[0][0]
-          //   result[1]  = A[base+2]  = Block[0][2]
-          //   result[8]  = A[base+16] = Block[1][0]
-          //   result[15] = A[base+30] = Block[1][14]
-          //
-          // The shuffle must operate on the concatenation of all blocks.
-          // We use a sequence of vector.shuffle ops, each taking two adjacent
-          // blocks, and progressively narrow:
-          //   For stride=2: one shuffle on (Block0, Block1), indices = evens.
-          //   For stride=4: two levels:
-          //     Level 1: (Block0, Block1) → select [0,4,8,...] indices = every-4th.
-          //     Level 2: (Block2, Block3) → same.
-          //     Level 3: concat results (shuffle to form final Ln-element vector).
-          //   For stride=8: similar three-level approach.
-          //
-          // v1: implement stride=2 fully, stride=4/8 using stride=2 recursively.
-
-          Type elemTy = load.getType();
-          auto vecTy = VectorType::get({Ln}, elemTy);
-
-          // Compute the base physical address for this load.
-          // The address at iv=baseIv is: origAddr evaluated at origIv=baseIv.
-          // We need addr(baseIv) - (baseIv * stride - baseIv) to get to the
-          // physical base. Simpler: just evaluate origAddr at iv=0 offset, then
-          // load stride*Ln consecutive elements.
-          //
-          // In our strip-mined loop: the new IV `newIv` runs 0, Ln, 2*Ln, ...
-          // The scalar address at newIv is: origAddr evaluated with origIv=newIv.
-          // For stride=2: scalar addr at iv=newIv = newIv*2 + const_offset.
-          // Physical base for the block: we load from addr(newIv=baseIv)
-          // which gives us the first element's physical address.
-          //
-          // Strategy: evaluate cloneAddrDAG at lane 0 to get physBase.
-          Value origIv = origLoop.getInductionVar();
-          Value newIv = mapping.lookupOrDefault(origIv);
-          IRMapping lane0Map;
-          lane0Map.map(origIv, newIv);
-          Value physBase = cloneAddrDAG(load.getIndices().front(),
-                                        lane0Map, builder, origLoop);
-          // physBase = addr(iv=newIv) = newIv * stride + const_offset.
-          // Load S blocks of Ln elements each: Block[b] starts at physBase + b.
-          // Each block is Ln elements wide. Block b starts at physBase + b*Ln.
-          // This gives us S consecutive Ln-element blocks from memory:
-          //   Block[0]: A[physBase + 0*Ln .. physBase + 1*Ln - 1]
-          //   Block[1]: A[physBase + 1*Ln .. physBase + 2*Ln - 1]
-          //   ...
-          //   Block[S-1]: A[physBase + (S-1)*Ln .. physBase + S*Ln - 1]
-          //
-          // For stride=2, Ln=16, this loads A[base .. base+31] in two blocks.
-          // We then shuffle to pick elements at physical positions 0,2,4,...,30
-          // which correspond to the stride-2 logical elements: A[base + k*2].
-          SmallVector<Value> blocks;
-          blocks.reserve(stride);
-          for (int64_t b = 0; b < stride; ++b) {
-            Value blockBase;
-            if (b == 0) {
-              blockBase = physBase;
-            } else {
-              // Block b starts Ln elements after block b-1.
-              Value bOff = arith::ConstantIndexOp::create(builder, loc, b * Ln);
-              blockBase = arith::AddIOp::create(builder, loc, physBase, bOff);
-            }
-            // Load Ln elements starting at blockBase.
-            auto block = vector::TransferReadOp::create(
-                builder, loc, vecTy, load.getMemRef(), ValueRange{blockBase},
-                /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
-            blocks.push_back(block.getVector());
-          }
-
-          // Now deinterleave.
-          // We need to select element k*stride from the concatenation of blocks
-          // where each block is Ln elements wide.
-          //
-          // For stride=2: concat Block0 and Block1 → 2*Ln elements.
-          //   result[k] = concat[k*2] = element at index k*2 in [Block0|Block1].
-          //   Shuffle indices: [0, 2, 4, ..., 2*(Ln-1)] (even indices).
-          //   Using vector.shuffle on (Block0, Block1) with these indices.
-          //
-          // For stride=4: we do two stride=2 passes then combine.
-          //   Pass 1: (Block0, Block1) → even-deinterleave → result01 (Ln/2 useful)
-          //   Pass 2: (Block2, Block3) → even-deinterleave → result23 (Ln/2 useful)
-          //   Wait — stride=4 extract needs indices [0,4,8,...] which is:
-          //     element 0 from Block0, element 4 from Block0, ..., element 0 from Block2, ...
-          //   Simpler: for stride=4, just use (Block0, Block1) with indices [0,4,8,12,16,20,...]
-          //   But vector.shuffle only operates on 2 input vectors, each Ln wide → 2*Ln total.
-          //   The indices must be < 2*Ln. For stride=4 and Ln=16: indices are 0,4,8,12,16,20,24,28
-          //   which stay within [0, 32) = [0, 2*Ln) for Ln=16. Good.
-          //   BUT we also need blocks 2 and 3 for elements 32..63:
-          //   result[8..15] = elements [32,36,40,44,48,52,56,60] = Block2[0], Block2[4], ...
-          //   So we need a second shuffle on (Block2, Block3) and then combine.
-          //   Final: shuffle((Block0,Block1) result, (Block2,Block3) result) with [0..Ln).
-          //
-          // Implementation for stride=2 (most important case):
-          Value result;
-          if (stride == 2) {
-            // indices: [0, 2, 4, ..., 2*(Ln-1)] selects even elements
-            // from the concatenation [Block0 | Block1] (total 2*Ln elements).
-            SmallVector<int64_t> shuffleIdx;
-            shuffleIdx.reserve(Ln);
-            for (int64_t k = 0; k < Ln; ++k)
-              shuffleIdx.push_back(k * 2);
-            result = vector::ShuffleOp::create(builder, loc, blocks[0],
-                                               blocks[1], shuffleIdx);
-          } else if (stride == 4) {
-            // Two passes:
-            // Pass 1: extract [0,4,8,12,...,4*(Ln/2-1)] from [Block0|Block1]
-            //         and [4*(Ln/2).., 4*(Ln-1)] from [Block2|Block3].
-            // For Ln=16: we need 16 results from 4 blocks of 16.
-            // Each block pair covers Ln/2 = 8 results.
-            // Shuffle 1: (Block0, Block1), indices = [0,4,8,12, 16,20,24,28] (Ln/2 elements)
-            // Shuffle 2: (Block2, Block3), indices = [0,4,8,12, 16,20,24,28] (Ln/2 elements)
-            // Merge: (sh1, sh2) → take first Ln/2 from each.
-            int64_t half = Ln / 2;
-            SmallVector<int64_t> halfIdx;
-            halfIdx.reserve(half);
-            for (int64_t k = 0; k < half; ++k)
-              halfIdx.push_back(k * stride);
-            auto half1 = VectorType::get({half}, elemTy);
-            auto sh1Raw = vector::ShuffleOp::create(builder, loc, blocks[0],
-                                                    blocks[1], halfIdx);
-            auto sh2Raw = vector::ShuffleOp::create(builder, loc, blocks[2],
-                                                    blocks[3], halfIdx);
-            // Combine: take all of sh1 then all of sh2 → full Ln vector.
-            SmallVector<int64_t> combineIdx;
-            combineIdx.reserve(Ln);
-            for (int64_t k = 0; k < half; ++k) combineIdx.push_back(k);
-            for (int64_t k = 0; k < half; ++k) combineIdx.push_back(half + k);
-            result = vector::ShuffleOp::create(builder, loc, sh1Raw, sh2Raw,
-                                               combineIdx);
-          } else {
-            // stride == 8: four stride-2 passes then two stride-4 merges.
-            // Process in pairs of blocks: (0,1), (2,3), (4,5), (6,7).
-            // For each pair, deinterleave with stride=4 (select [0,8,16,24...]).
-            // Then combine the four results.
-            int64_t qtr = Ln / 4;
-            SmallVector<int64_t> qtrIdx;
-            qtrIdx.reserve(qtr);
-            for (int64_t k = 0; k < qtr; ++k)
-              qtrIdx.push_back(k * stride);  // [0,8,16,24,...] for stride=8, qtr=4
-
-            SmallVector<Value> halves;
-            for (int64_t p = 0; p < 4; ++p) {
-              auto sh = vector::ShuffleOp::create(builder, loc,
-                                                  blocks[2*p], blocks[2*p+1],
-                                                  qtrIdx);
-              halves.push_back(sh);
-            }
-            // Combine pairs: (h0, h1) → Ln/2 elements, (h2, h3) → Ln/2 elements.
-            SmallVector<int64_t> pairIdx;
-            pairIdx.reserve(Ln / 2);
-            for (int64_t k = 0; k < qtr; ++k) pairIdx.push_back(k);
-            for (int64_t k = 0; k < qtr; ++k) pairIdx.push_back(qtr + k);
-            auto mid01 = vector::ShuffleOp::create(builder, loc,
-                                                   halves[0], halves[1], pairIdx);
-            auto mid23 = vector::ShuffleOp::create(builder, loc,
-                                                   halves[2], halves[3], pairIdx);
-            // Final merge.
-            SmallVector<int64_t> finalIdx;
-            finalIdx.reserve(Ln);
-            for (int64_t k = 0; k < Ln/2; ++k) finalIdx.push_back(k);
-            for (int64_t k = 0; k < Ln/2; ++k) finalIdx.push_back(Ln/2 + k);
-            result = vector::ShuffleOp::create(builder, loc, mid01, mid23, finalIdx);
-          }
-
-          mapping.map(load.getResult(), result);
-          subVectorMap[load.getResult()] = {result};
-        } else {
-        // vector.gather for constant non-unit stride (fall-through for large strides
-        // or when deinterleave conditions not met).
-        //
-        // R19 fix: build per-lane indices by cloning the ORIGINAL scalar
-        // address DAG with origIv substituted by (newIv + j) for each lane j.
-        //
-        // The previous approach used `mapping.lookupOrDefault(addr)` as
-        // baseIv and then added j * cls.stride (byte-stride). This was wrong
-        // for two reasons:
-        //   1. cls.stride is in BYTES, not element units, so the offsets were
-        //      too large by a factor of elementBytes.
-        //   2. If the address expression (e.g. `arith.shli %origIv, 1`) was
-        //      already cloned into mapping by the catch-all pass that processes
-        //      index-type ops, the mapped value is a scalar clone of the
-        //      address — taking that plus byte-stride offsets is wrong because
-        //      the address already encodes the stride.
-        //
-        // The correct approach (mirroring the NonAffine path) is to use
-        // cloneAddrDAG on the ORIGINAL (pre-mapping) address expression with a
-        // fresh per-lane IRMapping that only substitutes origIv → (newIv + j).
-        // This produces element-unit indices that are then assembled into an
-        // index vector for vector.gather.
-        int64_t Ln = getLnForAccess(idx);
-        Type elemTy = load.getType();
-        auto vecTy = VectorType::get({Ln}, elemTy);
-
-        Value origIv = origLoop.getInductionVar();
-        Value origAddr = load.getIndices().front();
-        Value baseIv = mapping.lookupOrDefault(origIv);  // scalar new IV
-
-        SmallVector<Value> indexElements;
-        indexElements.reserve(Ln);
-        for (int64_t j = 0; j < Ln; ++j) {
-          Value laneIv;
-          if (j == 0) {
-            laneIv = baseIv;
-          } else {
-            Value addend = arith::ConstantIndexOp::create(builder, loc, j);
-            laneIv = arith::AddIOp::create(builder, loc, baseIv, addend);
-          }
-          // Clone the ORIGINAL scalar address DAG with origIv -> laneIv.
-          // Use a FRESH IRMapping (not the outer `mapping` which has
-          // vector subs for float values) so that cloneAddrDAG produces
-          // a SCALAR element-unit address for each lane.
-          IRMapping laneMap;
-          laneMap.map(origIv, laneIv);
-          Value laneAddr =
-              cloneAddrDAG(origAddr, laneMap, builder, origLoop);
-          indexElements.push_back(laneAddr);
-        }
-        auto idxVecTy = VectorType::get({Ln}, builder.getIndexType());
-        Value indexVec = vector::FromElementsOp::create(
-            builder, loc, idxVecTy, ValueRange(indexElements));
-
-        auto i1Ty = builder.getI1Type();
-        auto maskTy = VectorType::get({Ln}, i1Ty);
-        Value mask = arith::ConstantOp::create(
-            builder, loc, maskTy,
-            DenseElementsAttr::get(maskTy, builder.getBoolAttr(true)));
-        Value passThru = arith::ConstantOp::create(
-            builder, loc, vecTy,
-            DenseElementsAttr::get(vecTy, builder.getZeroAttr(elemTy)));
-
-        Value c0 = arith::ConstantIndexOp::create(builder, loc, 0);
-        Value gathered = vector::GatherOp::create(
-            builder, loc, vecTy, load.getMemRef(), ValueRange{c0}, indexVec,
-            mask, passThru, /*alignment=*/mlir::IntegerAttr{});
-
-        mapping.map(load.getResult(), gathered);
-        subVectorMap[load.getResult()] = {gathered};
-        }  // end of gather fallback (large strides)
-      } else if (cls.kind == lego::AccessKind::NonAffine) {
-        // vector.gather for non-affine (irregular) access.
-        // Build the index vector by cloning the address DAG Ln times with
-        // the induction variable substituted by iv+0, iv+1, ..., iv+Ln-1.
-        int64_t Ln = getLnForAccess(idx);
-        Type elemTy = load.getType();
-        auto vecTy = VectorType::get({Ln}, elemTy);
-
-        Value origIv = origLoop.getInductionVar();
-        Value origAddr = load.getIndices().front();
-        Value baseIv = mapping.lookupOrDefault(origIv);
-
-        SmallVector<Value> indexElements;
-        indexElements.reserve(Ln);
-        for (int64_t j = 0; j < Ln; ++j) {
-          Value laneIv;
-          if (j == 0) {
-            laneIv = baseIv;
-          } else {
-            Value addend = arith::ConstantIndexOp::create(builder, loc, j);
-            laneIv = arith::AddIOp::create(builder, loc, baseIv, addend);
-          }
-          // Clone the address DAG with origIv -> laneIv.
-          IRMapping laneMap;
-          laneMap.map(origIv, laneIv);
-          // Also forward any already-mapped values (loop-invariant scalars etc.)
-          // into the lane map so we don't re-clone them.
-          Value laneAddr =
-              cloneAddrDAG(origAddr, laneMap, builder, origLoop);
-          indexElements.push_back(laneAddr);
-        }
-        auto idxVecTy = VectorType::get({Ln}, builder.getIndexType());
-        Value indexVec = vector::FromElementsOp::create(
-            builder, loc, idxVecTy, ValueRange(indexElements));
-
-        auto i1Ty = builder.getI1Type();
-        auto maskTy = VectorType::get({Ln}, i1Ty);
-        Value mask = arith::ConstantOp::create(
-            builder, loc, maskTy,
-            DenseElementsAttr::get(maskTy, builder.getBoolAttr(true)));
-        Value passThru = arith::ConstantOp::create(
-            builder, loc, vecTy,
-            DenseElementsAttr::get(vecTy, builder.getZeroAttr(elemTy)));
-
-        Value c0 = arith::ConstantIndexOp::create(builder, loc, 0);
-        Value gathered = vector::GatherOp::create(
-            builder, loc, vecTy, load.getMemRef(), ValueRange{c0}, indexVec,
-            mask, passThru, /*alignment=*/mlir::IntegerAttr{});
-
-        mapping.map(load.getResult(), gathered);
-        subVectorMap[load.getResult()] = {gathered};
-      } else {
-        // Shouldn't reach here for vectorizable loops.
-        Operation *cloned = builder.clone(*load.getOperation(), mapping);
-        mapping.map(load.getResult(), cloned->getResult(0));
       }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------
     // memref.store
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------
     } else if (auto store = dyn_cast<memref::StoreOp>(&op)) {
       auto it = std::find(accesses.begin(), accesses.end(), &op);
       assert(it != accesses.end() && "store not found in accesses");
       size_t idx = it - accesses.begin();
       const auto &cls = classes[idx];
 
-      if (cls.kind == lego::AccessKind::Unit) {
-        int64_t Ln = getLnForAccess(idx);
-        int64_t numSubOps = L_strip / Ln;
-        auto subs = getSubsFor(store.getValue());
+      if (cls.kind == lego::AccessKind::Unit)
+        ctx.emitUnitStore(store, cls);
+      else
+        builder.clone(*store.getOperation(), ctx.mapping);
 
-        if ((int64_t)subs.size() == numSubOps) {
-          Value baseIv = mapping.lookupOrDefault(store.getIndices().front());
-          for (int64_t j = 0; j < numSubOps; ++j) {
-            Value off = makeOffset(baseIv, j, Ln);
-            vector::TransferWriteOp::create(
-                builder, loc, subs[j], store.getMemRef(), ValueRange{off},
-                /*inBounds=*/ArrayRef<bool>{true});
-          }
-        } else {
-          // Sub-vector count mismatch — scalar fallback.
-          builder.clone(*store.getOperation(), mapping);
-        }
-      } else {
-        builder.clone(*store.getOperation(), mapping);
-      }
-
-    // -----------------------------------------------------------------------
-    // R17: scf.if predicated maskedstore.
-    // Supports the pattern:
-    //   scf.if %cond {
-    //     memref.store %val, %B[%i] : memref<?xT>
-    //   }
-    // where %cond is a scalar i1 produced by arith.cmpf/cmpi in this loop.
-    // Lowers to: vector.maskedstore with the vectorised condition as mask.
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------
+    // scf.if -- R17 predicated maskedstore
+    // -------------------------------------------------------------------
     } else if (auto ifOp = dyn_cast<scf::IfOp>(&op)) {
-      // We only reach here if bodyOK allowed this scf.if (single then-branch,
-      // stores only inside the then-block).
-      Value cond = ifOp.getCondition();
-      // Look up the vectorized condition — should be a vector<L x i1> from
-      // the R16 cmpi/cmpf vectorization in the same loop body.
-      Value vecCond = mapping.lookupOrDefault(cond);
-      // If the condition didn't get vectorized (it's still scalar), broadcast it.
-      if (!dyn_cast<VectorType>(vecCond.getType())) {
-        auto maskTy = VectorType::get({L_strip}, builder.getI1Type());
-        vecCond = vector::BroadcastOp::create(builder, loc, maskTy, vecCond);
-      }
-      // Emit a vector.maskedstore for each store in the then-block.
-      for (Operation &thenOp : ifOp.getThenRegion().front().getOperations()) {
-        if (isa<scf::YieldOp>(thenOp)) continue;
-        auto store = dyn_cast<memref::StoreOp>(&thenOp);
-        if (!store) continue;
-        // Find the access classification for this store.
-        auto it = std::find(accesses.begin(), accesses.end(), &thenOp);
-        Value valueToStore;
-        Value baseIdx;
-        if (it != accesses.end()) {
-          size_t idx = it - accesses.begin();
-          auto subs = getSubsFor(store.getValue());
-          // Use the full L_strip-wide sub-vector (or first sub if multiple).
-          valueToStore = subs.empty() ? mapping.lookupOrDefault(store.getValue()) : subs[0];
-          baseIdx = mapping.lookupOrDefault(store.getIndices().front());
-        } else {
-          // Store not in accesses list (shouldn't happen for body-OK stores).
-          valueToStore = mapping.lookupOrDefault(store.getValue());
-          baseIdx = mapping.lookupOrDefault(store.getIndices().front());
-        }
-        // Ensure value is a vector<L_strip x T> type.
-        Type elemTy = store.getValue().getType();
-        if (!dyn_cast<VectorType>(valueToStore.getType())) {
-          // Scalar — broadcast it.
-          auto vecTy = VectorType::get({L_strip}, elemTy);
-          valueToStore = vector::BroadcastOp::create(builder, loc, vecTy, valueToStore);
-        }
-        // Use the full-width mask directly (both mask and value are L_strip wide).
-        Value finalMask = vecCond;
-        // Emit vector.maskedstore(base, [baseIdx], mask, valueToStore).
-        vector::MaskedStoreOp::create(builder, loc, store.getMemRef(),
-                                      ValueRange{baseIdx}, finalMask, valueToStore,
-                                      /*alignment=*/mlir::IntegerAttr{});
-      }
+      ctx.emitMaskedStore(ifOp, accesses, classes);
 
-    // -----------------------------------------------------------------------
-    // arith (and any other) ops — mixed-precision aware pass-through
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------
+    // arith and all other ops -- mixed-precision aware pass-through
+    // -------------------------------------------------------------------
     } else {
-      // R16: special handling for arith.cmpi / arith.cmpf / arith.select
-      // when operands are index-typed. Index has no fixed bit width in MLIR,
-      // so we convert index operands to i64 vectors before building the
-      // comparison/select.
-      if (isa<arith::CmpIOp, arith::CmpFOp>(&op)) {
-        // Check if any operand is index-typed.
-        bool hasIndexOperand = llvm::any_of(op.getOperands(), [](Value v) {
-          return v.getType().isIndex();
-        });
-        if (hasIndexOperand) {
-          // Convert index operands to i64 then vectorize.
-          auto i64Ty = builder.getI64Type();
-          SmallVector<Value> convertedOperands;
-          for (Value operand : op.getOperands()) {
-            Value mapped = mapping.lookupOrDefault(operand);
-            if (operand.getType().isIndex()) {
-              // Convert scalar index → i64 then broadcast, OR convert
-              // vector<L x index> → vector<L x i64>.
-              if (auto vecTy = dyn_cast<VectorType>(mapped.getType())) {
-                // Shouldn't happen (index vectors invalid in MLIR),
-                // so fall back to scalar conversion + broadcast.
-                (void)vecTy;
-                // This path shouldn't be reached normally.
-                convertedOperands.push_back(mapped);
-              } else {
-                // Scalar index → cast to i64, broadcast to vector<L_strip x i64>.
-                auto i64Val = arith::IndexCastOp::create(builder, loc, i64Ty, mapped);
-                auto vecI64Ty = VectorType::get({L_strip}, i64Ty);
-                auto bc = vector::BroadcastOp::create(builder, loc, vecI64Ty, i64Val);
-                convertedOperands.push_back(bc);
-              }
-            } else {
-              // Non-index operand — look up normally (should already be vectorized
-              // if it was produced inside the loop).
-              auto subs = getSubsFor(operand);
-              convertedOperands.push_back(subs.empty() ? mapped : subs[0]);
-            }
-          }
-          // Emit the comparison on i64 vectors → result is vector<L_strip x i1>.
-          auto maskTy = VectorType::get({L_strip}, builder.getI1Type());
-          OperationState state(loc, op.getName());
-          state.addOperands(convertedOperands);
-          state.addAttributes(op.getAttrs());
-          state.addTypes(maskTy);
-          Operation *newCmp = builder.create(state);
-          Value resultVec = newCmp->getResult(0);
-          mapping.map(op.getResult(0), resultVec);
-          subVectorMap[op.getResult(0)] = {resultVec};
-          continue;
-        }
-        // Non-index cmpi/cmpf falls through to the normal arith catch-all below.
-      }
-
-      if (isa<arith::SelectOp>(&op)) {
-        // R16: arith.select on index-typed result.
-        // select(cond: i1, trueVal, falseVal) where result is index-typed.
-        // Lower by converting operands to i64 and result back to index if needed.
-        Value cond = op.getOperand(0);
-        Value trueVal = op.getOperand(1);
-        Value falseVal = op.getOperand(2);
-        Value origResult = op.getResult(0);
-        Type resTy = origResult.getType();
-
-        if (resTy.isIndex()) {
-          // Index-typed select: convert true/false to i64 vectors,
-          // emit vector<L x i64> select, map result.
-          auto i64Ty = builder.getI64Type();
-          auto vecI64Ty = VectorType::get({L_strip}, i64Ty);
-          auto maskTy = VectorType::get({L_strip}, builder.getI1Type());
-
-          // Get vectorized condition.
-          auto condSubs = getSubsFor(cond);
-          Value vecCond = condSubs.empty() ? mapping.lookupOrDefault(cond) : condSubs[0];
-          if (!dyn_cast<VectorType>(vecCond.getType())) {
-            vecCond = vector::BroadcastOp::create(builder, loc, maskTy, vecCond);
-          }
-
-          // Get/convert true operand.
-          auto trueSubs = getSubsFor(trueVal);
-          Value vecTrue = trueSubs.empty() ? mapping.lookupOrDefault(trueVal) : trueSubs[0];
-          if (trueVal.getType().isIndex()) {
-            if (!dyn_cast<VectorType>(vecTrue.getType())) {
-              auto cast = arith::IndexCastOp::create(builder, loc, i64Ty, vecTrue);
-              vecTrue = vector::BroadcastOp::create(builder, loc, vecI64Ty, cast);
-            }
-          }
-
-          // Get/convert false operand.
-          auto falseSubs = getSubsFor(falseVal);
-          Value vecFalse = falseSubs.empty() ? mapping.lookupOrDefault(falseVal) : falseSubs[0];
-          if (falseVal.getType().isIndex()) {
-            if (!dyn_cast<VectorType>(vecFalse.getType())) {
-              auto cast = arith::IndexCastOp::create(builder, loc, i64Ty, vecFalse);
-              vecFalse = vector::BroadcastOp::create(builder, loc, vecI64Ty, cast);
-            }
-          }
-
-          Value selected = arith::SelectOp::create(builder, loc, vecCond, vecTrue, vecFalse);
-          mapping.map(origResult, selected);
-          subVectorMap[origResult] = {selected};
-          continue;
-        }
-        // Non-index select falls through to normal arith catch-all.
-      }
-
-      // For ops with no results or non-scalar/float results: clone unchanged.
-      if (op.getNumResults() != 1) {
-        builder.clone(op, mapping);
-        continue;
-      }
-      Value origResult = op.getResult(0);
-      Type resTy = origResult.getType();
-
-      if (!resTy.isIntOrFloat()) {
-        // Index, memref, etc. — clone with mapping unchanged.
-        Operation *cloned = builder.clone(op, mapping);
-        mapping.map(origResult, cloned->getResult(0));
-        continue;
-      }
-
-      // Determine target sub-width for the result, clamped to L_strip.
-      // Same reasoning as getLnForAccess: when T < R_T, L_strip < R_T and
-      // using the unclamped R_T yields numSubOpsResult = 0.
-      //
-      // Special case for i1 (boolean) results: arith.cmpi / arith.cmpf return
-      // a mask type whose width matches the input operand lane count — one bit
-      // per lane, not one register per byte. Using bitWidth/8 = 0 here would
-      // make getRegisterLanesForType return 1 (the elementBytes=0 fallback),
-      // giving Ln_result=1 and subResTy=vector<1xi1> which is wrong.
-      // Fix: treat i1 as 1-bit-per-lane, use L_strip directly.
-      int64_t resBytes = resTy.getIntOrFloatBitWidth() / 8;
-      int64_t Ln_result;
-      if (resBytes == 0) {
-        // 1-bit result (i1 from cmpi/cmpf): one mask bit per lane.
-        Ln_result = L_strip;
-      } else {
-        Ln_result = std::min(getRegisterLanesForType(target, resBytes),
-                             L_strip);
-      }
-      int64_t numSubOpsResult = L_strip / Ln_result;
-
-      // Build per-operand sub-vector lists aligned to Ln_result.
-      SmallVector<SmallVector<Value>> operandSubs;
-      bool sizingFailed = false;
-      for (Value operand : op.getOperands()) {
-        auto subs = getSubsFor(operand);
-        SmallVector<Value> sized;
-
-        if ((int64_t)subs.size() == numSubOpsResult) {
-          // Already the right number of pieces.
-          sized = subs;
-        } else if (subs.size() == 1) {
-          Value v = subs[0];
-          auto vecTy = dyn_cast<VectorType>(v.getType());
-          if (!vecTy) {
-            // Scalar — replicate for all sub-ops.
-            for (int64_t j = 0; j < numSubOpsResult; ++j) sized.push_back(v);
-          } else {
-            int64_t srcW = vecTy.getShape()[0];
-            if (srcW == Ln_result) {
-              sized.push_back(v);
-            } else if (srcW > Ln_result) {
-              // Wider vector — slice into Ln_result-wide pieces.
-              for (int64_t j = 0; j < numSubOpsResult; ++j) {
-                Value piece = vector::ExtractStridedSliceOp::create(
-                    builder, loc, v,
-                    /*offsets=*/ArrayRef<int64_t>{j * Ln_result},
-                    /*sizes=*/ArrayRef<int64_t>{Ln_result},
-                    /*strides=*/ArrayRef<int64_t>{1});
-                sized.push_back(piece);
-              }
-            } else {
-              // srcW < Ln_result: narrower than result (should not happen in
-              // well-formed Tier-A kernels; fall back to scalar clone).
-              sizingFailed = true;
-              break;
-            }
-          }
-        } else {
-          // Multi-piece operand list but wrong count: unsupported in v1.
-          sizingFailed = true;
-          break;
-        }
-        operandSubs.push_back(std::move(sized));
-      }
-
-      if (sizingFailed) {
-        // Conservative fallback: clone scalar.
-        Operation *cloned = builder.clone(op, mapping);
-        mapping.map(origResult, cloned->getResult(0));
-        continue;
-      }
-
-      // Emit numSubOpsResult instances of the op, each at sub-vector width.
-      Type subResTy = VectorType::get({Ln_result}, resTy);
-      SmallVector<Value> resultSubs;
-      resultSubs.reserve(numSubOpsResult);
-
-      // Fast-math flag injection for floating-point arith ops on vector types.
-      //
-      // When the original scalar op is arith.mulf or arith.addf and does NOT
-      // already carry a fastmath attribute, inject `fastmath<contract>`.
-      // The `contract` flag is the minimal flag needed for FMA fusion: it allows
-      // the backend to contract fmul(a,b)+c → vfmadd213ps without enabling
-      // the full semantics of -ffast-math (no-nan, no-inf, etc.).
-      //
-      // This matches what Clang emits when `-ffast-math` is passed: the LLVM IR
-      // carries `fmul fast` / `fadd fast` on the vectorised ops, which enables
-      // `contract` (among other flags).  Without `contract`, LLVM cannot fuse
-      // a separate vmulps + vaddps into a single vfmadd213ps, costing one extra
-      // 512-bit operation per 16-float group.
-      //
-      // Safety: `contract` does NOT change rounding mode or introduce non-IEEE
-      // results; it only allows reordering of the multiply-add into a fused op
-      // which is IEEE-correct when the FMA hardware round occurs once.
-      // We only inject the flag when:
-      //   (a) the result is a float or vector-of-float type (not integer), and
-      //   (b) the op is arith.mulf or arith.addf (the specific ops that fuse), and
-      //   (c) no fastmath attr is already present on the original op.
-      //
-      // Note: we do NOT add fast-math to arith.divf or arith.subf by default —
-      // division already has ffast-math implications, and subf is not fusable.
-      // Fast-math flag injection for floating-point arith ops on vector types.
-      //
-      // When the original scalar op is arith.mulf or arith.addf and does NOT
-      // already carry a fastmath attribute, inject `fastmath<contract>`.
-      // The `contract` flag is the minimal flag needed for FMA fusion: it allows
-      // the backend to contract fmul(a,b)+c → vfmadd213ps without enabling
-      // the full semantics of -ffast-math (no-nan, no-inf, etc.).
-      //
-      // This matches what Clang emits when `-ffast-math` is passed: the LLVM IR
-      // carries `fmul fast` / `fadd fast` on the vectorised ops, which enables
-      // `contract` (among other flags).  Without `contract`, LLVM cannot fuse
-      // a separate vmulps + vaddps into a single vfmadd213ps, costing one extra
-      // 512-bit operation per 16-float group.
-      //
-      // Safety: `contract` does NOT change rounding mode or introduce non-IEEE
-      // results; it only allows reordering of the multiply-add into a fused op
-      // which is IEEE-correct when the FMA hardware round occurs once.
-      // We only inject the flag when:
-      //   (a) the result is a float or vector-of-float type (not integer), and
-      //   (b) the op is arith.mulf or arith.addf (the specific ops that fuse), and
-      //   (c) the existing fastmath flags do NOT already include contract.
-      //
-      // Note: MLIR's canonicalizer adds `fastmath<none>` to arith.mulf/addf
-      // automatically, so we cannot use `!op.hasAttr("fastmath")` — instead we
-      // check whether the existing flags already include the `contract` bit.
-      //
-      // Note: we do NOT add fast-math to arith.divf or arith.subf by default —
-      // division already has ffast-math implications, and subf is not fusable.
-      bool injectContractFMF = false;
-      if (mlir::isa<FloatType, VectorType>(resTy)) {
-        if (isa<arith::MulFOp, arith::AddFOp>(op)) {
-          // Check if contract is already present in the existing flags.
-          auto existingFMF = arith::FastMathFlags::none;
-          if (auto fmfAttr = op.getAttrOfType<arith::FastMathFlagsAttr>("fastmath"))
-            existingFMF = fmfAttr.getValue();
-          bool hasContract = static_cast<bool>(
-              existingFMF & arith::FastMathFlags::contract);
-          if (!hasContract)
-            injectContractFMF = true;
-        }
-      }
-
-      // Pre-compute the merged fastmath attr to use for the cloned sub-ops.
-      // We do this once (before the j-loop) and override the fastmath attr in
-      // the OperationState after addAttributes() copies the original attrs.
-      // This avoids duplicate-key issues: addAttributes() copies fastmath<none>
-      // (or whatever existing flags), and then we overwrite with the merged value.
-      Attribute mergedFMFAttr;
-      if (injectContractFMF) {
-        MLIRContext *ctx = builder.getContext();
-        auto existingFMF = arith::FastMathFlags::none;
-        if (auto fmfAttr = op.getAttrOfType<arith::FastMathFlagsAttr>("fastmath"))
-          existingFMF = fmfAttr.getValue();
-        auto merged = existingFMF | arith::FastMathFlags::contract;
-        mergedFMFAttr = arith::FastMathFlagsAttr::get(ctx, merged);
-      }
-
-      for (int64_t j = 0; j < numSubOpsResult; ++j) {
-        SmallVector<Value> opOperands;
-        for (auto &operandList : operandSubs) opOperands.push_back(operandList[j]);
-        OperationState state(loc, op.getName());
-        state.addOperands(opOperands);
-        state.addAttributes(op.getAttrs());
-        state.addTypes(subResTy);
-        // Inject/merge contract fast-math flag for mulf/addf.
-        // We use NamedAttrList::set() which overwrites any existing "fastmath"
-        // entry added by addAttributes() above, preventing duplicate-key errors.
-        if (mergedFMFAttr) {
-          state.attributes.set(
-              mlir::StringAttr::get(builder.getContext(), "fastmath"),
-              mergedFMFAttr);
-        }
-        Operation *newOp = builder.create(state);
-        resultSubs.push_back(newOp->getResult(0));
-      }
-      // Map first sub-vector for backward compat with scalar consumers.
-      mapping.map(origResult, resultSubs[0]);
-      subVectorMap[origResult] = std::move(resultSubs);
+      ctx.emitArithOp(op);
     }
   }
 }
