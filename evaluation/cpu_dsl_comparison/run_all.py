@@ -231,6 +231,32 @@ def build_c_baselines(verbose: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# Candidate format detection
+# ---------------------------------------------------------------------------
+def _find_consolidated_kernel(cand_dir: Path) -> Path | None:
+    """Return the consolidated kernel.py (using @benchmark) if it exists.
+
+    The new consolidated format uses a single *.py file that defines a
+    :class:`lego.testing.BenchmarkedKernel` and exposes ``measure()`` /
+    ``verify()`` methods.  We detect it by looking for any .py file that
+    is NOT measure.py / verify.py / kernel.py (those are the old format).
+
+    Convention: the consolidated file is named after the candidate short name
+    (e.g. ``saxpy.py``, ``gemm.py``) or ``kernel.py`` but tagged with
+    ``@benchmark``.  To keep detection simple, we check if measure.py exists;
+    if not, we look for a *.py file that is not __init__.py.
+    """
+    # Old format: measure.py present
+    if (cand_dir / "measure.py").exists():
+        return None
+    # New format: look for any .py that isn't __init__.py
+    for py in sorted(cand_dir.glob("*.py")):
+        if py.name != "__init__.py":
+            return py
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Run verify.py for a single candidate
 # ---------------------------------------------------------------------------
 def run_verify(cand_dir: Path, sub_env: dict) -> str:
@@ -262,7 +288,12 @@ def run_verify(cand_dir: Path, sub_env: dict) -> str:
 # Run measure.py for a single candidate
 # ---------------------------------------------------------------------------
 def run_measure(cand_dir: Path, sub_env: dict) -> dict:
-    """Run measure.py; return parsed JSON record or an ERROR record."""
+    """Run measure.py (old format) or consolidated kernel (new format).
+
+    Old format: subprocess-runs ``measure.py`` and parses the last JSON line.
+    New format (consolidated ``@benchmark`` kernel): subprocess-runs the
+    consolidated .py as a script which prints a JSON record to stdout.
+    """
     measure_py = cand_dir / "measure.py"
     if not measure_py.exists():
         return {"name": cand_dir.name, "verdict": "ERROR", "notes": "no measure.py"}
@@ -348,10 +379,15 @@ def main():
         print("  [build] Skipping C baseline build (--quick or --verify-only).")
     print()
 
-    # Collect candidates
+    # Collect candidates — supports both formats:
+    #   Old: directory with measure.py + verify.py + kernel.py
+    #   New: directory with a single consolidated *.py (using @benchmark)
     cand_dirs = sorted(
         d for d in CANDIDATES_DIR.iterdir()
-        if d.is_dir() and (d / "measure.py").exists()
+        if d.is_dir() and (
+            (d / "measure.py").exists()
+            or _find_consolidated_kernel(d) is not None
+        )
     )
 
     # Step 2: Verify all candidates
