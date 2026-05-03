@@ -252,3 +252,54 @@ def test_range_loop_runs():
 
     np.testing.assert_array_equal(X, np.zeros(N, dtype=np.float32),
                                   err_msg="fill_zeros JIT result mismatch")
+
+
+# ---------------------------------------------------------------------------
+# Tier 9 — bitwise ops (&, |, ^, >>, <<) — needed for Morton-style kernels
+# ---------------------------------------------------------------------------
+
+_N_BITWISE = 256
+
+@cpu_kernel(grid=(_N_BITWISE,), tile=(16,))
+def _bitwise_gather(A: Buffer[_N_BITWISE], B: Buffer[_N_BITWISE]):
+    for i in tile_range:
+        # Simple bit-interleave: spread even/odd bits, reinterleave.
+        ti = i & 0x5555
+        tj = (i >> 1) & 0x5555
+        idx = ti | (tj << 1)
+        idx = idx & (_N_BITWISE - 1)
+        B[i] = A[idx]
+
+
+def test_bitwise_build_module():
+    """Bitwise ops (&, >>, |, <<) generate valid MLIR without exception."""
+    ctx, module = _bitwise_gather.build_module()
+    mlir_text = str(module)
+    # The body should contain arith bitwise ops (andi, shrui, ori, shli)
+    assert "arith.andi" in mlir_text, "Expected arith.andi in MLIR"
+    assert "arith.shrui" in mlir_text, "Expected arith.shrui in MLIR"
+    assert "arith.ori" in mlir_text, "Expected arith.ori in MLIR"
+    assert "arith.shli" in mlir_text, "Expected arith.shli in MLIR"
+
+
+@_skip_no_x86_pipeline
+def test_bitwise_gather_runs():
+    """Bitwise gather kernel: compile, run, compare to numpy reference."""
+    N = _N_BITWISE
+    rng = np.random.default_rng(99)
+    A = rng.standard_normal(N).astype(np.float32)
+    B = np.zeros(N, dtype=np.float32)
+
+    # NumPy reference: same Morton-style index transform.
+    indices = np.arange(N, dtype=np.int32)
+    ti = indices & 0x5555
+    tj = (indices >> 1) & 0x5555
+    idx = ti | (tj << 1)
+    idx = idx & (N - 1)
+    B_ref = A[idx]
+
+    jit_fn = _bitwise_gather.compile(target="cpu")
+    jit_fn(A, B)
+
+    np.testing.assert_allclose(B, B_ref, rtol=1e-5,
+                               err_msg="bitwise gather JIT result mismatch")
