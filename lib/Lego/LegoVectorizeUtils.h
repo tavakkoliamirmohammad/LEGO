@@ -63,18 +63,25 @@ AffineVal evalLinearInIV(Value v, Value iv,
 struct AccessClassification {
   AccessKind kind = AccessKind::NonAffine;
   int64_t stride = 0;           // for Strided
-  int64_t boundary = -1;        // for CrossBlock: lane index of the discontinuity
-  int64_t boundaryJump = 0;     // for CrossBlock: address jump at the discontinuity
-                                //   = addrs[boundary] - addrs[boundary-1]
-                                //   (in element-index units, not bytes).
-                                //   The second-block base is at addrs[boundary],
-                                //   i.e. baseIv + (addrs[boundary] - addrs[0]).
-                                //   R12a threads this through so emission uses the
-                                //   real jump rather than assuming contiguous bricks.
-  int64_t block0Offset = 0;     // for CrossBlock: addrs[0] - iv_at_probe_start
-                                //   (the offset from iv to the first probed address).
+  int64_t boundary = -1;        // for CrossBlock (single-boundary): lane index
+  int64_t boundaryJump = 0;     // for CrossBlock (single-boundary): address delta
+                                //   = addrs[boundary] - addrs[0] (element units).
+                                //   R12a threads this so emission uses the real jump.
+  int64_t block0Offset = 0;     // for CrossBlock: addrs[0] - iv_at_probe_start.
                                 //   Normally 0 for Tier-B probing from iv=0.
   int64_t elementBytes = 0;     // sizeof(element) in bytes
+
+  // R12: multi-boundary support.
+  // boundaries[k] = lane index of the k-th discontinuity (sorted ascending).
+  // boundaryJumps[k] = addrs[boundaries[k]] - addrs[0] (element-index units).
+  // boundaries.size() == boundaryJumps.size().
+  // When boundaries.size() == 1, boundary == boundaries[0] and
+  //   boundaryJump == boundaryJumps[0] (backward-compatible single-boundary).
+  // When boundaries.size() > 1, emitCrossBlockLoad uses the multi-boundary
+  //   path: (N+1) transfer_reads + a chain of vector.shuffles.
+  // boundaries.empty() iff kind != CrossBlock.
+  llvm::SmallVector<int64_t, 4> boundaries;
+  llvm::SmallVector<int64_t, 4> boundaryJumps;
 };
 
 // Symbolic stride solver — Tier A.

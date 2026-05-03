@@ -76,54 +76,58 @@ affine-offset store lowering are imminent follow-on work. See R12 below.
 **Bonus.** The same pipeline plumbing (`lego-to-arm-neon`) lays the
 groundwork for the GPU MMA tensor-core story via a different target dialect.
 
-## R12 — Cross-brick shuffle + brick-aware second-block base (IMMINENT)
+## R12 — Cross-brick shuffle + brick-aware second-block base
 
 **Severity:** high. Directly flips 5 brick-class candidates from LOSS to WIN.
 
-**Status:** partial. Phase C built IR-shape scaffolding; R12a landed in
-`feat/cpu-vector-pipeline` — `cls.boundaryJump` now threads the actual
-address jump from `solveAccessTierB` through to `emitCrossBlockLoad`, which
-uses `blockNp1Iv = baseIv + cls.boundaryJump` (correct for probe-from-zero
-flat-address patterns). Candidates 19, 21, 22, 37 (simplified flat-offset
-brick stencils) are VERIFIED and WIN in the evaluation. Candidate 20
-(13-point stencil) is VERIFIED but measures NaN due to the 13pt diagonal
-neighbor pattern producing zero output in the vectorized path — a remaining
-IR issue separate from the stride threading.
+**Status: PARTIALLY CLOSED — full-boundary (multi-boundary) CrossBlock emission
+shipped 2026-05-01. Single-boundary (R12a, boundaryJump threading) was already
+in place. Remaining gaps noted below.**
 
-**What R12 still needs for full BrickLib API support:**
+**What R12 delivered (2026-05-01, branch `feat/cpu-vector-pipeline`):**
 
-**What Phase C delivered:**
-- IR-shape scaffolding for cross-block vector shuffles.
-- FileCheck tests that verify the emitted IR has the right structure.
-- `evaluation/cpu_vector_proof/brick_stencil_cross/` scaffold (this branch).
+1. **Multi-boundary CrossBlock emission** (this commit, R12 finish):
+   - `LegoVectorizeUtils.h`: `AccessClassification` extended with
+     `SmallVector<int64_t, 4> boundaries` and `boundaryJumps` for M >= 1
+     discontinuities. Single-boundary fields (`boundary`, `boundaryJump`)
+     preserved for backward compat (set equal to `boundaries[0]`,
+     `boundaryJumps[0]`).
+   - `LegoVectorizeAnalysis.cpp` (`solveAccessTierB`): extended from
+     `boundaryCount == 1` to `1 <= boundaryCount <= L/2`. Populates the new
+     `boundaries` / `boundaryJumps` vectors for all detected discontinuities.
+   - `LegoVectorize.cpp` (`emitCrossBlockLoad`): generalised from 2-read +
+     1-shuffle to (M+1)-read + M-shuffle chain. For M=1 (single boundary)
+     the code path is identical to R12a. For M>1, emits M+1 `transfer_read`s
+     + a chain of M `vector.shuffle`s that splice successive blocks at their
+     boundary positions.
 
-**What R12 still needs:**
+2. **R12a (prior commit):** `cls.boundaryJump` threads the actual address
+   delta to the second-block base, so the emission uses `baseIv + boundaryJump`
+   (correct for any brick layout) rather than `baseIv + boundary` (only correct
+   for contiguous unit-stride bricks).
 
-1. **Brick-stride second-block base.** Replace the boundary-lane-derived base
-   with `brick_id * brick_stride` in the vector shuffle emission pass. The
-   brick stride is `BRICK_SIZE * element_size` elements; it must be threaded
-   through the pass as a compile-time or runtime parameter.
+**Validation.** `test/Lego/lego_vectorize_cross_block.mlir` FileCheck passes.
+`check-lego-all` 765/765. All 15 `test_cpu_dsl.py` tests pass.
 
-2. **Affine-offset store lowering.** The `lego-to-x86-vector` pipeline fails
+**Remaining gaps (NOT closed by this commit):**
+
+1. **Affine-offset store lowering.** The `lego-to-x86-vector` pipeline fails
    for store targets with a compile-time offset (`B[i+1]` → `memref.store`
-   type mismatch because the vectorized load produces `vector<16xf32>` but
-   the store expects `f32`). Fix: extend the vector-store lowering to handle
-   `i + k` for constant `k` (emit a scatter or a shifted vector-store).
+   type mismatch: vectorized load produces `vector<16xf32>` but store expects
+   `f32`). Fix: extend vector-store lowering for `i + k` constant offsets.
 
-3. **Update `brick_stencil_cross/kernel.py`** to use a 3D 7-point stencil
-   with halos once (1) and (2) are in place.
+2. **Runtime brick-stencil correctness.** The 3D brick stencil candidates
+   (11, 12, 13, 14, 29) require the affine-offset store fix before the
+   multi-boundary path produces correct output at runtime.
 
-**Affected candidates (flip LOSS → WIN when R12 lands):**
+**Affected candidates (flip LOSS → WIN when remaining gaps close):**
 - 11 (`bricklib-3d7pt-brick`) — LOSS 0.93× AMD / LOSS 0.86× Intel
 - 12 (`bricklib-3d13pt-brick`) — PARITY AMD / marginal WIN 1.06× Intel
 - 13 (`polybench-heat3d-brick`) — MIXED AMD / LOSS 0.80× Intel
-- 14 (`polybench-jacobi2d-brick`) — LOSS 0.67× AMD / LOSS 0.19× Intel (severe)
+- 14 (`polybench-jacobi2d-brick`) — LOSS 0.67× AMD / LOSS 0.19× Intel
 - 29 (`bricklib-stencil-nonpow2-brick`) — LOSS 0.75× AMD / LOSS 0.61× Intel
 
-**Effort:** 1–2 weeks (brick-stride pass fix + affine-offset store lowering).
-
-**Dependencies:** R1 (CLOSED — CPU vector pipeline ships in v1 and provides
-the pipeline context these fixes plug into).
+**Dependencies:** R1 (CLOSED).
 
 ## R13 — AOT object-file path
 

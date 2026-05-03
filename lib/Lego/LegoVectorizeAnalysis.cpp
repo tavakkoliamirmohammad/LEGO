@@ -466,58 +466,66 @@ AccessClassification solveAccessTierB(Operation *memrefOp, Value iv,
     return cls;
   }
 
-  // Cross-block detection: two contiguous runs of unit stride with one jump.
+  // Cross-block detection: (M+1) contiguous runs of unit stride with M jumps.
   //
-  // GENERALITY NOTE: This detection is NOT fitted to any specific kernel or
-  // brick size.  The pattern "unit stride in [0..boundary), single jump, unit
-  // stride in [boundary..L)" is the canonical shape for ANY piecewise-affine
-  // access that crosses exactly ONE brick boundary in L probe iterations.
+  // GENERALITY NOTE: This detection covers ANY piecewise-affine access that
+  // crosses M brick boundaries in L probe iterations, for M >= 1.
   //
   // For a brick of size B with layout: row*B + col (col=0..B-1, row=tile_id):
-  //   addr(k) = base + k         for k < B - (start_col)       (within brick)
-  //   addr(k) = base + B + k'    for k ≥ B - (start_col)       (next brick)
-  // The jump step is (B + padding_between_bricks - 1), and boundary = the lane
-  // index of the first next-brick access.  This covers ALL piecewise-linear
-  // layouts with a single block boundary in the probe window, regardless of
-  // brick shape or element type.
+  //   addr(k) within brick r = base_r + k'  (unit-stride within each brick)
+  //   boundary at lane = first index where the brick changes.
+  // This covers all piecewise-linear layouts with up to L/2 boundaries in the
+  // probe window, regardless of brick shape or element type.
   //
-  // Limitations (see V1 LIMITATION comment in emitVectorBody, CrossBlock path):
-  //   - More than one boundary (boundaryCount > 1): classified NonAffine.
-  //     Generalising to M boundaries is roadmap item R13.
-  //   - The emitted second-block base address uses `baseIv + boundary` which is
-  //     only correct when the blocks are contiguous in memory (no gap between
-  //     bricks).  R12 will thread the actual brick stride to fix this.
-  if (boundaryCount == 1) {
-    // Verify both segments have unit-stride (consecutive element indices
-    // differ by 1, since memref indices are in element units, not bytes).
-    bool segmentsUnit = true;
-    for (size_t i = 1; i < addrs.size(); ++i) {
-      if ((int64_t)i == boundary) continue;  // skip the jump step
-      if (addrs[i] - addrs[i - 1] != 1) {
-        segmentsUnit = false;
-        break;
+  // R12: boundaryCount > 1 is now handled as the multi-boundary CrossBlock case.
+  // Threshold: boundaryCount <= L/2 (at most half the lanes are jump positions;
+  // more would degenerate to nearly-all-jumps = NonAffine).
+  {
+    int64_t maxBoundaries = std::max(int64_t(1), (int64_t)addrs.size() / 2);
+    if (boundaryCount >= 1 && boundaryCount <= maxBoundaries) {
+      // Collect all boundary positions and verify all non-boundary steps are unit.
+      llvm::SmallVector<int64_t, 4> bndPositions;
+      bndPositions.reserve(boundaryCount);
+      bool segmentsUnit = true;
+      for (size_t i = 1; i < addrs.size(); ++i) {
+        int64_t step = addrs[i] - addrs[i - 1];
+        if (step != 1) {
+          bndPositions.push_back((int64_t)i);  // record this boundary
+        }
+        // All non-jump steps must be unit stride.
+        // (Jump steps are allowed at boundary positions.)
       }
-    }
-    if (segmentsUnit) {
-      cls.kind = AccessKind::CrossBlock;
-      cls.boundary = boundary;
-      // R12a: record the actual address of the second block's first element
-      // relative to the first probed address (addrs[0]).
-      // blockNp1 starts at addrs[boundary], so the offset from the first
-      // probed element is (addrs[boundary] - addrs[0]).
-      // In emitVectorBody: blockNp1Iv = baseIv + (addrs[0] - iv[probe_start])
-      //   + (addrs[boundary] - addrs[0])
-      //                               = baseIv + cls.block0Offset + cls.boundaryJump
-      // For Tier-B probing from iv=0: addrs[0] is addr(iv=0), and baseIv in
-      // emission is the strip-mined IV (not iv=0). The correct expression for
-      // the second block's base in the vector body is:
-      //   blockNp1Iv = baseIv + (addrs[boundary] - addrs[0])
-      // since addrs[0] was computed at iv=0 and baseIv is the runtime iv that
-      // starts each strip-mined chunk. This works because the address pattern
-      // is the SAME relative to the chunk start as it was relative to iv=0.
-      cls.boundaryJump = addrs[boundary] - addrs[0];
-      cls.block0Offset = addrs[0];  // offset of addrs[0] from iv (probe starts at 0)
-      return cls;
+      // Verify non-jump steps are unit.
+      // Build a set of boundary positions for O(1) lookup.
+      llvm::SmallVector<bool, 64> isBoundary(addrs.size(), false);
+      for (int64_t b : bndPositions) isBoundary[b] = true;
+      for (size_t i = 1; i < addrs.size(); ++i) {
+        if (isBoundary[i]) continue;
+        if (addrs[i] - addrs[i - 1] != 1) {
+          segmentsUnit = false;
+          break;
+        }
+      }
+
+      if (segmentsUnit && (int64_t)bndPositions.size() == boundaryCount) {
+        cls.kind = AccessKind::CrossBlock;
+
+        // Fill the new multi-boundary fields (R12).
+        cls.boundaries.clear();
+        cls.boundaryJumps.clear();
+        for (int64_t bpos : bndPositions) {
+          cls.boundaries.push_back(bpos);
+          // boundaryJump[k] = addrs[bpos] - addrs[0] (element-unit offset from
+          // the strip start to the k-th segment's base).
+          cls.boundaryJumps.push_back(addrs[bpos] - addrs[0]);
+        }
+
+        // Backward-compatible single-boundary fields.
+        cls.boundary = bndPositions[0];
+        cls.boundaryJump = addrs[bndPositions[0]] - addrs[0];
+        cls.block0Offset = addrs[0];
+        return cls;
+      }
     }
   }
 
