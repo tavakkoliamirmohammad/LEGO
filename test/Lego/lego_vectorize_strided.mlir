@@ -1,18 +1,22 @@
 // RUN: lego-opt %s --lego-vectorize | FileCheck %s
 
 // Strided access pattern tests.
-// Strided accesses (stride > 1) are emitted as vector.gather by the vectorizer.
 // TierA classifies: coeff > 1 with constant factor → Strided.
 // TierB classifies: uniform non-unit differences → Strided.
+//
+// R20 deinterleave: for constant element-strides in {2, 4, 8} with
+// stride * Ln <= 256 elements, the vectorizer emits S transfer_reads +
+// vector.shuffle chains instead of vector.gather. This mirrors what
+// clang/gcc produce for "load + vpermt2ps" deinterleave sequences.
+// Large strides (> 8) or runtime strides fall back to vector.gather.
 
 // ---------------------------------------------------------------------------
-// Test 1: Column-major access in a row loop — stride is a constant value.
-// addr(i) = i * 64: constant stride of 64 elements → Strided.
-// Emitted as vector.gather with index vector [base, base+64, base+128, ...].
+// Test 1: Column-major access — stride 64 elements (> 8) → gather.
+// addr(i) = i * 64: large constant stride → falls back to vector.gather.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @col_major_static_stride
 // CHECK: vector.gather
-// CHECK-NOT: vector.transfer_read
+// CHECK-NOT: vector.shuffle
 func.func @col_major_static_stride(%A: memref<1024xf64>, %B: memref<1024xf64>) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -29,9 +33,8 @@ func.func @col_major_static_stride(%A: memref<1024xf64>, %B: memref<1024xf64>) {
 // -----
 
 // ---------------------------------------------------------------------------
-// Test 2: Stride that is a runtime value — TierA yields NonAffine (muli by
-// non-constant). TierB probes concrete values but since N is a function arg
-// (not evaluable), falls back to NonAffine → also emits vector.gather.
+// Test 2: Runtime stride (non-constant) → NonAffine → vector.gather.
+// TierA yields NonAffine (muli by non-constant). Falls back to gather.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @col_major_runtime_stride
 // CHECK: vector.gather
@@ -50,11 +53,13 @@ func.func @col_major_runtime_stride(%A: memref<?xf64>, %B: memref<?xf64>, %N: in
 // -----
 
 // ---------------------------------------------------------------------------
-// Test 3: Stride exactly equal to register-width-in-bytes (8 elements = 64 bytes
-// for f64). Still a constant stride greater than 1 element → Strided → gather.
+// Test 3: Stride 8 elements (f64, 8*8=64 bytes) — in {2,4,8}, stride*Ln=64.
+// R20 deinterleave fires: 8 transfer_reads + shuffle chain, no gather.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @stride_equals_regwidth
-// CHECK: vector.gather
+// CHECK: vector.transfer_read
+// CHECK: vector.shuffle
+// CHECK-NOT: vector.gather
 func.func @stride_equals_regwidth(%A: memref<?xf64>, %B: memref<?xf64>) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -70,12 +75,14 @@ func.func @stride_equals_regwidth(%A: memref<?xf64>, %B: memref<?xf64>) {
 // -----
 
 // ---------------------------------------------------------------------------
-// Test 4: Two strided accesses in the same loop with different strides.
-// addr_a(i) = i*4, addr_b(i) = i*16.
-// Both loads emit vector.gather; the unit-stride store gets transfer_write.
+// Test 4: Two strided accesses with different strides.
+// A[i*4]: f64, element-stride=4 (in {2,4,8}) → R20 deinterleave (4 reads + shuffle).
+// B[i*16]: f64, element-stride=16 (> 8) → falls back to vector.gather.
+// C[i]: unit-stride store → transfer_write.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @two_strided_accesses
-// CHECK: vector.gather
+// CHECK: vector.transfer_read
+// CHECK: vector.shuffle
 // CHECK: vector.gather
 // CHECK: vector.transfer_write
 func.func @two_strided_accesses(%A: memref<?xf64>, %B: memref<?xf64>, %C: memref<?xf64>) {
@@ -100,14 +107,15 @@ func.func @two_strided_accesses(%A: memref<?xf64>, %B: memref<?xf64>, %C: memref
 // ---------------------------------------------------------------------------
 // Test 5: Mixed unit + strided in same loop.
 // A[i] is unit-stride → transfer_read.
-// B[i*4] is strided → gather.
-// The mixed case still vectorizes: unit-stride accesses are present (hasUnit=true),
-// so the cost-penalty is not applied. Result: transfer_read + gather + transfer_write.
+// B[i*4]: f64, element-stride=4 (in {2,4,8}) → R20 deinterleave (4 reads + shuffle).
+// The result: transfer_reads + shuffle + transfer_write. No gather.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @mixed_unit_strided
 // CHECK: vector.transfer_read {{.*}} : memref<?xf64>, vector<8xf64>
-// CHECK: vector.gather
+// CHECK: vector.transfer_read {{.*}} : memref<?xf64>, vector<8xf64>
+// CHECK: vector.shuffle
 // CHECK: vector.transfer_write {{.*}} : vector<8xf64>, memref<?xf64>
+// CHECK-NOT: vector.gather
 func.func @mixed_unit_strided(%A: memref<?xf64>, %B: memref<?xf64>, %C: memref<?xf64>) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index

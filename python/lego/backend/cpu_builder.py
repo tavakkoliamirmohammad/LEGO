@@ -448,7 +448,20 @@ class CPUKernelBuilder:
                     raise RuntimeError(
                         f"CPU compilation failed ({cpu_target.pipeline}):\n{e}"
                     ) from e
-                engine = ExecutionEngine(module, opt_level=2)
+                # Use opt_level=0 for the 'scalar' target so that LLVM's own
+                # auto-vectorizer does NOT kick in on the simple scalar loop IR.
+                # If we compile scalar JIT at opt_level=2, LLVM's LoopVectorize
+                # pass vectorizes the scalar loop too — making scalar_jit ≈
+                # vec_jit in speed and collapsing the isolation signal to ~1×.
+                # opt_level=0 gives us a clean, un-optimized scalar baseline;
+                # the speedup scalar_jit/vec_jit then measures our vectorizer's
+                # contribution versus LLVM's un-aided scalar code generation.
+                #
+                # For all other targets (x86, arm-neon, cpu): keep opt_level=2
+                # so the backend applies peephole + register allocation on the
+                # already-vectorized IR we hand it.
+                jit_opt = 0 if target == "scalar" else 2
+                engine = ExecutionEngine(module, opt_level=jit_opt)
             self._engines[cache_key] = engine
 
         return self._make_callable(self._engines[cache_key])

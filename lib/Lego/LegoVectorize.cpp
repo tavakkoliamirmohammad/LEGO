@@ -1300,7 +1300,224 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
           mapping.map(load.getResult(), cloned->getResult(0));
         }
       } else if (cls.kind == lego::AccessKind::Strided) {
-        // vector.gather for constant non-unit stride.
+        // R20: Deinterleave path for small constant strides (2, 4, 8).
+        //
+        // For stride=S (where addr(iv+k) = base + k*S):
+        //   1. Load S consecutive blocks of Ln elements each from memory.
+        //      Block b starts at: base + b  (contiguous, stride=1 in physical mem)
+        //      These Ln-element blocks span S*Ln physical elements total.
+        //   2. Use vector.shuffle to extract every S-th element (the elements
+        //      at physical positions 0, S, 2S, 3S, ...).
+        //
+        // This matches how modern compilers (clang, gcc ≥ 10) auto-vectorize
+        // constant-stride loops: they use "load + shuffle-deinterleave" rather
+        // than gather. On x86 AVX-512, the shuffle maps to `vpermt2ps` (1–3
+        // cycles) rather than `vpgatherdps` (10+ cycles for L1-hot data).
+        //
+        // Conditions for the deinterleave path:
+        //   - Stride S is a small constant power-of-2: 2, 4, or 8.
+        //   - S * Ln ≤ some reasonable bound (prevents excessive spilling).
+        //     We cap at S * Ln ≤ 256 lanes (= 8 × 16 = 128 AVX-512 floats
+        //     × 2 blocks for stride-2 = max 32 registers, manageable).
+        //   - The access is a LOAD (not a store — deinterleave applies to reads;
+        //     stores use the inverse interleave, not yet implemented).
+        //
+        // For stride=2, Ln=16:
+        //   Load 32 consecutive floats (2 blocks of 16).
+        //   Shuffle indices: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
+        //   → picks even-indexed elements = every stride-2 element.
+        //
+        // Future: stride-1 is handled by the Unit path. Stride > 8 falls through
+        // to the gather path below (R19).
+
+        int64_t stride = cls.stride / cls.elementBytes;  // stride in elements
+        int64_t Ln = getLnForAccess(idx);
+        bool useDeinterleave = (stride == 2 || stride == 4 || stride == 8) &&
+                               (stride * Ln <= 256);
+
+        if (useDeinterleave) {
+          // Deinterleave path (R20): load S blocks, shuffle to extract stride-S.
+          //
+          // Physical memory layout (stride=2, Ln=16):
+          //   Block 0: A[base+0], A[base+1], ..., A[base+15]   (16 floats = Ln)
+          //   Block 1: A[base+16], ..., A[base+31]             (16 floats = Ln)
+          //   ...
+          //   Block S-1: A[base+(S-1)*Ln], ..., A[base+S*Ln-1]
+          //
+          // We want: result[k] = A[base + k*S]  for k = 0..Ln-1
+          //          = element at physical index k*S
+          //          = Block[k*S / Ln][ k*S % Ln ]
+          //
+          // For stride=2, Ln=16:
+          //   result[0]  = A[base+0]  = Block[0][0]
+          //   result[1]  = A[base+2]  = Block[0][2]
+          //   result[8]  = A[base+16] = Block[1][0]
+          //   result[15] = A[base+30] = Block[1][14]
+          //
+          // The shuffle must operate on the concatenation of all blocks.
+          // We use a sequence of vector.shuffle ops, each taking two adjacent
+          // blocks, and progressively narrow:
+          //   For stride=2: one shuffle on (Block0, Block1), indices = evens.
+          //   For stride=4: two levels:
+          //     Level 1: (Block0, Block1) → select [0,4,8,...] indices = every-4th.
+          //     Level 2: (Block2, Block3) → same.
+          //     Level 3: concat results (shuffle to form final Ln-element vector).
+          //   For stride=8: similar three-level approach.
+          //
+          // v1: implement stride=2 fully, stride=4/8 using stride=2 recursively.
+
+          Type elemTy = load.getType();
+          auto vecTy = VectorType::get({Ln}, elemTy);
+
+          // Compute the base physical address for this load.
+          // The address at iv=baseIv is: origAddr evaluated at origIv=baseIv.
+          // We need addr(baseIv) - (baseIv * stride - baseIv) to get to the
+          // physical base. Simpler: just evaluate origAddr at iv=0 offset, then
+          // load stride*Ln consecutive elements.
+          //
+          // In our strip-mined loop: the new IV `newIv` runs 0, Ln, 2*Ln, ...
+          // The scalar address at newIv is: origAddr evaluated with origIv=newIv.
+          // For stride=2: scalar addr at iv=newIv = newIv*2 + const_offset.
+          // Physical base for the block: we load from addr(newIv=baseIv)
+          // which gives us the first element's physical address.
+          //
+          // Strategy: evaluate cloneAddrDAG at lane 0 to get physBase.
+          Value origIv = origLoop.getInductionVar();
+          Value newIv = mapping.lookupOrDefault(origIv);
+          IRMapping lane0Map;
+          lane0Map.map(origIv, newIv);
+          Value physBase = cloneAddrDAG(load.getIndices().front(),
+                                        lane0Map, builder, origLoop);
+          // physBase = addr(iv=newIv) = newIv * stride + const_offset.
+          // Load S blocks of Ln elements each: Block[b] starts at physBase + b.
+          // Each block is Ln elements wide. Block b starts at physBase + b*Ln.
+          // This gives us S consecutive Ln-element blocks from memory:
+          //   Block[0]: A[physBase + 0*Ln .. physBase + 1*Ln - 1]
+          //   Block[1]: A[physBase + 1*Ln .. physBase + 2*Ln - 1]
+          //   ...
+          //   Block[S-1]: A[physBase + (S-1)*Ln .. physBase + S*Ln - 1]
+          //
+          // For stride=2, Ln=16, this loads A[base .. base+31] in two blocks.
+          // We then shuffle to pick elements at physical positions 0,2,4,...,30
+          // which correspond to the stride-2 logical elements: A[base + k*2].
+          SmallVector<Value> blocks;
+          blocks.reserve(stride);
+          for (int64_t b = 0; b < stride; ++b) {
+            Value blockBase;
+            if (b == 0) {
+              blockBase = physBase;
+            } else {
+              // Block b starts Ln elements after block b-1.
+              Value bOff = arith::ConstantIndexOp::create(builder, loc, b * Ln);
+              blockBase = arith::AddIOp::create(builder, loc, physBase, bOff);
+            }
+            // Load Ln elements starting at blockBase.
+            auto block = vector::TransferReadOp::create(
+                builder, loc, vecTy, load.getMemRef(), ValueRange{blockBase},
+                /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
+            blocks.push_back(block.getVector());
+          }
+
+          // Now deinterleave.
+          // We need to select element k*stride from the concatenation of blocks
+          // where each block is Ln elements wide.
+          //
+          // For stride=2: concat Block0 and Block1 → 2*Ln elements.
+          //   result[k] = concat[k*2] = element at index k*2 in [Block0|Block1].
+          //   Shuffle indices: [0, 2, 4, ..., 2*(Ln-1)] (even indices).
+          //   Using vector.shuffle on (Block0, Block1) with these indices.
+          //
+          // For stride=4: we do two stride=2 passes then combine.
+          //   Pass 1: (Block0, Block1) → even-deinterleave → result01 (Ln/2 useful)
+          //   Pass 2: (Block2, Block3) → even-deinterleave → result23 (Ln/2 useful)
+          //   Wait — stride=4 extract needs indices [0,4,8,...] which is:
+          //     element 0 from Block0, element 4 from Block0, ..., element 0 from Block2, ...
+          //   Simpler: for stride=4, just use (Block0, Block1) with indices [0,4,8,12,16,20,...]
+          //   But vector.shuffle only operates on 2 input vectors, each Ln wide → 2*Ln total.
+          //   The indices must be < 2*Ln. For stride=4 and Ln=16: indices are 0,4,8,12,16,20,24,28
+          //   which stay within [0, 32) = [0, 2*Ln) for Ln=16. Good.
+          //   BUT we also need blocks 2 and 3 for elements 32..63:
+          //   result[8..15] = elements [32,36,40,44,48,52,56,60] = Block2[0], Block2[4], ...
+          //   So we need a second shuffle on (Block2, Block3) and then combine.
+          //   Final: shuffle((Block0,Block1) result, (Block2,Block3) result) with [0..Ln).
+          //
+          // Implementation for stride=2 (most important case):
+          Value result;
+          if (stride == 2) {
+            // indices: [0, 2, 4, ..., 2*(Ln-1)] selects even elements
+            // from the concatenation [Block0 | Block1] (total 2*Ln elements).
+            SmallVector<int64_t> shuffleIdx;
+            shuffleIdx.reserve(Ln);
+            for (int64_t k = 0; k < Ln; ++k)
+              shuffleIdx.push_back(k * 2);
+            result = vector::ShuffleOp::create(builder, loc, blocks[0],
+                                               blocks[1], shuffleIdx);
+          } else if (stride == 4) {
+            // Two passes:
+            // Pass 1: extract [0,4,8,12,...,4*(Ln/2-1)] from [Block0|Block1]
+            //         and [4*(Ln/2).., 4*(Ln-1)] from [Block2|Block3].
+            // For Ln=16: we need 16 results from 4 blocks of 16.
+            // Each block pair covers Ln/2 = 8 results.
+            // Shuffle 1: (Block0, Block1), indices = [0,4,8,12, 16,20,24,28] (Ln/2 elements)
+            // Shuffle 2: (Block2, Block3), indices = [0,4,8,12, 16,20,24,28] (Ln/2 elements)
+            // Merge: (sh1, sh2) → take first Ln/2 from each.
+            int64_t half = Ln / 2;
+            SmallVector<int64_t> halfIdx;
+            halfIdx.reserve(half);
+            for (int64_t k = 0; k < half; ++k)
+              halfIdx.push_back(k * stride);
+            auto half1 = VectorType::get({half}, elemTy);
+            auto sh1Raw = vector::ShuffleOp::create(builder, loc, blocks[0],
+                                                    blocks[1], halfIdx);
+            auto sh2Raw = vector::ShuffleOp::create(builder, loc, blocks[2],
+                                                    blocks[3], halfIdx);
+            // Combine: take all of sh1 then all of sh2 → full Ln vector.
+            SmallVector<int64_t> combineIdx;
+            combineIdx.reserve(Ln);
+            for (int64_t k = 0; k < half; ++k) combineIdx.push_back(k);
+            for (int64_t k = 0; k < half; ++k) combineIdx.push_back(half + k);
+            result = vector::ShuffleOp::create(builder, loc, sh1Raw, sh2Raw,
+                                               combineIdx);
+          } else {
+            // stride == 8: four stride-2 passes then two stride-4 merges.
+            // Process in pairs of blocks: (0,1), (2,3), (4,5), (6,7).
+            // For each pair, deinterleave with stride=4 (select [0,8,16,24...]).
+            // Then combine the four results.
+            int64_t qtr = Ln / 4;
+            SmallVector<int64_t> qtrIdx;
+            qtrIdx.reserve(qtr);
+            for (int64_t k = 0; k < qtr; ++k)
+              qtrIdx.push_back(k * stride);  // [0,8,16,24,...] for stride=8, qtr=4
+
+            SmallVector<Value> halves;
+            for (int64_t p = 0; p < 4; ++p) {
+              auto sh = vector::ShuffleOp::create(builder, loc,
+                                                  blocks[2*p], blocks[2*p+1],
+                                                  qtrIdx);
+              halves.push_back(sh);
+            }
+            // Combine pairs: (h0, h1) → Ln/2 elements, (h2, h3) → Ln/2 elements.
+            SmallVector<int64_t> pairIdx;
+            pairIdx.reserve(Ln / 2);
+            for (int64_t k = 0; k < qtr; ++k) pairIdx.push_back(k);
+            for (int64_t k = 0; k < qtr; ++k) pairIdx.push_back(qtr + k);
+            auto mid01 = vector::ShuffleOp::create(builder, loc,
+                                                   halves[0], halves[1], pairIdx);
+            auto mid23 = vector::ShuffleOp::create(builder, loc,
+                                                   halves[2], halves[3], pairIdx);
+            // Final merge.
+            SmallVector<int64_t> finalIdx;
+            finalIdx.reserve(Ln);
+            for (int64_t k = 0; k < Ln/2; ++k) finalIdx.push_back(k);
+            for (int64_t k = 0; k < Ln/2; ++k) finalIdx.push_back(Ln/2 + k);
+            result = vector::ShuffleOp::create(builder, loc, mid01, mid23, finalIdx);
+          }
+
+          mapping.map(load.getResult(), result);
+          subVectorMap[load.getResult()] = {result};
+        } else {
+        // vector.gather for constant non-unit stride (fall-through for large strides
+        // or when deinterleave conditions not met).
         //
         // R19 fix: build per-lane indices by cloning the ORIGINAL scalar
         // address DAG with origIv substituted by (newIv + j) for each lane j.
@@ -1369,6 +1586,7 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
 
         mapping.map(load.getResult(), gathered);
         subVectorMap[load.getResult()] = {gathered};
+        }  // end of gather fallback (large strides)
       } else if (cls.kind == lego::AccessKind::NonAffine) {
         // vector.gather for non-affine (irregular) access.
         // Build the index vector by cloning the address DAG Ln times with
