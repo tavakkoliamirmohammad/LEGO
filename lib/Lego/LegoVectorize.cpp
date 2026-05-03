@@ -74,6 +74,82 @@ static int64_t lcm_i64(int64_t a, int64_t b) {
 }
 
 // ---------------------------------------------------------------------------
+// R18b: iter_args associative reduction info
+// ---------------------------------------------------------------------------
+
+enum class ReduceKind {
+  None,
+  AddF,  // arith.addf  (identity = 0.0)
+  MulF,  // arith.mulf  (identity = 1.0)
+  AddI,  // arith.addi  (identity = 0)
+  MulI,  // arith.muli  (identity = 1)
+  AndI,  // arith.andi  (identity = all-ones)
+  OrI,   // arith.ori   (identity = 0)
+  XOrI,  // arith.xori  (identity = 0)
+};
+
+struct ReductionInfo {
+  ReduceKind kind = ReduceKind::None;
+  Value iterArg;   // The region iter_arg (block argument inside the loop).
+  Value initVal;   // The initial value fed into iter_args(init).
+  Value computed;  // The "other" operand of the reduction op (not iterArg).
+  // The reduction op itself (arith.addf / arith.mulf / ...).
+  Operation *reduceOp = nullptr;
+};
+
+// Detect whether `forOp` is a simple associative reduction:
+//   - exactly 1 iter_arg
+//   - the scf.yield returns exactly one value
+//   - the yielded value is the result of an associative arith op
+//     where one operand IS the iter_arg and the other is some computed value
+//     (which may itself be IV-dependent but must NOT be the iter_arg).
+static bool detectIterArgsReduction(scf::ForOp forOp, ReductionInfo &info) {
+  if (forOp.getNumRegionIterArgs() != 1) return false;
+  if (forOp.getNumResults() != 1)       return false;
+
+  Value iterArg = forOp.getRegionIterArgs().front();
+  Value initVal = forOp.getInitArgs().front();
+
+  auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+  if (yieldOp.getNumOperands() != 1) return false;
+  Value yielded = yieldOp.getOperand(0);
+
+  // Walk back one level: the yielded value must be the result of an
+  // associative binary arith op (addf, mulf, addi, muli, andi, ori, xori).
+  Operation *defOp = yielded.getDefiningOp();
+  if (!defOp || defOp->getNumOperands() != 2 || defOp->getNumResults() != 1)
+    return false;
+
+  ReduceKind kind = ReduceKind::None;
+  if (isa<arith::AddFOp>(defOp)) kind = ReduceKind::AddF;
+  else if (isa<arith::MulFOp>(defOp)) kind = ReduceKind::MulF;
+  else if (isa<arith::AddIOp>(defOp)) kind = ReduceKind::AddI;
+  else if (isa<arith::MulIOp>(defOp)) kind = ReduceKind::MulI;
+  else if (isa<arith::AndIOp>(defOp)) kind = ReduceKind::AndI;
+  else if (isa<arith::OrIOp>(defOp))  kind = ReduceKind::OrI;
+  else if (isa<arith::XOrIOp>(defOp)) kind = ReduceKind::XOrI;
+  if (kind == ReduceKind::None) return false;
+
+  // One operand must be the iter_arg.
+  Value op0 = defOp->getOperand(0);
+  Value op1 = defOp->getOperand(1);
+  Value computed;
+  if (op0 == iterArg) computed = op1;
+  else if (op1 == iterArg) computed = op0;
+  else return false;  // neither operand is the iter_arg
+
+  // The computed value must NOT be the iter_arg (tautological but be explicit).
+  if (computed == iterArg) return false;
+
+  info.kind     = kind;
+  info.iterArg  = iterArg;
+  info.initVal  = initVal;
+  info.computed = computed;
+  info.reduceOp = defOp;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Per-loop analysis state
 // ---------------------------------------------------------------------------
 
@@ -82,7 +158,8 @@ struct LoopAnalysis {
   llvm::SmallVector<Operation *, 4> accesses;
   llvm::SmallVector<lego::AccessClassification, 4> classes;
   int64_t L_strip = 1;  // strip-mine factor (Task 7); rewrite lands in Task 8.
-  // Future: double score (Task 8).
+  // R18b: if non-None, this loop is an iter_args associative reduction.
+  ReductionInfo reduction;
 };
 
 static llvm::SmallVector<LoopAnalysis, 0>
@@ -466,13 +543,40 @@ static int64_t computeMinDepDistanceWithSMT(LoopAnalysis &a,
 static int64_t computeStripMineFactor(LoopAnalysis &a,
                                       llvm::StringRef target,
                                       bool enableSmt = false) {
+  // R18b: if the loop carries an associative iter_arg reduction (e.g. a dot
+  // product), detect it and allow vectorization with a vector accumulator.
+  // The rewrite is handled in emitVectorBody/stripMineForOp when
+  // a.reduction.kind != None.
+  //
+  // Safety guard: if the loop has iter_args but the reduction is NOT a simple
+  // associative pattern (iter_args that we can handle), skip vectorization.
+  // Otherwise the emitVectorBody path would produce incorrect IR.
+  if (a.forOp.getNumRegionIterArgs() > 0) {
+    ReductionInfo redInfo;
+    if (detectIterArgsReduction(a.forOp, redInfo)) {
+      a.reduction = redInfo;
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[lego-vectorize] computeStripMineFactor: iter_args"
+                    " reduction detected — R18b vectorization path\n");
+      // Fall through: compute L_strip normally from accesses.
+      // The reduction will be handled at emit time.
+    } else {
+      // iter_args present but NOT a simple associative reduction — skip.
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[lego-vectorize] computeStripMineFactor: L_strip=1"
+                    " — iter_args with non-associative pattern (unsupported)\n");
+      return 1;
+    }
+  }
+
   // Reduction guard (R18): if any STORE access has a Broadcast index (i.e. the
   // stored element's address is loop-invariant) AND there is a LOAD on the same
-  // memref with an equally Broadcast index, the loop is a scalar reduction
-  // (e.g. C[j] += A[j*K+k] * B[k*N+j%N] summing over k).  Vectorizing such a
-  // loop requires a horizontal reduction (vector.reduction) after the vector
-  // body — not yet implemented in emitVectorBody.  Return L_strip=1 (no-vec).
-  {
+  // memref with an equally Broadcast index, the loop is a scalar
+  // read-modify-write reduction (e.g. C[j] += A[j*K+k] * B[k*N+j%N]).
+  // This guard now only applies when there is NO iter_args reduction (which
+  // is handled by R18b above).  If it IS an iter_args reduction, we skip this
+  // guard and let R18b handle it.
+  if (a.reduction.kind == ReduceKind::None) {
     Value iv = a.forOp.getInductionVar();
     // Quick check: any store with Broadcast index?
     bool hasBroadcastStore = false;
@@ -696,7 +800,64 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
 struct StripMineResult {
   scf::ForOp vecLoop;
   scf::ForOp tailLoop;
+  // R18b: for reduction loops, the aligned upper bound and vector type.
+  // vecLoop has a vector iter_arg; tailLoop has a scalar iter_arg initialized
+  // from the vector.reduction result.
+  Value alignedUb;
+  VectorType vecAccType;        // vector<L x T> — type of vec accumulator
+  Value vecIdentity;            // identity constant for the vector accumulator
+  Value scalarAfterVec;         // scalar result after vector.reduction
+  bool isReduction = false;
 };
+
+// Map ReduceKind to vector::CombiningKind for vector.reduction.
+static vector::CombiningKind reduceKindToCombining(ReduceKind k) {
+  switch (k) {
+    case ReduceKind::AddF: return vector::CombiningKind::ADD;
+    case ReduceKind::MulF: return vector::CombiningKind::MUL;
+    case ReduceKind::AddI: return vector::CombiningKind::ADD;
+    case ReduceKind::MulI: return vector::CombiningKind::MUL;
+    case ReduceKind::AndI: return vector::CombiningKind::AND;
+    case ReduceKind::OrI:  return vector::CombiningKind::OR;
+    case ReduceKind::XOrI: return vector::CombiningKind::XOR;
+    default: return vector::CombiningKind::ADD;
+  }
+}
+
+// Build the identity constant for a reduction kind and element type.
+static Value buildIdentity(OpBuilder &builder, Location loc,
+                           ReduceKind kind, Type elemTy) {
+  switch (kind) {
+    case ReduceKind::AddF:
+      return arith::ConstantOp::create(builder, loc, elemTy,
+               builder.getFloatAttr(elemTy, 0.0));
+    case ReduceKind::MulF:
+      return arith::ConstantOp::create(builder, loc, elemTy,
+               builder.getFloatAttr(elemTy, 1.0));
+    case ReduceKind::AddI:
+      return arith::ConstantOp::create(builder, loc, elemTy,
+               builder.getIntegerAttr(elemTy, 0));
+    case ReduceKind::MulI:
+      return arith::ConstantOp::create(builder, loc, elemTy,
+               builder.getIntegerAttr(elemTy, 1));
+    case ReduceKind::AndI: {
+      // All-ones identity for AND.
+      int64_t width = elemTy.getIntOrFloatBitWidth();
+      APInt allOnes = APInt::getAllOnes(width);
+      return arith::ConstantOp::create(builder, loc, elemTy,
+               builder.getIntegerAttr(elemTy, allOnes));
+    }
+    case ReduceKind::OrI:
+      return arith::ConstantOp::create(builder, loc, elemTy,
+               builder.getIntegerAttr(elemTy, 0));
+    case ReduceKind::XOrI:
+      return arith::ConstantOp::create(builder, loc, elemTy,
+               builder.getIntegerAttr(elemTy, 0));
+    default:
+      return arith::ConstantOp::create(builder, loc, elemTy,
+               builder.getZeroAttr(elemTy));
+  }
+}
 
 /// Strip-mines `forOp` by L: produces a vec loop with step*L and a tail loop
 /// covering (trip mod L) remaining iterations.  Both loops are inserted
@@ -722,7 +883,121 @@ static StripMineResult stripMineForOp(scf::ForOp forOp, int64_t L,
   auto vecLoop = scf::ForOp::create(builder, loc, lb, alignedUb, newStep);
   auto tailLoop = scf::ForOp::create(builder, loc, alignedUb, ub, origStep);
 
-  return {vecLoop, tailLoop};
+  StripMineResult r;
+  r.vecLoop = vecLoop;
+  r.tailLoop = tailLoop;
+  r.alignedUb = alignedUb;
+  r.isReduction = false;
+  return r;
+}
+
+/// R18b: Strip-mine variant for iter_args associative reductions.
+///
+/// Creates:
+///   1. vecLoop: step = origStep*L, iter_args = vector<L x T> accumulator
+///      initialized to identity. Body: element-wise accumulate; yield vec.
+///   2. After vecLoop: vector.reduction to collapse vec → scalar.
+///   3. tailLoop: step = origStep, iter_args = scalar (from reduction result).
+///
+/// The caller populates vecLoop's body and tailLoop's body.
+/// Returns StripMineResult with isReduction=true and the filled-in fields.
+static StripMineResult stripMineForOpReduction(scf::ForOp forOp, int64_t L,
+                                               const ReductionInfo &redInfo,
+                                               OpBuilder &builder) {
+  Location loc = forOp.getLoc();
+  builder.setInsertionPoint(forOp);
+  Value lb = forOp.getLowerBound();
+  Value ub = forOp.getUpperBound();
+  Value origStep = forOp.getStep();
+
+  Value Lval = arith::ConstantIndexOp::create(builder, loc, L);
+  Value newStep = arith::MulIOp::create(builder, loc, origStep, Lval);
+
+  // alignedSpan = floor((ub - lb) / newStep) * newStep
+  Value extent = arith::SubIOp::create(builder, loc, ub, lb);
+  Value q = arith::DivUIOp::create(builder, loc, extent, newStep);
+  Value alignedSpan = arith::MulIOp::create(builder, loc, q, newStep);
+  Value alignedUb = arith::AddIOp::create(builder, loc, lb, alignedSpan);
+
+  // The element type of the accumulator.
+  Type elemTy = redInfo.initVal.getType();
+  auto vecAccType = VectorType::get({L}, elemTy);
+
+  // Build the identity constant for the vector accumulator.
+  Value scalarIdentity = buildIdentity(builder, loc, redInfo.kind, elemTy);
+  // Splat scalar identity into vector<L x T>.
+  Value vecIdentityInit = vector::BroadcastOp::create(
+      builder, loc, vecAccType, scalarIdentity);
+
+  // vecLoop with iter_args = [vec_acc : vector<L x T>].
+  auto vecLoop = scf::ForOp::create(builder, loc, lb, alignedUb, newStep,
+                                    ValueRange{vecIdentityInit});
+
+  // After vecLoop (insertion point is after the loop).
+  builder.setInsertionPointAfter(vecLoop);
+
+  // Collapse vector accumulator to scalar via vector.reduction.
+  Value finalVecAcc = vecLoop.getResult(0);
+  vector::CombiningKind combining = reduceKindToCombining(redInfo.kind);
+  // vector.reduction: collapse vector<L x T> → scalar T.
+  // Signature: (builder, loc, combining, vec, fastmath).
+  Value scalarAcc = vector::ReductionOp::create(
+      builder, loc, combining, finalVecAcc, arith::FastMathFlags::none);
+
+  // Add the initial value to the partial result (the init may be non-zero).
+  // For addf: result = initVal + horizontal_sum(vec_acc).
+  // For mulf: result = initVal * horizontal_product(vec_acc).
+  // In general: result = combineOp(initVal, scalarAcc).
+  // This is because we initialize vec_acc to identity (not initVal) to keep
+  // the addition associative; the initVal must be applied once at the end.
+  Value partialResult;
+  switch (redInfo.kind) {
+    case ReduceKind::AddF:
+      partialResult = arith::AddFOp::create(builder, loc, redInfo.initVal,
+                                             scalarAcc);
+      break;
+    case ReduceKind::MulF:
+      partialResult = arith::MulFOp::create(builder, loc, redInfo.initVal,
+                                             scalarAcc);
+      break;
+    case ReduceKind::AddI:
+      partialResult = arith::AddIOp::create(builder, loc, redInfo.initVal,
+                                             scalarAcc);
+      break;
+    case ReduceKind::MulI:
+      partialResult = arith::MulIOp::create(builder, loc, redInfo.initVal,
+                                             scalarAcc);
+      break;
+    case ReduceKind::AndI:
+      partialResult = arith::AndIOp::create(builder, loc, redInfo.initVal,
+                                             scalarAcc);
+      break;
+    case ReduceKind::OrI:
+      partialResult = arith::OrIOp::create(builder, loc, redInfo.initVal,
+                                            scalarAcc);
+      break;
+    case ReduceKind::XOrI:
+      partialResult = arith::XOrIOp::create(builder, loc, redInfo.initVal,
+                                             scalarAcc);
+      break;
+    default:
+      partialResult = scalarAcc;
+      break;
+  }
+
+  // tailLoop: scalar iter_arg starting from partialResult.
+  auto tailLoop = scf::ForOp::create(builder, loc, alignedUb, ub, origStep,
+                                     ValueRange{partialResult});
+
+  StripMineResult r;
+  r.vecLoop     = vecLoop;
+  r.tailLoop    = tailLoop;
+  r.alignedUb   = alignedUb;
+  r.vecAccType  = vecAccType;
+  r.vecIdentity = vecIdentityInit;
+  r.scalarAfterVec = partialResult;
+  r.isReduction = true;
+  return r;
 }
 
 // ---------------------------------------------------------------------------
@@ -1592,12 +1867,15 @@ struct EmitContext {
 
 /// Populate `vecLoop`'s body by dispatching each original loop op to the
 /// appropriate per-kind emit helper in EmitContext.
+/// When `reduction.kind != None` (R18b), the vecLoop carries a vector iter_arg
+/// accumulator; the body element-wise accumulates and yields the updated vec.
 static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
                            int64_t L_strip,
                            ArrayRef<Operation *> accesses,
                            ArrayRef<lego::AccessClassification> classes,
                            llvm::StringRef targetStr,
-                           OpBuilder &builder) {
+                           OpBuilder &builder,
+                           const ReductionInfo &reduction = ReductionInfo{}) {
   builder.setInsertionPointToStart(vecLoop.getBody());
 
   // Construct context; map orig IV -> new IV upfront.
@@ -1611,12 +1889,37 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
                   DenseMap<Value, SmallVector<Value>>{}};
   ctx.mapping.map(origLoop.getInductionVar(), ctx.newIv);
 
+  // R18b: if this is an iter_args reduction, map the scalar iter_arg
+  // to the vector iter_arg of the new vecLoop.
+  if (reduction.kind != ReduceKind::None) {
+    Value vecIterArg = vecLoop.getRegionIterArgs().front();
+    // Map scalar iterArg → vector iter_arg (single-element sub-vector list).
+    // The arith catch-all will naturally lift the reduction op to vector form.
+    ctx.mapping.map(reduction.iterArg, vecIterArg);
+    ctx.subVectorMap[reduction.iterArg] = {vecIterArg};
+  }
+
   // Pre-pass: broadcast loop-external scalars to natural sub-vector width.
   ctx.broadcastExternalScalars();
 
   for (Operation &op : origLoop.getBody()->getOperations()) {
-    if (isa<scf::YieldOp>(op))
-      continue;  // vecLoop already has its own yield
+    // R18b: for reduction loops the yield carries the accumulator — handle it.
+    if (isa<scf::YieldOp>(op)) {
+      if (reduction.kind != ReduceKind::None) {
+        // Emit `scf.yield %updated_vec_acc` where %updated_vec_acc is the
+        // vectorized result of the reduction op.
+        auto yieldOp = cast<scf::YieldOp>(&op);
+        Value origYielded = yieldOp.getOperand(0);
+        // The mapping should contain the vectorized version of the yielded value
+        // (the reduction arith op has been emitted by emitArithOp below).
+        auto subs = ctx.getSubsFor(origYielded);
+        Value yieldVec = subs.empty() ? ctx.mapping.lookupOrDefault(origYielded)
+                                      : subs[0];
+        scf::YieldOp::create(builder, op.getLoc(), ValueRange{yieldVec});
+      }
+      // Non-reduction: vecLoop already has its own empty yield; skip.
+      continue;
+    }
 
     // -------------------------------------------------------------------
     // memref.load
@@ -1692,14 +1995,31 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
 
 /// Clone the entire original body verbatim into the tail loop (scalar
 /// fallback for the (trip mod L) remaining iterations).
+/// For R18b reduction loops, also maps the scalar iter_arg and emits yield.
 static void emitTailBody(scf::ForOp tailLoop, scf::ForOp origLoop,
-                         OpBuilder &builder) {
+                         OpBuilder &builder,
+                         const ReductionInfo &reduction = ReductionInfo{}) {
   builder.setInsertionPointToStart(tailLoop.getBody());
   IRMapping mapping;
   mapping.map(origLoop.getInductionVar(), tailLoop.getInductionVar());
+
+  // R18b: map the scalar iter_arg → tail loop's scalar iter_arg.
+  if (reduction.kind != ReduceKind::None) {
+    Value tailIterArg = tailLoop.getRegionIterArgs().front();
+    mapping.map(reduction.iterArg, tailIterArg);
+  }
+
   for (Operation &op : origLoop.getBody()->getOperations()) {
-    if (isa<scf::YieldOp>(op))
+    if (isa<scf::YieldOp>(op)) {
+      if (reduction.kind != ReduceKind::None) {
+        // Emit the scalar yield for the tail reduction.
+        auto yieldOp = cast<scf::YieldOp>(&op);
+        Value origYielded = yieldOp.getOperand(0);
+        Value mappedYielded = mapping.lookupOrDefault(origYielded);
+        scf::YieldOp::create(builder, op.getLoc(), ValueRange{mappedYielded});
+      }
       continue;
+    }
     builder.clone(op, mapping);
   }
 }
@@ -1998,10 +2318,30 @@ class LegoVectorizePass
       }
 
       OpBuilder builder(a.forOp);
-      StripMineResult mined = stripMineForOp(a.forOp, a.L_strip, builder);
-      emitVectorBody(mined.vecLoop, a.forOp, a.L_strip,
-                     a.accesses, a.classes, target, builder);
-      emitTailBody(mined.tailLoop, a.forOp, builder);
+      // R18b: use the reduction-aware strip-mining when an iter_args reduction
+      // was detected.
+      if (a.reduction.kind != ReduceKind::None) {
+        StripMineResult mined = stripMineForOpReduction(
+            a.forOp, a.L_strip, a.reduction, builder);
+        emitVectorBody(mined.vecLoop, a.forOp, a.L_strip,
+                       a.accesses, a.classes, target, builder, a.reduction);
+        emitTailBody(mined.tailLoop, a.forOp, builder, a.reduction);
+
+        // Replace uses of the original for loop's result(s) with the
+        // tail loop's result(s).  The original loop returns one scalar
+        // (the final accumulator); the tail loop returns the same.
+        if (!a.forOp.getResults().empty()) {
+          for (auto [origRes, tailRes] :
+               llvm::zip(a.forOp.getResults(), mined.tailLoop.getResults())) {
+            origRes.replaceAllUsesWith(tailRes);
+          }
+        }
+      } else {
+        StripMineResult mined = stripMineForOp(a.forOp, a.L_strip, builder);
+        emitVectorBody(mined.vecLoop, a.forOp, a.L_strip,
+                       a.accesses, a.classes, target, builder);
+        emitTailBody(mined.tailLoop, a.forOp, builder);
+      }
       toErase.push_back(a.forOp);
     }
 
