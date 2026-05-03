@@ -3,49 +3,43 @@
 
 Usage (activate the venv first):
     source /scratch/general/vast/u1419116/LEGO/venv/bin/activate
-    python run_all.py
+    cd evaluation/cpu_dsl_comparison
+    python run_all.py                   # full run (build C baselines + verify + time)
+    python run_all.py --quick           # skip C baselines, run verify + time
+    python run_all.py --verify-only     # only run verify.py per candidate
+    python run_all.py --target=neon     # cpu_dsl compiled with ARM NEON target
 
-Each candidate's measure.py is run in a subprocess.  The last line of
-stdout must be a single JSON record in the isolation schema:
+Single command:
+    python run_all.py | tee dashboard_FINAL.txt
 
-    {
-      "name":                "<candidate_id>",
-      "N":                   <int>,
-      "layout_class":        "<class>",        # optional, shown in dashboard
-      "prior_verdict":       "WIN|PARITY|LOSS|MIXED",  # from CASTLE audit
-      "numpy_ms":            <float | NaN>,
-      "scalar_jit_ms":       <float | NaN>,
-      "vec_jit_ms":          <float | NaN>,
-      "speedup_isolated_jit": <float | NaN>,   # scalar_jit / vec_jit
-      "speedup_vs_numpy":    <float | NaN>,
-      "verdict":             "WIN|PARITY|LOSS|SKIP|ERROR",
-      "notes":               "<optional string>"
-    }
+Each candidate's measure.py emits a single JSON record on its last line.
+verify.py emits a single "VERIFIED:" or "PENDING ..." line.
 
-The top-level results.json is written alongside this script.
+Dashboard columns:
+    Candidate  LayoutClass  PriorVerd  N  numpy_ms  scalar_jit  vec_jit
+    vec_iso  vs_numpy  [c_gcc_ms  vs_gcc]  [c_clang_ms  vs_clang]
+    Verify  Verdict
 
-C-baseline integration:
-    For each candidate, run_all.py also invokes the matching C-O3-march=native
-    binary from c_baselines/ before the Python benchmark.  Binaries must be
-    pre-built: cd c_baselines && make all
-
-Dashboard bottom-line metrics:
-    - How many candidates show vec_iso > 1.5× (real speedup)?
-    - How many maintained/improved their prior CASTLE verdict?
-    - How many regressed?
+Dashboard JSON saved to results.json alongside this script.
+Dashboard Markdown saved to dashboard.md.
 """
+
+import argparse
 import json
 import math
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 CANDIDATES_DIR = ROOT / "candidates"
 C_BASELINES_DIR = ROOT / "c_baselines"
 
-# Map candidate directory prefix → (c_binary_name, N_to_pass_or_None).
+# ---------------------------------------------------------------------------
+# C baseline map: candidate name → (binary_name, N_to_pass)
+# ---------------------------------------------------------------------------
 _C_BASELINE_MAP = {
     "01_saxpy":               ("saxpy",              1 << 20),
     "02_gemm_row_major":      ("gemm",               64),
@@ -58,7 +52,7 @@ _C_BASELINE_MAP = {
 }
 
 
-def _run_c_binary(bin_path, N) -> float:
+def _run_c_binary(bin_path: Path, N) -> float:
     """Run a C baseline binary, return ms_per_call or NaN."""
     if not bin_path.exists():
         return float('nan')
@@ -76,62 +70,103 @@ def _run_c_binary(bin_path, N) -> float:
 
 
 def run_c_baseline(cand_name: str) -> float:
-    """Run the GCC C-baseline binary for `cand_name`, return ms_per_call or NaN."""
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
     bin_name, N = entry
-    if bin_name is None:
-        return float('nan')
     return _run_c_binary(C_BASELINES_DIR / bin_name, N)
 
 
 def run_clang_baseline(cand_name: str) -> float:
-    """Run the Clang C-baseline binary for `cand_name`, return ms_per_call or NaN."""
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
     bin_name, N = entry
-    if bin_name is None:
-        return float('nan')
     return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang", N)
 
 
-# Prefer the venv Python so MLIR .so files resolve correctly.
+# ---------------------------------------------------------------------------
+# Python executable (prefer venv)
+# ---------------------------------------------------------------------------
 _VENV_PYTHON = Path("/scratch/general/vast/u1419116/LEGO/venv/bin/python")
 PYTHON = str(_VENV_PYTHON) if _VENV_PYTHON.exists() else sys.executable
 
-results = []
-for cand_dir in sorted(CANDIDATES_DIR.iterdir()):
-    if not cand_dir.is_dir():
-        continue
+# PYTHONPATH: use the build directory
+_BUILD_LEGO = "/scratch/general/vast/u1419116/LEGO/build/python_packages/lego"
+_existing_pp = os.environ.get("PYTHONPATH", "")
+_filtered = ":".join(p for p in _existing_pp.split(":") if p and "LEGO/python" not in p)
+_NEW_PP = _BUILD_LEGO + (":" + _filtered if _filtered else "")
+
+_SUB_ENV = dict(os.environ)
+_SUB_ENV["PYTHONPATH"] = _NEW_PP
+
+
+def _sub_env_for_target(target: str) -> dict:
+    """Return environ dict with LEGO_CPU_TARGET set."""
+    e = dict(_SUB_ENV)
+    e["LEGO_CPU_TARGET"] = target
+    return e
+
+
+# ---------------------------------------------------------------------------
+# Build C baselines
+# ---------------------------------------------------------------------------
+def build_c_baselines(verbose: bool = False):
+    makefile = C_BASELINES_DIR / "Makefile"
+    if not makefile.exists():
+        print(f"  [build] No Makefile found in {C_BASELINES_DIR}, skipping C baseline build.")
+        return
+    print(f"  [build] Building C baselines in {C_BASELINES_DIR} ...")
+    cmd = ["make", "-C", str(C_BASELINES_DIR), "all"]
+    proc = subprocess.run(cmd, capture_output=not verbose, text=True)
+    if proc.returncode == 0:
+        print("  [build] C baselines built successfully.")
+    else:
+        print(f"  [build] WARNING: C baseline build returned {proc.returncode}.")
+        if not verbose and proc.stderr:
+            print(proc.stderr[-400:])
+
+
+# ---------------------------------------------------------------------------
+# Run verify.py for a single candidate
+# ---------------------------------------------------------------------------
+def run_verify(cand_dir: Path, sub_env: dict) -> str:
+    """Return 'VERIFIED', 'PENDING:<reason>', or 'FAIL:<reason>'."""
+    verify_py = cand_dir / "verify.py"
+    if not verify_py.exists():
+        return "MISSING"
+    try:
+        proc = subprocess.run(
+            [PYTHON, str(verify_py)],
+            capture_output=True, text=True, timeout=120,
+            env=sub_env,
+        )
+        out = (proc.stdout + proc.stderr).strip()
+        last = out.split("\n")[-1] if out else ""
+        if "VERIFIED" in last:
+            return "VERIFIED"
+        elif "PENDING" in last:
+            return f"PENDING:{last[8:60].strip()}"
+        else:
+            return f"FAIL:{last[:60].strip()}"
+    except subprocess.TimeoutExpired:
+        return "FAIL:timeout"
+    except Exception as exc:
+        return f"FAIL:{str(exc)[:60]}"
+
+
+# ---------------------------------------------------------------------------
+# Run measure.py for a single candidate
+# ---------------------------------------------------------------------------
+def run_measure(cand_dir: Path, sub_env: dict) -> dict:
+    """Run measure.py; return parsed JSON record or an ERROR record."""
     measure_py = cand_dir / "measure.py"
     if not measure_py.exists():
-        continue
-    print(f"Running {cand_dir.name}...", flush=True)
-
-    c_ms = run_c_baseline(cand_dir.name)
-    clang_ms = run_clang_baseline(cand_dir.name)
-    if not math.isnan(c_ms):
-        print(f"  C baseline (gcc):   {c_ms:.4f} ms/call", flush=True)
-    if not math.isnan(clang_ms):
-        print(f"  C baseline (clang): {clang_ms:.4f} ms/call", flush=True)
-
+        return {"name": cand_dir.name, "verdict": "ERROR", "notes": "no measure.py"}
     try:
-        _build_lego = "/scratch/general/vast/u1419116/LEGO/build/python_packages/lego"
-        existing_pp = os.environ.get("PYTHONPATH", "")
-        filtered = ":".join(
-            p for p in existing_pp.split(":") if p and "LEGO/python" not in p
-        )
-        new_pp = _build_lego + (":" + filtered if filtered else "")
-        sub_env = dict(os.environ)
-        sub_env["PYTHONPATH"] = new_pp
-
         proc = subprocess.run(
             [PYTHON, str(measure_py)],
-            capture_output=True,
-            text=True,
-            timeout=300,
+            capture_output=True, text=True, timeout=300,
             env=sub_env,
         )
         stdout = proc.stdout.strip()
@@ -142,31 +177,20 @@ for cand_dir in sorted(CANDIDATES_DIR.iterdir()):
             rec = {
                 "name": cand_dir.name,
                 "verdict": "ERROR",
-                "notes": (proc.stdout[-400:] + "\n" + proc.stderr[-400:]).strip(),
+                "notes": (proc.stdout[-300:] + "\n" + proc.stderr[-300:]).strip(),
             }
         rec.setdefault("name", cand_dir.name)
-        if not math.isnan(c_ms):
-            rec["c_baseline_ms"] = round(c_ms, 6)
-        if not math.isnan(clang_ms):
-            rec["c_clang_ms"] = round(clang_ms, 6)
-        results.append(rec)
+        return rec
     except subprocess.TimeoutExpired:
-        results.append({"name": cand_dir.name, "verdict": "ERROR",
-                        "notes": "timeout after 300s",
-                        **({"c_baseline_ms": round(c_ms, 6)} if not math.isnan(c_ms) else {}),
-                        **({"c_clang_ms": round(clang_ms, 6)} if not math.isnan(clang_ms) else {})})
+        return {"name": cand_dir.name, "verdict": "ERROR", "notes": "timeout after 300s"}
     except Exception as exc:
-        results.append({"name": cand_dir.name, "verdict": "ERROR",
-                        "notes": str(exc),
-                        **({"c_baseline_ms": round(c_ms, 6)} if not math.isnan(c_ms) else {}),
-                        **({"c_clang_ms": round(clang_ms, 6)} if not math.isnan(clang_ms) else {})})
+        return {"name": cand_dir.name, "verdict": "ERROR", "notes": str(exc)}
 
 
-# ============================================================================
-# Dashboard formatting
-# ============================================================================
-
-def _fv(v, w, fmt=".4f"):
+# ---------------------------------------------------------------------------
+# Dashboard formatting helpers
+# ---------------------------------------------------------------------------
+def _fv(v, w, fmt=".3f"):
     if isinstance(v, float) and not math.isnan(v):
         return f"{v:>{w}{fmt}}"
     return f"{'NaN':>{w}}"
@@ -185,139 +209,328 @@ def _safe_ratio(a, b):
     return float('nan')
 
 
-_has_c = any("c_baseline_ms" in r for r in results)
-_has_clang = any("c_clang_ms" in r for r in results)
-_has_prior = any("prior_verdict" in r for r in results)
-_has_layout = any("layout_class" in r for r in results)
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def parse_args():
+    p = argparse.ArgumentParser(description="LEGO cpu_dsl_comparison benchmark harness")
+    p.add_argument("--quick", action="store_true",
+                   help="Skip building C baselines (faster iteration)")
+    p.add_argument("--verify-only", action="store_true",
+                   help="Only run verify.py per candidate (no timing)")
+    p.add_argument("--target", default="x86",
+                   help="cpu_dsl compilation target: x86 (default), arm-neon, scalar")
+    p.add_argument("--no-verify", action="store_true",
+                   help="Skip verify.py (only run measure.py)")
+    p.add_argument("--verbose", action="store_true",
+                   help="Show C baseline build output")
+    return p.parse_args()
 
-print()
-print("=" * 160)
-print("  LEGO cpu_dsl_comparison — CASTLE Round-1 Full Coverage Dashboard")
-print("=" * 160)
 
-# Header
-hdr_parts = [f"{'Candidate':<32}"]
-if _has_layout:
-    hdr_parts.append(f"{'LayoutClass':<20}")
-if _has_prior:
-    hdr_parts.append(f"{'PriorVerd':>9}")
-hdr_parts += [f"{'N':>8}", f"{'numpy_ms':>11}", f"{'scalar_jit':>11}",
-               f"{'vec_jit':>11}", f"{'vec_iso':>9}", f"{'vs_numpy':>9}"]
-if _has_c:
-    hdr_parts += [f"{'c_gcc_ms':>11}", f"{'vs_gcc':>8}"]
-if _has_clang:
-    hdr_parts += [f"{'c_clang_ms':>11}", f"{'vs_clang':>9}"]
-hdr_parts.append(f"{'Verdict':>8}")
-hdr = "  ".join(hdr_parts)
-print(hdr)
-print("-" * len(hdr))
+def main():
+    args = parse_args()
+    sub_env = _sub_env_for_target(args.target)
 
-wins = losses = parities = skips = errors = 0
-improved = maintained = regressed = 0
-vec_iso_gt15 = 0
+    print()
+    print("=" * 100)
+    print(f"  LEGO cpu_dsl_comparison — Full Coverage Benchmark Harness")
+    print(f"  Target: {args.target}  |  Date: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 100)
+    print()
 
-for r in results:
-    name = r.get("name", "?")[:32]
-    verdict = r.get("verdict", "ERROR")
-    layout = r.get("layout_class", "")[:20]
-    prior = r.get("prior_verdict", "")
-    n_val = r.get("N", "")
-    n_str = f"{n_val:>8}" if isinstance(n_val, int) else f"{'?':>8}"
-    c_ms_r = r.get("c_baseline_ms", float('nan'))
-    if not isinstance(c_ms_r, float):
-        c_ms_r = float('nan')
-    clang_ms_r = r.get("c_clang_ms", float('nan'))
-    if not isinstance(clang_ms_r, float):
-        clang_ms_r = float('nan')
-
-    t_numpy  = r.get("numpy_ms",  float('nan'))
-    t_scalar = r.get("scalar_jit_ms", float('nan'))
-    t_vec    = r.get("vec_jit_ms", float('nan'))
-    sp_iso   = r.get("speedup_isolated_jit", float('nan'))
-    sp_np    = r.get("speedup_vs_numpy", float('nan'))
-    vs_c     = _safe_ratio(c_ms_r, t_vec)
-    vs_clang = _safe_ratio(clang_ms_r, t_vec)
-
-    # Tally
-    if verdict == "WIN":
-        wins += 1
-    elif verdict == "LOSS":
-        losses += 1
-    elif verdict == "PARITY":
-        parities += 1
-    elif verdict == "SKIP":
-        skips += 1
+    # Step 1: Build C baselines
+    if not args.quick and not args.verify_only:
+        build_c_baselines(args.verbose)
     else:
-        errors += 1
+        print("  [build] Skipping C baseline build (--quick or --verify-only).")
+    print()
 
-    if not math.isnan(sp_iso) and sp_iso > 1.5:
-        vec_iso_gt15 += 1
+    # Collect candidates
+    cand_dirs = sorted(
+        d for d in CANDIDATES_DIR.iterdir()
+        if d.is_dir() and (d / "measure.py").exists()
+    )
 
-    # Prior comparison
-    if prior in ("WIN", "PARITY", "LOSS", "MIXED"):
-        prior_win  = prior in ("WIN",)
-        new_win    = verdict in ("WIN",)
-        new_skip   = verdict in ("SKIP",)
-        if not new_skip:
-            if prior_win and new_win:
-                maintained += 1
-            elif not prior_win and new_win:
-                improved += 1
-            elif prior_win and not new_win:
-                regressed += 1
-            else:
-                maintained += 1  # LOSS→PARITY etc. counts as maintained
+    # Step 2: Verify all candidates
+    verify_results = {}
+    if not args.no_verify:
+        print(f"  [verify] Running verify.py for {len(cand_dirs)} candidates ...")
+        for cand_dir in cand_dirs:
+            status = run_verify(cand_dir, sub_env)
+            verify_results[cand_dir.name] = status
+            icon = "✓" if status == "VERIFIED" else ("?" if "PENDING" in status else "✗")
+            print(f"    {icon} {cand_dir.name:<40} {status[:60]}")
+        print()
+    else:
+        print("  [verify] Skipping verification (--no-verify).")
+        print()
 
-    row_parts = [f"{name:<32}"]
+    if args.verify_only:
+        # Print verify summary and exit
+        n_ver = sum(1 for s in verify_results.values() if s == "VERIFIED")
+        n_pnd = sum(1 for s in verify_results.values() if "PENDING" in s)
+        n_fail = sum(1 for s in verify_results.values() if "FAIL" in s or s == "MISSING")
+        print(f"  Verify summary: VERIFIED={n_ver}, PENDING={n_pnd}, FAIL={n_fail} / {len(cand_dirs)}")
+        return
+
+    # Step 3: Time each candidate
+    results = []
+    print(f"  [measure] Running measure.py for {len(cand_dirs)} candidates ...")
+    for cand_dir in cand_dirs:
+        print(f"    → {cand_dir.name}", flush=True)
+        c_ms = run_c_baseline(cand_dir.name)
+        clang_ms = run_clang_baseline(cand_dir.name)
+        rec = run_measure(cand_dir, sub_env)
+
+        # Attach C baseline timings
+        if not math.isnan(c_ms):
+            rec["c_baseline_ms"] = round(c_ms, 6)
+        if not math.isnan(clang_ms):
+            rec["c_clang_ms"] = round(clang_ms, 6)
+
+        # Attach verify status
+        rec["verify_status"] = verify_results.get(cand_dir.name, "NOT_RUN")
+
+        results.append(rec)
+    print()
+
+    # Step 4: Print dashboard
+    _has_c = any("c_baseline_ms" in r for r in results)
+    _has_clang = any("c_clang_ms" in r for r in results)
+    _has_prior = any("prior_verdict" in r for r in results)
+    _has_layout = any("layout_class" in r for r in results)
+    _has_verify = not args.no_verify
+
+    print("=" * 180)
+    print("  LEGO cpu_dsl_comparison — CASTLE Round-1 Full Coverage Dashboard")
+    print("=" * 180)
+
+    # Header
+    hdr_parts = [f"{'Candidate':<32}"]
     if _has_layout:
-        row_parts.append(f"{layout:<20}")
+        hdr_parts.append(f"{'LayoutClass':<20}")
     if _has_prior:
-        row_parts.append(f"{prior:>9}")
-    row_parts += [n_str, _fv(t_numpy, 11, '.3f'), _fv(t_scalar, 11, '.3f'),
-                   _fv(t_vec, 11, '.3f'), _fx(sp_iso, 9), _fx(sp_np, 9)]
+        hdr_parts.append(f"{'PriorVerd':>9}")
+    hdr_parts += [
+        f"{'N':>8}", f"{'numpy_ms':>10}", f"{'scalar_jit':>10}",
+        f"{'vec_jit':>10}", f"{'vec_iso':>8}", f"{'vs_numpy':>8}",
+    ]
     if _has_c:
-        row_parts += [_fv(c_ms_r, 11, '.3f'), _fx(vs_c, 8)]
+        hdr_parts += [f"{'c_gcc_ms':>10}", f"{'vs_gcc':>7}"]
     if _has_clang:
-        row_parts += [_fv(clang_ms_r, 11, '.3f'), _fx(vs_clang, 9)]
-    row_parts.append(f"{verdict:>8}")
-    print("  ".join(row_parts))
+        hdr_parts += [f"{'c_clang_ms':>10}", f"{'vs_clang':>8}"]
+    if _has_verify:
+        hdr_parts.append(f"{'Verify':>10}")
+    hdr_parts.append(f"{'Verdict':>8}")
+    hdr = "  ".join(hdr_parts)
+    print(hdr)
+    print("-" * len(hdr))
 
-print("-" * len(hdr))
+    wins = losses = parities = skips = errors = 0
+    improved = maintained = regressed = 0
+    vec_iso_gt15 = 0
+    n_verified = n_pending = n_fail_v = 0
 
-# Summary stats
-total = len(results)
-measured = total - skips
-print()
-print(f"  Total candidates:      {total}")
-print(f"  Measured (non-SKIP):   {measured}")
-print(f"  SKIP (XFAIL/unbundled): {skips}")
-print(f"  Errors:                {errors}")
-print()
-print(f"  --- New cpu_dsl verdicts (measured only) ---")
-print(f"  WIN:    {wins:3d} / {measured}")
-print(f"  PARITY: {parities:3d} / {measured}")
-print(f"  LOSS:   {losses:3d} / {measured}")
-print()
-print(f"  --- vec_iso speedup distribution ---")
-print(f"  vec_iso > 1.5× (real wins):    {vec_iso_gt15:3d} / {measured}")
-print()
-print(f"  --- Prior verdict comparison (vs CASTLE Intel audit) ---")
-print(f"  Maintained (WIN→WIN, LOSS→LOSS, etc.): {maintained}")
-print(f"  Improved  (non-WIN → WIN):             {improved}")
-print(f"  Regressed (WIN → non-WIN):             {regressed}")
-print()
-if measured > 0:
-    win_rate = (wins + parities) / measured * 100
-    print(f"  WIN+PARITY rate: {win_rate:.1f}% of measured candidates")
-    if vec_iso_gt15 > 0:
-        print(f"  {vec_iso_gt15} candidate(s) show vec_iso > 1.5× — genuine cpu_dsl vectorization wins.")
-    if wins > 0:
-        print(f"  {wins} candidate(s) WIN (vec_iso > 1.05×).")
-    if regressed > 0:
-        print(f"  WARNING: {regressed} candidate(s) regressed vs prior CASTLE verdict.")
+    for r in results:
+        name = r.get("name", "?")[:32]
+        verdict = r.get("verdict", "ERROR")
+        layout = r.get("layout_class", "")[:20]
+        prior = r.get("prior_verdict", "")
+        n_val = r.get("N", "")
+        n_str = f"{n_val:>8}" if isinstance(n_val, int) else f"{'?':>8}"
 
-# Save full results
-out_path = ROOT / "results.json"
-with open(out_path, "w") as fh:
-    json.dump(results, fh, indent=2)
-print(f"\nFull results saved to: {out_path}")
+        c_ms_r = float(r.get("c_baseline_ms", float('nan')))
+        clang_ms_r = float(r.get("c_clang_ms", float('nan')))
+
+        t_numpy  = r.get("numpy_ms",  float('nan'))
+        t_scalar = r.get("scalar_jit_ms", float('nan'))
+        t_vec    = r.get("vec_jit_ms", float('nan'))
+        sp_iso   = r.get("speedup_isolated_jit", float('nan'))
+        sp_np    = r.get("speedup_vs_numpy", float('nan'))
+        vs_c     = _safe_ratio(c_ms_r, t_vec)
+        vs_clang = _safe_ratio(clang_ms_r, t_vec)
+
+        verify_st = r.get("verify_status", "NOT_RUN")
+        if verify_st == "VERIFIED":
+            n_verified += 1
+            verify_short = "VERIFIED"
+        elif "PENDING" in verify_st:
+            n_pending += 1
+            verify_short = "PENDING"
+        elif verify_st == "NOT_RUN":
+            verify_short = "-"
+        else:
+            n_fail_v += 1
+            verify_short = "FAIL"
+
+        # Tally
+        if verdict == "WIN":    wins += 1
+        elif verdict == "LOSS": losses += 1
+        elif verdict == "PARITY": parities += 1
+        elif verdict == "SKIP":   skips += 1
+        else:                     errors += 1
+
+        if isinstance(sp_iso, float) and not math.isnan(sp_iso) and sp_iso > 1.5:
+            vec_iso_gt15 += 1
+
+        if prior in ("WIN", "PARITY", "LOSS", "MIXED"):
+            new_win  = verdict in ("WIN",)
+            new_skip = verdict in ("SKIP",)
+            if not new_skip:
+                if prior == "WIN" and new_win:           maintained += 1
+                elif prior != "WIN" and new_win:         improved += 1
+                elif prior == "WIN" and not new_win:     regressed += 1
+                else:                                    maintained += 1
+
+        row_parts = [f"{name:<32}"]
+        if _has_layout:
+            row_parts.append(f"{layout:<20}")
+        if _has_prior:
+            row_parts.append(f"{prior:>9}")
+        row_parts += [
+            n_str,
+            _fv(t_numpy,  10, '.3f'),
+            _fv(t_scalar, 10, '.3f'),
+            _fv(t_vec,    10, '.3f'),
+            _fx(sp_iso, 8),
+            _fx(sp_np,  8),
+        ]
+        if _has_c:
+            row_parts += [_fv(c_ms_r, 10, '.3f'), _fx(vs_c, 7)]
+        if _has_clang:
+            row_parts += [_fv(clang_ms_r, 10, '.3f'), _fx(vs_clang, 8)]
+        if _has_verify:
+            row_parts.append(f"{verify_short:>10}")
+        row_parts.append(f"{verdict:>8}")
+        print("  ".join(row_parts))
+
+    print("-" * len(hdr))
+    print()
+
+    # Summary statistics
+    total   = len(results)
+    measured = total - skips
+    print(f"  Total candidates:         {total}")
+    print(f"  Measured (non-SKIP):      {measured}")
+    print(f"  SKIP (XFAIL/unbundled):   {skips}")
+    print(f"  Errors:                   {errors}")
+    print()
+    print(f"  --- Correctness (verify.py) ---")
+    print(f"  VERIFIED:   {n_verified:3d} / {total}")
+    print(f"  PENDING:    {n_pending:3d} / {total}  (known infra gaps, see R19)")
+    print(f"  FAIL/MISS:  {n_fail_v:3d} / {total}")
+    print()
+    print(f"  --- New cpu_dsl verdicts (measured only) ---")
+    print(f"  WIN:     {wins:3d} / {measured}")
+    print(f"  PARITY:  {parities:3d} / {measured}")
+    print(f"  LOSS:    {losses:3d} / {measured}")
+    print()
+    print(f"  --- vec_iso speedup distribution ---")
+    print(f"  vec_iso > 1.5× (real wins): {vec_iso_gt15:3d} / {measured}")
+    print()
+    print(f"  --- Prior verdict comparison (vs CASTLE Intel audit) ---")
+    print(f"  Maintained: {maintained}")
+    print(f"  Improved:   {improved}")
+    print(f"  Regressed:  {regressed}")
+    if measured > 0:
+        win_rate = (wins + parities) / measured * 100
+        print()
+        print(f"  WIN+PARITY rate: {win_rate:.1f}% of measured candidates")
+        if wins > 0:
+            print(f"  {wins} candidate(s) WIN (vec_iso > 1.05×).")
+        if regressed > 0:
+            print(f"  WARNING: {regressed} candidate(s) regressed vs prior CASTLE verdict.")
+    print()
+
+    # Step 5: Save JSON + Markdown
+    out_json = ROOT / "results.json"
+    with open(out_json, "w") as fh:
+        json.dump(results, fh, indent=2, default=lambda x: None)
+    print(f"  Full results saved to: {out_json}")
+
+    out_md = ROOT / "dashboard.md"
+    _write_markdown(results, out_md, args.target,
+                    wins, parities, losses, skips, errors,
+                    n_verified, n_pending, n_fail_v,
+                    measured, vec_iso_gt15)
+    print(f"  Dashboard Markdown saved to: {out_md}")
+    print()
+
+
+def _write_markdown(results, out_path: Path, target: str,
+                    wins, parities, losses, skips, errors,
+                    n_verified, n_pending, n_fail_v,
+                    measured, vec_iso_gt15):
+    """Write a compact Markdown dashboard."""
+    lines = [
+        f"# LEGO cpu_dsl_comparison Dashboard",
+        f"",
+        f"**Target:** `{target}` | **Date:** {time.strftime('%Y-%m-%d %H:%M')}",
+        f"",
+        f"## Summary",
+        f"",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Total candidates | {len(results)} |",
+        f"| Measured | {measured} |",
+        f"| SKIP | {skips} |",
+        f"| WIN | {wins} |",
+        f"| PARITY | {parities} |",
+        f"| LOSS | {losses} |",
+        f"| ERROR | {errors} |",
+        f"| VERIFIED (correctness) | {n_verified} |",
+        f"| PENDING (correctness) | {n_pending} |",
+        f"| vec_iso > 1.5× | {vec_iso_gt15} |",
+        f"",
+        f"## Per-Candidate Results",
+        f"",
+        f"| Candidate | Layout | Prior | N | numpy_ms | scalar_ms | vec_ms | vec_iso | vs_numpy | Verify | Verdict |",
+        f"|-----------|--------|-------|---|----------|-----------|--------|---------|----------|--------|---------|",
+    ]
+    for r in results:
+        name = r.get("name", "?")[:30]
+        layout = r.get("layout_class", "")[:15]
+        prior  = r.get("prior_verdict", "")
+        n_val  = r.get("N", "?")
+        t_np   = r.get("numpy_ms", float('nan'))
+        t_sc   = r.get("scalar_jit_ms", float('nan'))
+        t_vec  = r.get("vec_jit_ms", float('nan'))
+        sp_iso = r.get("speedup_isolated_jit", float('nan'))
+        sp_np  = r.get("speedup_vs_numpy", float('nan'))
+        verify = r.get("verify_status", "-")
+        verify_short = "✓" if verify == "VERIFIED" else ("?" if "PENDING" in verify else ("–" if verify == "NOT_RUN" else "✗"))
+        verdict = r.get("verdict", "?")
+
+        def _fmt(v):
+            if isinstance(v, float) and not math.isnan(v):
+                return f"{v:.4f}"
+            return "NaN"
+
+        def _fmtx(v):
+            if isinstance(v, float) and not math.isnan(v):
+                return f"{v:.2f}x"
+            return "NaN"
+
+        lines.append(
+            f"| {name} | {layout} | {prior} | {n_val} | {_fmt(t_np)} | {_fmt(t_sc)} | {_fmt(t_vec)} | {_fmtx(sp_iso)} | {_fmtx(sp_np)} | {verify_short} | **{verdict}** |"
+        )
+
+    lines += [
+        f"",
+        f"## Known Gaps",
+        f"",
+        f"- **R19**: Strided-gather index vector mismatch in `LegoVectorize::emitVectorBody`.",
+        f"  The catch-all arith path vectorizes `MulIOp(iv, stride)` before the Strided path",
+        f"  reads it, producing incorrect gather indices. Affects candidates 23–27, 29–31, 38.",
+        f"  Fix: use pre-vectorization scalar index in Strided path.",
+        f"",
+        f"- **R18 (reduction guard)**: k-reduction loops correctly skip vectorization.",
+        f"  This is correct behavior but contributes to PARITY (not WIN) for GEMM variants.",
+        f"",
+    ]
+
+    out_path.write_text("\n".join(lines))
+
+
+if __name__ == "__main__":
+    main()
