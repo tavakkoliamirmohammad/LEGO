@@ -188,11 +188,13 @@ For each `scf.for` loop in the function:
    L_strip = lcm(Ln_access for all accesses in body)
 
 4. Loop selection.
-   Score each candidate loop by (L_strip × number_of_arith_ops_in_body) ÷
-                                  (cost_factor for non-unit accesses).
-   cost_factor = 1.0 for unit / cross_block, ~5 for strided, ~10 for non_affine
-   (gather is ≈10× a unit load on x86 AVX-512). The penalty discourages
-   vectorizing loops where every access is a gather and the win is marginal.
+   For loops where every access is Unit / Broadcast / CrossBlock, score = L_strip
+   (always vectorize when L_strip > 1). For loops with any Strided or NonAffine
+   access, apply a worst-case penalty: score = L_strip / max(cost_factor across
+   accesses). cost_factor: 5 for Strided, 10 for NonAffine. Skip the loop if
+   score ≤ 1.0. **Note:** v1 omits the `× number_of_arith_ops_in_body` factor
+   that an earlier draft of this section described — in practice the all-or-nothing
+   penalty is sufficient for the v1 candidate set.
    Select the loop with the maximum score (ties broken by innermost-first).
 
 5. Vectorization rewrite.

@@ -111,3 +111,37 @@ func.func @cross_block_plus_unit(%A: memref<?xf64>, %B: memref<?xf64>, %C: memre
   }
   return
 }
+
+// -----
+
+// V1 LIMITATION (Tier-B lb!=0 unsoundness): Tier-B probes addr at iv=0..L-1,
+// independent of the loop's actual lower bound. For piecewise-modular access
+// patterns (divui + remui + scaling), the boundary location depends on
+// (lb mod period). When lb != 0, Tier-B may return the wrong boundary.
+//
+// This test documents the current behavior — the loop is vectorized
+// (CrossBlock branch fires) but the boundary may be off. Real correctness for
+// non-zero lb is captured by R12 (which will thread the loop's lb through to
+// Tier-B's probe baseline).
+//
+// CHECK-LABEL: func.func @cross_brick_stencil_nonzero_lb
+// CHECK: vector.transfer_read
+// CHECK: vector.transfer_read
+// CHECK: vector.shuffle
+func.func @cross_brick_stencil_nonzero_lb(%A: memref<?xf64>, %B: memref<?xf64>) {
+  %c8 = arith.constant 8 : index
+  %c16 = arith.constant 16 : index
+  %c32 = arith.constant 32 : index
+  %c1 = arith.constant 1 : index
+  // Same brick stride pattern as cross_brick_stencil but starts at iv=8 (mid-brick).
+  scf.for %z = %c8 to %c32 step %c1 {
+    %zp1 = arith.addi %z, %c1 : index
+    %brick_idx = arith.divui %zp1, %c8 : index
+    %inner = arith.remui %zp1, %c8 : index
+    %brick_off = arith.muli %brick_idx, %c16 : index
+    %total = arith.addi %inner, %brick_off : index
+    %v = memref.load %A[%total] : memref<?xf64>
+    memref.store %v, %B[%z] : memref<?xf64>
+  }
+  return
+}

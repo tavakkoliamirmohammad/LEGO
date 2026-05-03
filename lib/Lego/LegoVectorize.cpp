@@ -876,7 +876,16 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
           auto vecTy = VectorType::get({Ln}, elemTy);
           Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
 
-          // Index for block N+1 base: baseIv + boundary.
+          // V1 LIMITATION (R12): the second-block base is computed as `baseIv + boundary`,
+          // which equals the address of the boundary-th lane in the SAME brick — not the
+          // next brick's base address. This works for FileCheck IR-shape verification but
+          // produces incorrect runtime values for real brick stencils (e.g. brick stride
+          // = BRICK_SIZE * elem_size, not just `boundary`). R12 will thread the brick
+          // stride through from the layout op so this becomes correct.
+          //
+          // For pure within-brick patterns (no cross-brick reads), CrossBlock isn't
+          // triggered — Tier-A classifies as Unit. So the bug only manifests for genuine
+          // cross-brick stencils, all of which are blocked on R12 anyway.
           Value boundaryConst =
               arith::ConstantIndexOp::create(builder, loc, boundary);
           Value blockNp1Iv =

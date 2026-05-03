@@ -31,6 +31,26 @@ installed package from the venv.
 
 Full results (one JSON record per candidate) are written to `results.json`.
 
+## Methodology caveat
+
+The current comparison is **NumPy BLAS scalar reference vs cpu_dsl JIT**. This
+is NOT apples-to-apples for the v1 prototype because:
+
+1. **NumPy is BLAS-accelerated** for SAXPY/GEMM patterns (uses MKL/OpenBLAS).
+   On AVX-512 hardware, this is already heavily vectorized.
+2. **cpu_dsl JIT has ~100µs per-call overhead** (memref descriptor build +
+   ctypes marshalling + JIT entry trampoline). At small N (≤8K elements), this
+   dominates timing.
+
+The result: at N=8192, cpu_dsl shows LOSS even though the inner-loop body is
+correctly vectorized. The numbers measure call-overhead, not vectorization.
+
+For a true apples-to-apples speedup measurement, see the **scalar-JIT vs
+vectorized-JIT** harness invoked via `python run_all.py --isolate-vectorization`.
+That harness compiles each kernel twice — once via `--lego-to-llvm` (scalar)
+and once via `--lego-to-x86-vector` (vectorized) — and compares JIT-vs-JIT,
+isolating the vectorization effect from JIT startup costs.
+
 ## Candidates
 
 | Dir | Layout class | Prior verdict | Expected cpu_dsl verdict |

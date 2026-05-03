@@ -253,9 +253,11 @@ void registerLegoPipelines() {
     "(LEGO -> Arith -> lego-vectorize -> vector dialect -> LLVM)",
     buildLegoToX86VectorPipeline);
 
-  PassPipelineRegistration<LegoToArmNeonPipelineOptions>("lego-to-arm-neon",
-    "Lower LEGO dialect to LLVM IR with ARM NEON intrinsics "
-    "(LEGO -> Arith -> lego-vectorize -> vector dialect -> LLVM)",
+  PassPipelineRegistration<LegoToArmNeonPipelineOptions>(
+    "lego-to-arm-neon",
+    "[v1 stub, R15 will activate] Lower LEGO dialect to LLVM IR — currently "
+    "emits x86 AVX-512 widths even with --lego-to-arm-neon (target threading "
+    "is R15 future work)",
     buildLegoToArmNeonPipeline);
 
 }

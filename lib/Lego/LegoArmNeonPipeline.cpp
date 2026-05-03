@@ -36,6 +36,20 @@ namespace lego {
 
 void buildLegoToArmNeonPipeline(OpPassManager &pm,
                                 const LegoToArmNeonPipelineOptions &opts) {
+  // V1 STUB: this pipeline registers `--lego-to-arm-neon` but emits AVX-512-width
+  // vectors (the `lego-vectorize` pass currently hardcodes target=avx512 — the
+  // option flow through tablegen pass-options had a GCC C++17 brace-init issue
+  // that's deferred to R15).
+  //
+  // On an x86 host, invoking this pipeline produces functionally-correct x86
+  // AVX-512 IR — NOT ARM NEON. To actually target ARM NEON, R15 needs to:
+  //   1. Plumb the target option from this pipeline through to lego-vectorize.
+  //   2. Set the LLVM target triple to aarch64 + features.
+  //   3. Cross-compile via mlir-translate → llc.
+  //
+  // Until R15 lands, this pipeline exists for build-system completeness and
+  // FileCheck IR-shape coverage. Do not use it for ARM execution.
+
   // Phase 1: shared front-end (LEGO → Arith + strength reduction).
   buildLegoLowerPipeline(pm);
 
