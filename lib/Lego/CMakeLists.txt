@@ -27,6 +27,12 @@ if(NOT EMSCRIPTEN)
   add_definitions(-DLEGO_Z3_EXECUTABLE="${Z3_BIN_PATH}")
 endif()
 
+# --- CPU vector pipeline sources (always built) ---
+set(_CPU_VECTOR_SOURCES
+  LegoX86VectorPipeline.cpp
+  LegoArmNeonPipeline.cpp
+)
+
 # --- GPU backend sources (conditional on LLVM targets) ---
 set(_GPU_BACKEND_SOURCES
   LegoSPIRVPipeline.cpp
@@ -111,6 +117,8 @@ add_mlir_dialect_library(MLIRLego
   SMTUtils.cpp
   # JIT (excluded for Emscripten)
   ${_JIT_SOURCES}
+  # CPU vector backends (always built)
+  ${_CPU_VECTOR_SOURCES}
   # GPU backends (conditional)
   ${_GPU_BACKEND_SOURCES}
 
@@ -123,6 +131,8 @@ add_mlir_dialect_library(MLIRLego
   MLIRIR
   MLIRSideEffectInterfaces
   MLIRVectorDialect
+  MLIRVectorToLLVM
+  MLIRVectorToLLVMPass
   # SMT verification
   MLIRSMT
   MLIRExportSMTLIB

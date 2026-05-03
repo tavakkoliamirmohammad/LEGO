@@ -248,6 +248,16 @@ void registerLegoPipelines() {
     buildLegoToXeVMPipeline);
 #endif
 
+  PassPipelineRegistration<LegoToX86VectorPipelineOptions>("lego-to-x86-vector",
+    "Lower LEGO dialect to LLVM IR with x86 vector intrinsics (AVX-512/AVX2) "
+    "(LEGO -> Arith -> lego-vectorize -> vector dialect -> LLVM)",
+    buildLegoToX86VectorPipeline);
+
+  PassPipelineRegistration<LegoToArmNeonPipelineOptions>("lego-to-arm-neon",
+    "Lower LEGO dialect to LLVM IR with ARM NEON intrinsics "
+    "(LEGO -> Arith -> lego-vectorize -> vector dialect -> LLVM)",
+    buildLegoToArmNeonPipeline);
+
 }
 
 } // namespace lego

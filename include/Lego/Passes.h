@@ -120,9 +120,31 @@ struct LegoToXeVMPipelineOptions
 #endif
 
 
+/// Options for the lego-to-x86-vector pipeline.
+struct LegoToX86VectorPipelineOptions
+    : public PassPipelineOptions<LegoToX86VectorPipelineOptions> {
+  PassOptions::Option<std::string> cpu{
+      *this, "cpu",
+      llvm::cl::desc("Target CPU: skx|znver3|... (sets LLVM target features)"),
+      llvm::cl::init("skx")};
+};
+
+/// Options for the lego-to-arm-neon pipeline.
+struct LegoToArmNeonPipelineOptions
+    : public PassPipelineOptions<LegoToArmNeonPipelineOptions> {
+  PassOptions::Option<std::string> cpu{
+      *this, "cpu",
+      llvm::cl::desc("ARM CPU: cortex-a76|... (sets LLVM target features)"),
+      llvm::cl::init("cortex-a76")};
+};
+
 void registerLegoPipelines();
 void buildLegoLowerPipeline(OpPassManager &pm);
 void buildLegoToLLVMPipeline(OpPassManager &pm);
+void buildLegoToX86VectorPipeline(OpPassManager &pm,
+                                  const LegoToX86VectorPipelineOptions &opts);
+void buildLegoToArmNeonPipeline(OpPassManager &pm,
+                                const LegoToArmNeonPipelineOptions &opts);
 void buildLegoToSPIRVPipeline(OpPassManager &pm,
                                const LegoToSPIRVPipelineOptions &options);
 #ifdef LEGO_HAS_SPIRV
