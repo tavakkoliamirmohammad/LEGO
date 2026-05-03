@@ -47,16 +47,18 @@ def main():
 
     t_scalar = float("nan")
     try:
-        sj = _bench.compile(target="scalar")
-        t_scalar = _measure(lambda: sj(A_np, B_np))
+        # Warmup compile + one bench call, then measure
+        _bench.bench(A_np, B_np, n_iters=100, target="scalar")
+        t_scalar = _bench.bench(A_np, B_np, n_iters=3000, target="scalar")
     except Exception:
         pass
 
     t_vec = float("nan")
     notes = ""
     try:
-        vj = _bench.compile(target="x86")
-        t_vec = _measure(lambda: vj(A_np, B_np))
+        # Warmup compile + one bench call, then measure
+        _bench.bench(A_np, B_np, n_iters=100, target="x86")
+        t_vec = _bench.bench(A_np, B_np, n_iters=3000, target="x86")
     except Exception as e:
         notes = str(e)
 
