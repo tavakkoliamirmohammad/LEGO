@@ -25,23 +25,21 @@ def main():
     t_numpy = _measure(lambda: kernel_scalar(A, B_ref))
 
     t_scalar_jit = float('nan')
+    B_sc = np.zeros(N_FLAT, dtype=np.float32)
     try:
-        sj = kernel_cpu_dsl.compile(target='scalar')
-        B_sc = np.zeros(N_FLAT, dtype=np.float32)
-        t_scalar_jit = _measure(lambda: sj(A, B_sc))
+        t_scalar_jit = kernel_cpu_dsl.bench_self_timed(A, B_sc, n_iters=1000, n_warmup=100, target='scalar')
     except Exception:
         pass
 
     t_vec_jit = float('nan')
+    B_v = np.zeros(N_FLAT, dtype=np.float32)
     notes = ""
     try:
-        vj = kernel_cpu_dsl.compile(target='x86')
-        B_v = np.zeros(N_FLAT, dtype=np.float32)
-        t_vec_jit = _measure(lambda: vj(A, B_v))
-        B_v2 = np.zeros(N_FLAT, dtype=np.float32)
-        vj(A, B_v2)
+        t_vec_jit = kernel_cpu_dsl.bench_self_timed(A, B_v, n_iters=1000, n_warmup=100, target='x86')
         B_sc2 = np.zeros(N_FLAT, dtype=np.float32)
         kernel_cpu_dsl.compile(target='scalar')(A, B_sc2)
+        B_v2 = np.zeros(N_FLAT, dtype=np.float32)
+        kernel_cpu_dsl.compile(target='x86')(A, B_v2)
         np.testing.assert_allclose(B_v2[_OFFSET:_OFFSET + _INNER],
                                    B_sc2[_OFFSET:_OFFSET + _INNER], rtol=1e-4)
     except Exception as e:

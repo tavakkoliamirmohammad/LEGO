@@ -41,20 +41,18 @@ def main():
     B_flat = np.ascontiguousarray(B_2d.ravel())
     C_flat = np.zeros(_MN, dtype=np.float32)
 
-    # Scalar JIT baseline — use bench() to eliminate invoke overhead.
+    # Scalar JIT baseline — bench_self_timed uses clock_gettime inside the JIT'd code.
     t_scalar = float("nan")
     try:
-        kernel_cpu_dsl.bench(A_flat, B_flat, C_flat, n_iters=10, target="scalar")  # warmup compile
-        t_scalar = kernel_cpu_dsl.bench(A_flat, B_flat, C_flat, n_iters=N_ITERS, target="scalar")
+        t_scalar = kernel_cpu_dsl.bench_self_timed(A_flat, B_flat, C_flat, n_iters=N_ITERS, n_warmup=100, target="scalar")
     except Exception:
         pass
 
-    # Vectorized JIT — bench() for same reason.
+    # Vectorized JIT — bench_self_timed for MLIR-level timing.
     t_vec = float("nan")
     notes = ""
     try:
-        kernel_cpu_dsl.bench(A_flat, B_flat, C_flat, n_iters=10, target="x86")    # warmup compile
-        t_vec = kernel_cpu_dsl.bench(A_flat, B_flat, C_flat, n_iters=N_ITERS, target="x86")
+        t_vec = kernel_cpu_dsl.bench_self_timed(A_flat, B_flat, C_flat, n_iters=N_ITERS, n_warmup=100, target="x86")
     except Exception as e:
         notes = str(e)
 

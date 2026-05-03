@@ -52,19 +52,17 @@ def main():
     t_numpy = _measure(lambda: _numpy_scalar(A, B, C_ref.copy()))
 
     t_scalar = float('nan')
+    C_s = C_ref.copy()
     try:
-        sj = _bench.compile(target='scalar')
-        C_s = C_ref.copy()
-        t_scalar = _measure(lambda: sj(A, B, C_s))
+        t_scalar = _bench.bench_self_timed(A, B, C_s, n_iters=300, n_warmup=50, target='scalar')
     except Exception:
         pass
 
     t_vec = float('nan')
+    C_v = C_ref.copy()
     notes = ""
     try:
-        vj = _bench.compile(target='x86')
-        C_v = C_ref.copy()
-        t_vec = _measure(lambda: vj(A, B, C_v))
+        t_vec = _bench.bench_self_timed(A, B, C_v, n_iters=300, n_warmup=50, target='x86')
     except Exception as e:
         notes = str(e)
 

@@ -39,24 +39,23 @@ def main():
     B_flat = B_2d.ravel()
 
     t_scalar_jit = float('nan')
+    C_scalar = np.zeros(_MN, dtype=np.float32)
     try:
-        scalar_jit = kernel_cpu_dsl.compile(target='scalar')
-        C_scalar = np.zeros(_MN, dtype=np.float32)
-        t_scalar_jit = _measure(lambda: scalar_jit(A_flat, B_flat, C_scalar))
+        t_scalar_jit = kernel_cpu_dsl.bench_self_timed(A_flat, B_flat, C_scalar, n_iters=200, n_warmup=50, target='scalar')
     except Exception:
         pass
 
     t_vec_jit = float('nan')
+    C_vec = np.zeros(_MN, dtype=np.float32)
     notes = ""
     try:
+        # Correctness check first.
         vec_jit = kernel_cpu_dsl.compile(target='x86')
-        C_vec = np.zeros(_MN, dtype=np.float32)
-        t_vec_jit = _measure(lambda: vec_jit(A_flat, B_flat, C_vec))
-        # Quick correctness check: run once and compare to numpy
         C_check = np.zeros(_MN, dtype=np.float32)
         vec_jit(A_flat, B_flat, C_check)
         C_ref = A_2d @ B_2d
         np.testing.assert_allclose(C_check.reshape(M, N), C_ref, rtol=1e-3)
+        t_vec_jit = kernel_cpu_dsl.bench_self_timed(A_flat, B_flat, C_vec, n_iters=200, n_warmup=50, target='x86')
     except Exception as e:
         t_vec_jit = float('nan')
         notes = str(e)

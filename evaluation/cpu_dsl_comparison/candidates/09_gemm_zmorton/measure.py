@@ -54,22 +54,20 @@ def main():
     C_np = C_big.copy()
     t_numpy = _measure(lambda: _numpy_scalar(A_big, B_big, C_np))
 
-    # Scalar JIT
+    # Scalar JIT — bench_self_timed uses clock_gettime inside the JIT'd code.
     t_scalar = float('nan')
+    C_s = C_big.copy()
     try:
-        scalar_jit = _kernel_bench_vec.compile(target='scalar')
-        C_s = C_big.copy()
-        t_scalar = _measure(lambda: scalar_jit(A_big, B_big, C_s))
-    except Exception as e:
+        t_scalar = _kernel_bench_vec.bench_self_timed(A_big, B_big, C_s, n_iters=300, n_warmup=50, target='scalar')
+    except Exception:
         pass
 
-    # Vector JIT
+    # Vector JIT — bench_self_timed for MLIR-level timing.
     t_vec = float('nan')
+    C_v = C_big.copy()
     notes = ""
     try:
-        vec_jit = _kernel_bench_vec.compile(target='x86')
-        C_v = C_big.copy()
-        t_vec = _measure(lambda: vec_jit(A_big, B_big, C_v))
+        t_vec = _kernel_bench_vec.bench_self_timed(A_big, B_big, C_v, n_iters=300, n_warmup=50, target='x86')
     except Exception as e:
         notes = str(e)
 

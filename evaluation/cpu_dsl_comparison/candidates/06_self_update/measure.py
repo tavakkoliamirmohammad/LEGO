@@ -35,20 +35,18 @@ def main():
         kernel_scalar(A, B)
     t_numpy = (time.perf_counter_ns() - t0) / timed / 1e6
 
-    # Scalar JIT baseline — use bench() to measure pure kernel time.
+    # Scalar JIT baseline — bench_self_timed uses clock_gettime inside the JIT'd code.
     t_scalar = float("nan")
     try:
-        kernel_cpu_dsl.bench(A, B, n_iters=100, target="scalar")   # warmup compile
-        t_scalar = kernel_cpu_dsl.bench(A, B, n_iters=N_ITERS, target="scalar")
+        t_scalar = kernel_cpu_dsl.bench_self_timed(A, B, n_iters=N_ITERS, n_warmup=100, target="scalar")
     except Exception:
         pass
 
-    # Vectorized JIT — use bench() for the same reason.
+    # Vectorized JIT — bench_self_timed for MLIR-level timing.
     t_vec = float("nan")
     notes = ""
     try:
-        kernel_cpu_dsl.bench(A, B, n_iters=100, target="x86")      # warmup compile
-        t_vec = kernel_cpu_dsl.bench(A, B, n_iters=N_ITERS, target="x86")
+        t_vec = kernel_cpu_dsl.bench_self_timed(A, B, n_iters=N_ITERS, n_warmup=100, target="x86")
     except Exception as e:
         notes = str(e)
 

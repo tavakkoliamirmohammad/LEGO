@@ -40,20 +40,18 @@ def main():
     B_base = B_ref.copy()
     t_numpy = _measure(lambda: kernel_scalar(A, B_base))
 
-    # Scalar JIT baseline (apples-to-apples) — use bench() to avoid
-    # Python-loop overhead that would bias small-N results toward LOSS.
+    # Scalar JIT baseline — bench_self_timed uses clock_gettime inside the JIT'd code.
     t_scalar_jit = float('nan')
     try:
-        kernel_cpu_dsl.bench(A, B_ref, n_iters=100, target='scalar')  # warmup
-        t_scalar_jit = kernel_cpu_dsl.bench(A, B_ref, n_iters=N_ITERS, target='scalar')
+        t_scalar_jit = kernel_cpu_dsl.bench_self_timed(A, B_ref, n_iters=N_ITERS, n_warmup=100, target='scalar')
     except Exception:
         t_scalar_jit = float('nan')
 
-    # Vectorized JIT — bench() for unbiased timing.
+    # Vectorized JIT — bench_self_timed for MLIR-level timing.
     t_vec_jit = float('nan')
     notes = ""
     try:
-        # Correctness check with compile() before bench timing.
+        # Correctness check with compile() before timing.
         vec_jit = kernel_cpu_dsl.compile(target='x86')
         B_check_base = np.zeros(N, dtype=np.float32)
         B_check_dsl = np.zeros(N, dtype=np.float32)
@@ -62,9 +60,7 @@ def main():
         np.testing.assert_allclose(B_check_dsl[1:-1], B_check_base[1:-1],
                                    rtol=1e-4,
                                    err_msg="3pt stencil correctness mismatch")
-        # Now measure with bench().
-        kernel_cpu_dsl.bench(A, B_ref, n_iters=100, target='x86')  # warmup
-        t_vec_jit = kernel_cpu_dsl.bench(A, B_ref, n_iters=N_ITERS, target='x86')
+        t_vec_jit = kernel_cpu_dsl.bench_self_timed(A, B_ref, n_iters=N_ITERS, n_warmup=100, target='x86')
     except Exception as e:
         t_vec_jit = float('nan')
         notes = str(e)

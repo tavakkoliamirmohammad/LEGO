@@ -43,22 +43,20 @@ def main():
     # NumPy reference
     t_numpy = _measure(lambda: kernel_scalar(A_np, B_np, C_np))
 
-    # Scalar JIT
+    # Scalar JIT — bench_self_timed uses clock_gettime inside the JIT'd code.
     t_scalar = float("nan")
+    C_sc = np.zeros(_NN, dtype=np.float32)
     try:
-        sj = kernel_cpu_dsl.compile(target="scalar")
-        C_sc = np.zeros(_NN, dtype=np.float32)
-        t_scalar = _measure(lambda: sj(A_np, B_np, C_sc))
+        t_scalar = kernel_cpu_dsl.bench_self_timed(A_np, B_np, C_sc, n_iters=30, n_warmup=5, target="scalar")
     except Exception:
         pass
 
-    # Vectorized JIT
+    # Vectorized JIT — bench_self_timed for MLIR-level timing.
     t_vec = float("nan")
+    C_vec = np.zeros(_NN, dtype=np.float32)
     notes = ""
     try:
-        vj = kernel_cpu_dsl.compile(target="x86")
-        C_vec = np.zeros(_NN, dtype=np.float32)
-        t_vec = _measure(lambda: vj(A_np, B_np, C_vec))
+        t_vec = kernel_cpu_dsl.bench_self_timed(A_np, B_np, C_vec, n_iters=30, n_warmup=5, target="x86")
     except Exception as e:
         notes = str(e)
 

@@ -43,22 +43,20 @@ def main():
 
     A_flat = np.ascontiguousarray(A_2d).ravel()
 
-    # Scalar JIT baseline (apples-to-apples).
+    # Scalar JIT baseline — bench_self_timed uses clock_gettime inside the JIT'd code.
     t_scalar_jit = float('nan')
+    C_scalar = np.zeros(_MN, dtype=np.float32)
     try:
-        scalar_jit = kernel_cpu_dsl.compile(target='scalar')
-        C_scalar = np.zeros(_MN, dtype=np.float32)
-        t_scalar_jit = _measure(lambda: scalar_jit(A_flat, C_scalar))
+        t_scalar_jit = kernel_cpu_dsl.bench_self_timed(A_flat, C_scalar, n_iters=1000, n_warmup=100, target='scalar')
     except Exception as e:
         t_scalar_jit = float('nan')
 
-    # Vectorized JIT.
+    # Vectorized JIT — bench_self_timed for MLIR-level timing.
     t_vec_jit = float('nan')
+    C_dsl = np.zeros(_MN, dtype=np.float32)
     notes = ""
     try:
-        vec_jit = kernel_cpu_dsl.compile(target='x86')
-        C_dsl = np.zeros(_MN, dtype=np.float32)
-        t_vec_jit = _measure(lambda: vec_jit(A_flat, C_dsl))
+        t_vec_jit = kernel_cpu_dsl.bench_self_timed(A_flat, C_dsl, n_iters=1000, n_warmup=100, target='x86')
     except Exception as e:
         t_vec_jit = float('nan')
         notes = str(e)

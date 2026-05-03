@@ -64,30 +64,26 @@ def main():
     Y_numpy = Y_big_ref.copy()
     t_numpy = _measure(lambda: kernel_scalar(a, X_big, Y_numpy))
 
-    # Scalar JIT baseline (apples-to-apples).
+    # Scalar JIT baseline — bench_self_timed uses clock_gettime inside the JIT'd code.
     t_scalar_jit = float('nan')
+    Y_scalar = Y_big_ref.copy()
     try:
-        scalar_jit = _kernel_bench.compile(target='scalar')
-        Y_scalar = Y_big_ref.copy()
-        t_scalar_jit = _measure(lambda: scalar_jit(a, X_big, Y_scalar))
+        t_scalar_jit = _kernel_bench.bench_self_timed(a, X_big, Y_scalar, n_iters=1000, n_warmup=100, target='scalar')
     except Exception as e:
         t_scalar_jit = float('nan')
-        _scalar_err = str(e)
 
-    # Vectorized JIT.
+    # Vectorized JIT — bench_self_timed for MLIR-level timing.
     t_vec_jit = float('nan')
+    Y_vec = Y_big_ref.copy()
     notes = ""
     try:
-        vec_jit = _kernel_bench.compile(target='x86')
-        Y_vec = Y_big_ref.copy()
-        t_vec_jit = _measure(lambda: vec_jit(a, X_big, Y_vec))
-
-        # Correctness at small N.
+        # Correctness at small N first.
         Y_check_dsl = Y_ref.copy()
         vec_jit_small = kernel_cpu_dsl.compile(target='x86')
         vec_jit_small(a, X_s, Y_check_dsl)
         np.testing.assert_allclose(Y_check_dsl, Y_check_base, rtol=1e-4,
                                    err_msg="saxpy correctness mismatch")
+        t_vec_jit = _kernel_bench.bench_self_timed(a, X_big, Y_vec, n_iters=1000, n_warmup=100, target='x86')
     except Exception as e:
         t_vec_jit = float('nan')
         notes = str(e)

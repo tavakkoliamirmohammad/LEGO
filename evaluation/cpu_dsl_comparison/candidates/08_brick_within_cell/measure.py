@@ -62,29 +62,26 @@ def main():
     B_numpy = B_big_ref.copy()
     t_numpy = _measure(lambda: kernel_scalar(A_big, B_numpy))
 
-    # Scalar JIT baseline.
+    # Scalar JIT baseline — bench_self_timed uses clock_gettime inside the JIT'd code.
     t_scalar_jit = float('nan')
+    B_scalar = B_big_ref.copy()
     try:
-        scalar_jit = _kernel_bench.compile(target='scalar')
-        B_scalar = B_big_ref.copy()
-        t_scalar_jit = _measure(lambda: scalar_jit(A_big, B_scalar))
+        t_scalar_jit = _kernel_bench.bench_self_timed(A_big, B_scalar, n_iters=1000, n_warmup=100, target='scalar')
     except Exception as e:
         t_scalar_jit = float('nan')
 
-    # Vectorized JIT.
+    # Vectorized JIT — bench_self_timed for MLIR-level timing.
     t_vec_jit = float('nan')
+    B_vec = B_big_ref.copy()
     notes = "NumPy BLAS loop is heavily optimised; isolation shows JIT vectorization benefit"
     try:
-        vec_jit = _kernel_bench.compile(target='x86')
-        B_vec = B_big_ref.copy()
-        t_vec_jit = _measure(lambda: vec_jit(A_big, B_vec))
-
-        # Correctness at small N.
+        # Correctness at small N first.
         B_check_dsl = B_ref.copy()
         vec_jit_small = kernel_cpu_dsl.compile(target='x86')
         vec_jit_small(A_s, B_check_dsl)
         np.testing.assert_allclose(B_check_dsl, B_check_base, rtol=1e-4,
                                    err_msg="brick_within_cell correctness mismatch")
+        t_vec_jit = _kernel_bench.bench_self_timed(A_big, B_vec, n_iters=1000, n_warmup=100, target='x86')
     except Exception as e:
         t_vec_jit = float('nan')
         notes = str(e)
