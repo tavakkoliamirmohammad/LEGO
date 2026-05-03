@@ -47,11 +47,13 @@ AccessClassification solveAccessTierA(Operation *memrefOp, Value iv,
 
 // Speculative unroll: compute concrete addr(iv+0..L-1) for the given memref op,
 // classify based on the actual address sequence.
-//   - If all addresses differ by elementBytes from the previous: Unit.
-//   - If they form a constant-stride pattern (uniform but != elementBytes): Strided(c).
+//   Note: memref indices are in element units (not bytes), so unit stride means
+//   consecutive element indices differ by 1, not by elementBytes.
+//   - If all consecutive differences == 1: Unit.
+//   - If they form a constant-stride pattern (uniform but != 1 and != 0): Strided(c).
 //   - If the address is loop-invariant (all diffs == 0): Broadcast.
-//   - If they partition into exactly two contiguous runs of unit stride with
-//     a single jump between them: CrossBlock(boundary).
+//   - If they partition into exactly two contiguous runs of unit stride (diff==1)
+//     with a single jump between them: CrossBlock(boundary).
 //   - Otherwise: NonAffine.
 //
 // Layout-agnostic — uses the lightweight AffineVal evaluator from Tier A

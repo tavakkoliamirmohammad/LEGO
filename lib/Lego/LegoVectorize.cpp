@@ -332,7 +332,9 @@ AccessClassification solveAccessTierB(Operation *memrefOp, Value iv,
   }
 
   if (uniform) {
-    if (firstStep == elementBytes) {
+    // memref indices are in element units (not bytes), so unit stride means
+    // consecutive element indices differ by 1, not by elementBytes.
+    if (firstStep == 1) {
       cls.kind = AccessKind::Unit;
       cls.stride = elementBytes;
     } else if (firstStep == 0) {
@@ -346,11 +348,12 @@ AccessClassification solveAccessTierB(Operation *memrefOp, Value iv,
 
   // Cross-block detection: two contiguous runs of unit stride with one jump.
   if (boundaryCount == 1) {
-    // Verify both segments have unit-stride (elementBytes per step).
+    // Verify both segments have unit-stride (consecutive element indices
+    // differ by 1, since memref indices are in element units, not bytes).
     bool segmentsUnit = true;
     for (size_t i = 1; i < addrs.size(); ++i) {
       if ((int64_t)i == boundary) continue;  // skip the jump step
-      if (addrs[i] - addrs[i - 1] != elementBytes) {
+      if (addrs[i] - addrs[i - 1] != 1) {
         segmentsUnit = false;
         break;
       }
