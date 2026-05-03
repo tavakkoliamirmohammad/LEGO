@@ -1,0 +1,66 @@
+[
+  {
+    "name": "01_saxpy",
+    "baseline_ms": 0.0039,
+    "cpu_dsl_ms": 0.1095,
+    "speedup": 0.0358,
+    "verdict": "LOSS",
+    "notes": ""
+  },
+  {
+    "name": "02_gemm_row_major",
+    "baseline_ms": 0.0065,
+    "cpu_dsl_ms": 0.2731,
+    "speedup": 0.0239,
+    "verdict": "LOSS",
+    "notes": ""
+  },
+  {
+    "name": "03_3pt_stencil_1d",
+    "baseline_ms": 0.0023,
+    "cpu_dsl_ms": NaN,
+    "speedup": NaN,
+    "verdict": "ERROR",
+    "notes": "CPU compilation failed (lego-to-x86-vector):\nFailure while executing pass pipeline:\nerror: unknown: 'memref.store' op failed to verify that type of 'value' matches element type of 'memref'\n note: unknown: see current operation: \"memref.store\"(%259, %arg1, %90) : (vector<16xf32>, memref<1024xf32>, index) -> ()"
+  },
+  {
+    "name": "04_col_major_inner",
+    "baseline_ms": 0.0465,
+    "cpu_dsl_ms": 0.1517,
+    "speedup": 0.3066,
+    "verdict": "LOSS",
+    "notes": ""
+  },
+  {
+    "name": "05_morton_2d",
+    "baseline_ms": 0.1184,
+    "cpu_dsl_ms": 0.1798,
+    "speedup": 0.6584,
+    "verdict": "LOSS",
+    "notes": "DSL uses identity index (z\u2192z); Morton decode blocked by missing bitwise ops in v1 DSL.  Correctness check skipped."
+  },
+  {
+    "name": "06_self_update",
+    "baseline_ms": 0.0152,
+    "cpu_dsl_ms": 0.1049,
+    "speedup": 0.1451,
+    "verdict": "LOSS",
+    "notes": "Loop-carried dep; DSL output may differ from baseline. Correctness check intentionally skipped."
+  },
+  {
+    "name": "07_mixed_precision",
+    "baseline_ms": 0.004,
+    "cpu_dsl_ms": 0.1074,
+    "speedup": 0.0369,
+    "verdict": "LOSS",
+    "notes": "scale=1.5 baked as f32 constant; 2-buffer form avoids v1 R12 store bug"
+  },
+  {
+    "name": "08_brick_within_cell",
+    "baseline_ms": 0.0722,
+    "cpu_dsl_ms": 0.1305,
+    "speedup": 0.5529,
+    "verdict": "LOSS",
+    "notes": "NumPy BLAS loop is heavily optimised; beating it requires FMA intrinsic quality (R12 roadmap)."
+  }
+]
