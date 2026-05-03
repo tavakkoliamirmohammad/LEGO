@@ -91,6 +91,7 @@ CT_FLOAT = "ct_float"    # compile-time Python float
 INDEX = "index"          # MLIR index Value
 F32 = "f32"              # MLIR f32 Value
 I1 = "i1"               # MLIR i1 Value
+I32 = "i32"             # MLIR i32 Value (result of bitwise/shift ops on index)
 MMA_FRAG = "mma_frag"   # MLIR !gpu.mma_matrix Value
 CT_OBJ = "ct_obj"       # compile-time Python object (TensorCore, etc.)
 
@@ -103,6 +104,10 @@ def _to_runtime(ctx, val, tag, target_tag=None):
     """Promote a compile-time value to an MLIR constant."""
     if tag == CT_FLOAT or target_tag == F32:
         return ctx.const_f32(float(val)), F32
+    if target_tag == I32:
+        from lego.mlir.ir import IntegerType
+        i32 = IntegerType.get_signless(32)
+        return arith_dialect.ConstantOp(i32, int(val)).result, I32
     return ctx.const_index(int(val)), INDEX
 
 
@@ -405,20 +410,45 @@ class _Compiler:
 
     # -- binary ops ----------------------------------------------------
 
+    _BITWISE_OPS = (ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift)
+
     def _binop(self, node):
         lv, lt = self._expr(node.left)
         rv, rt = self._expr(node.right)
+        op = type(node.op)
         if _is_ct(lt) and _is_ct(rt):
-            return self._binop_ct(lv, lt, rv, rt, type(node.op))
+            return self._binop_ct(lv, lt, rv, rt, op)
+        # For bitwise/shift ops, promote CT_INT directly to I32 (not INDEX).
+        # This avoids generating index_const + index_cast chains which confuse
+        # the vectorizer (index_cast from scalar index to vector<N xi32> is invalid).
+        if op in self._BITWISE_OPS:
+            from lego.mlir.ir import IntegerType as _IT
+            i32 = _IT.get_signless(32)
+            if _is_ct(lt):
+                lv = arith_dialect.ConstantOp(i32, int(lv)).result
+                lt = I32
+            elif lt == INDEX:
+                lv = arith_dialect.IndexCastOp(i32, lv).result
+                lt = I32
+            if _is_ct(rt):
+                rv = arith_dialect.ConstantOp(i32, int(rv)).result
+                rt = I32
+            elif rt == INDEX:
+                rv = arith_dialect.IndexCastOp(i32, rv).result
+                rt = I32
+            return self._binop_rt(lv, lt, rv, rt, op)
         lv, lt, rv, rt = _promote(self.ctx, lv, lt, rv, rt)
-        return self._binop_rt(lv, lt, rv, rt, type(node.op))
+        return self._binop_rt(lv, lt, rv, rt, op)
 
     @staticmethod
     def _binop_ct(lv, lt, rv, rt, op):
         ops = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
                ast.Mult: lambda a, b: a * b, ast.FloorDiv: lambda a, b: a // b,
                ast.Mod: lambda a, b: a % b, ast.Div: lambda a, b: a / b,
-               ast.Pow: lambda a, b: a ** b}
+               ast.Pow: lambda a, b: a ** b,
+               ast.BitAnd: lambda a, b: a & b, ast.BitOr: lambda a, b: a | b,
+               ast.BitXor: lambda a, b: a ^ b,
+               ast.LShift: lambda a, b: a << b, ast.RShift: lambda a, b: a >> b}
         r = ops[op](lv, rv)
         tag = CT_FLOAT if isinstance(r, float) or lt == CT_FLOAT or rt == CT_FLOAT else CT_INT
         return (r if tag == CT_FLOAT else int(r), tag)
@@ -442,11 +472,42 @@ class _Compiler:
             m = {ast.Add: self.ctx.addf, ast.Sub: self.ctx.subf,
                  ast.Mult: self.ctx.mulf, ast.Div: lambda a, b: arith_dialect.DivFOp(a, b).result}
             return (m[op](lv, rv), F32)
+        # Bitwise / shift ops: cast index → i32, operate, return I32 tag.
+        # (MLIR arith bitwise ops require integer type, not index type.)
+        _bitwise_ops = (ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift)
+        if op in _bitwise_ops:
+            from lego.mlir.ir import IntegerType
+            i32 = IntegerType.get_signless(32)
+            if lt == INDEX:
+                lv = arith_dialect.IndexCastOp(i32, lv).result
+            elif lt == I32:
+                pass  # already i32
+            if rt == INDEX:
+                rv = arith_dialect.IndexCastOp(i32, rv).result
+            elif rt == I32:
+                pass  # already i32
+            bm = {
+                ast.BitAnd: lambda a, b: arith_dialect.AndIOp(a, b).result,
+                ast.BitOr:  lambda a, b: arith_dialect.OrIOp(a, b).result,
+                ast.BitXor: lambda a, b: arith_dialect.XOrIOp(a, b).result,
+                ast.LShift: lambda a, b: arith_dialect.ShLIOp(a, b).result,
+                ast.RShift: lambda a, b: arith_dialect.ShRUIOp(a, b).result,
+            }
+            return (bm[op](lv, rv), I32)
         m = {ast.Add: self.ctx.addi,
              ast.Sub: lambda a, b: arith_dialect.SubIOp(a, b).result,
              ast.Mult: self.ctx.muli,
              ast.FloorDiv: lambda a, b: arith_dialect.FloorDivSIOp(a, b).result,
              ast.Mod: lambda a, b: arith_dialect.RemUIOp(a, b).result}
+        # If either operand is I32 from a prior bitwise op, cast to index first.
+        if lt == I32:
+            from lego.mlir.ir import IndexType
+            lv = arith_dialect.IndexCastOp(IndexType.get(), lv).result
+            lt = INDEX
+        if rt == I32:
+            from lego.mlir.ir import IndexType
+            rv = arith_dialect.IndexCastOp(IndexType.get(), rv).result
+            rt = INDEX
         return (m[op](lv, rv), INDEX)
 
     def _unary(self, node):
@@ -520,6 +581,10 @@ class _Compiler:
             v, t = self._expr(e)
             if _is_ct(t):
                 v, t = _to_runtime(self.ctx, v, t, INDEX)
+            elif t == I32:
+                from lego.mlir.ir import IndexType
+                v = arith_dialect.IndexCastOp(IndexType.get(), v).result
+                t = INDEX
             out.append(v)
         return out
 
@@ -710,6 +775,9 @@ class _Compiler:
         v, t = pair
         if _is_ct(t):
             return _index_const(int(v))
+        if t == I32:
+            from lego.mlir.ir import IndexType
+            return arith_dialect.IndexCastOp(IndexType.get(), v).result
         return v
 
     def _modified_names(self, stmts):

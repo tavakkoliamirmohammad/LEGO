@@ -40,7 +40,7 @@ import textwrap
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from lego.mlir.ir import InsertionPoint, F32Type, IntegerType
+from lego.mlir.ir import InsertionPoint, F32Type, IntegerType, IndexType
 from lego.mlir.dialects import arith as arith_dialect
 from lego.mlir.dialects import scf as scf_dialect
 
@@ -91,6 +91,7 @@ CT_FLOAT = "ct_float"  # compile-time Python float
 INDEX    = "index"     # MLIR index Value
 F32      = "f32"       # MLIR f32 Value
 I1       = "i1"        # MLIR i1 Value
+I32      = "i32"       # MLIR i32 Value (result of bitwise/shift ops on index)
 CT_OBJ   = "ct_obj"   # compile-time Python object (layouts, etc.)
 
 
@@ -102,6 +103,9 @@ def _to_runtime(ctx, val, tag, target_tag=None):
     """Promote a compile-time Python value to an MLIR constant."""
     if tag == CT_FLOAT or target_tag == F32:
         return ctx.const_f32(float(val)), F32
+    if target_tag == I32:
+        i32 = IntegerType.get_signless(32)
+        return arith_dialect.ConstantOp(i32, int(val)).result, I32
     return ctx.const_index(int(val)), INDEX
 
 
@@ -182,34 +186,20 @@ def _build(fn, grid, tile):
     scalar_dtypes = [dtype_str for _, dtype_str in scalar_params_meta]
 
     def kernel_body(ctx):
-        if tile is not None:
-            # Outer grid loop: iterates over tiles (tile_id = 0 .. num_tiles-1).
-            num_tiles = grid[0] // tile[0]
-            outer_loop = scf_dialect.ForOp(
-                _index_const(0), _index_const(num_tiles), _index_const(1))
-            with InsertionPoint(outer_loop.body):
-                tile_id = outer_loop.induction_variable
-                _Compiler(
-                    ctx=ctx,
-                    func_def=func_def,
-                    buf_params=buf_params,
-                    scalar_params=scalar_params_meta,
-                    outer=outer,
-                    grid=grid,
-                    tile=tile,
-                    tile_id=tile_id,
-                ).run()
-                scf_dialect.YieldOp([])
-        else:
-            _Compiler(
-                ctx=ctx,
-                func_def=func_def,
-                buf_params=buf_params,
-                scalar_params=scalar_params_meta,
-                outer=outer,
-                grid=grid,
-                tile=tile,
-            ).run()
+        # Emit a SINGLE flat loop over [0, grid[0]).
+        # lego-vectorize will strip-mine this loop by the tile factor internally,
+        # eliminating the outer tile_id overhead that the old two-level nest had.
+        # The tile parameter is passed to _Compiler only to inform tile_range
+        # rewrites; no outer scf.for over tile_id is emitted here.
+        _Compiler(
+            ctx=ctx,
+            func_def=func_def,
+            buf_params=buf_params,
+            scalar_params=scalar_params_meta,
+            outer=outer,
+            grid=grid,
+            tile=tile,
+        ).run()
 
     return CPUKernelBuilder(
         buffers=buffers,
@@ -233,17 +223,16 @@ class _Compiler:
     CPU additions:
     - Scalar function arguments appear in ``env`` as f32 / index Values.
     - ``tile_range`` sentinel in ``for i in tile_range:`` is rewritten to
-      ``range(tile[0])`` (using the tile parameter from ``@cpu_kernel``).
+      ``range(grid[0])`` (flat loop; lego-vectorize strip-mines internally).
     """
 
     def __init__(self, ctx, func_def, buf_params, scalar_params, outer,
-                 grid=None, tile=None, tile_id=None):
+                 grid=None, tile=None):
         self.ctx = ctx
         self.func_def = func_def
         self.outer = outer
         self.grid = grid
         self.tile = tile
-        self._tile_id = tile_id   # outer-loop IV (MLIR Value); None if no tiling
         self.env = {}         # name → (value, tag)
         self.buf_map = {}     # name → buffer index (among buf_params only)
 
@@ -316,16 +305,17 @@ class _Compiler:
         var = node.target.id
         call = node.iter
 
-        # Detect ``for i in tile_range:`` — rewrite to range(tile[0])
+        # Detect ``for i in tile_range:`` — rewrite to range(grid[0]).
+        # With the flat-loop model (no outer tile_id loop), tile_range maps to
+        # the entire grid extent. lego-vectorize will strip-mine internally.
         _is_tile_range = isinstance(call, ast.Name) and call.id == "tile_range"
         if _is_tile_range:
-            # Substitute with range(tile)
-            if self.tile is None:
+            if self.grid is None:
                 raise ValueError(
-                    "``tile_range`` used but @cpu_kernel was not given a ``tile`` arg"
+                    "``tile_range`` used but @cpu_kernel was not given a ``grid`` arg"
                 )
-            tile_size = self.tile[0]
-            ub = _index_const(tile_size)
+            grid_size = self.grid[0]
+            ub = _index_const(grid_size)
             lb = _index_const(0)
             step = _index_const(1)
         else:
@@ -358,16 +348,9 @@ class _Compiler:
 
         loop = scf_dialect.ForOp(lb, ub, step, ia_vals or None)
         with InsertionPoint(loop.body):
-            if _is_tile_range and self._tile_id is not None:
-                # Global index = tile_id * tile_size + local_i
-                # so that buffer accesses use the correct global offset.
-                tile_size_val = _index_const(self.tile[0])
-                base = arith_dialect.MulIOp(self._tile_id, tile_size_val).result
-                global_iv = arith_dialect.AddIOp(
-                    base, loop.induction_variable).result
-                self.env[var] = (global_iv, INDEX)
-            else:
-                self.env[var] = (loop.induction_variable, INDEX)
+            # In the flat-loop model, the induction variable directly is the
+            # global index — no tile_id offset arithmetic needed.
+            self.env[var] = (loop.induction_variable, INDEX)
             for i, n in enumerate(ia_names):
                 self.env[n] = (loop.inner_iter_args[i], ia_tags[i])
             for s in node.body:
@@ -488,20 +471,44 @@ class _Compiler:
 
     # -- binary ops ----------------------------------------------------
 
+    _BITWISE_OPS = (ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift)
+
     def _binop(self, node):
         lv, lt = self._expr(node.left)
         rv, rt = self._expr(node.right)
+        op = type(node.op)
         if _is_ct(lt) and _is_ct(rt):
-            return self._binop_ct(lv, lt, rv, rt, type(node.op))
+            return self._binop_ct(lv, lt, rv, rt, op)
+        # For bitwise/shift ops, promote CT_INT directly to I32 (not INDEX).
+        # This avoids generating index_const + index_cast chains which confuse
+        # the vectorizer (index_cast from scalar index to vector<N xi32> is invalid).
+        if op in self._BITWISE_OPS:
+            i32 = IntegerType.get_signless(32)
+            if _is_ct(lt):
+                lv = arith_dialect.ConstantOp(i32, int(lv)).result
+                lt = I32
+            elif lt == INDEX:
+                lv = arith_dialect.IndexCastOp(i32, lv).result
+                lt = I32
+            if _is_ct(rt):
+                rv = arith_dialect.ConstantOp(i32, int(rv)).result
+                rt = I32
+            elif rt == INDEX:
+                rv = arith_dialect.IndexCastOp(i32, rv).result
+                rt = I32
+            return self._binop_rt(lv, lt, rv, rt, op)
         lv, lt, rv, rt = _promote(self.ctx, lv, lt, rv, rt)
-        return self._binop_rt(lv, lt, rv, rt, type(node.op))
+        return self._binop_rt(lv, lt, rv, rt, op)
 
     @staticmethod
     def _binop_ct(lv, lt, rv, rt, op):
         ops = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
                ast.Mult: lambda a, b: a * b, ast.FloorDiv: lambda a, b: a // b,
                ast.Mod: lambda a, b: a % b, ast.Div: lambda a, b: a / b,
-               ast.Pow: lambda a, b: a ** b}
+               ast.Pow: lambda a, b: a ** b,
+               ast.BitAnd: lambda a, b: a & b, ast.BitOr: lambda a, b: a | b,
+               ast.BitXor: lambda a, b: a ^ b,
+               ast.LShift: lambda a, b: a << b, ast.RShift: lambda a, b: a >> b}
         r = ops[op](lv, rv)
         tag = CT_FLOAT if isinstance(r, float) or lt == CT_FLOAT or rt == CT_FLOAT else CT_INT
         return (r if tag == CT_FLOAT else int(r), tag)
@@ -523,11 +530,39 @@ class _Compiler:
                  ast.Mult: self.ctx.mulf,
                  ast.Div: lambda a, b: arith_dialect.DivFOp(a, b).result}
             return (m[op](lv, rv), F32)
+        # Bitwise / shift ops: cast index → i32, operate, return I32 tag.
+        # (MLIR arith bitwise ops require integer type, not index type.)
+        _bitwise_ops = (ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift)
+        if op in _bitwise_ops:
+            i32 = IntegerType.get_signless(32)
+            if lt == INDEX:
+                lv = arith_dialect.IndexCastOp(i32, lv).result
+            elif lt == I32:
+                pass  # already i32
+            if rt == INDEX:
+                rv = arith_dialect.IndexCastOp(i32, rv).result
+            elif rt == I32:
+                pass  # already i32
+            bm = {
+                ast.BitAnd: lambda a, b: arith_dialect.AndIOp(a, b).result,
+                ast.BitOr:  lambda a, b: arith_dialect.OrIOp(a, b).result,
+                ast.BitXor: lambda a, b: arith_dialect.XOrIOp(a, b).result,
+                ast.LShift: lambda a, b: arith_dialect.ShLIOp(a, b).result,
+                ast.RShift: lambda a, b: arith_dialect.ShRUIOp(a, b).result,
+            }
+            return (bm[op](lv, rv), I32)
         m = {ast.Add: self.ctx.addi,
              ast.Sub: lambda a, b: arith_dialect.SubIOp(a, b).result,
              ast.Mult: self.ctx.muli,
              ast.FloorDiv: lambda a, b: arith_dialect.FloorDivSIOp(a, b).result,
              ast.Mod: lambda a, b: arith_dialect.RemUIOp(a, b).result}
+        # If either operand is I32 from a prior bitwise op, cast to index first.
+        if lt == I32:
+            lv = arith_dialect.IndexCastOp(IndexType.get(), lv).result
+            lt = INDEX
+        if rt == I32:
+            rv = arith_dialect.IndexCastOp(IndexType.get(), rv).result
+            rt = INDEX
         return (m[op](lv, rv), INDEX)
 
     def _unary(self, node):
@@ -617,6 +652,10 @@ class _Compiler:
             v, t = self._expr(e)
             if _is_ct(t):
                 v, t = _to_runtime(self.ctx, v, t, INDEX)
+            elif t == I32:
+                # Bitwise ops return i32; cast to index for memref access.
+                v = arith_dialect.IndexCastOp(IndexType.get(), v).result
+                t = INDEX
             out.append(v)
         return out
 
@@ -705,6 +744,9 @@ class _Compiler:
         v, t = pair
         if _is_ct(t):
             return _index_const(int(v))
+        if t == I32:
+            # Bitwise ops produce i32; cast to index before use as memref index.
+            return arith_dialect.IndexCastOp(IndexType.get(), v).result
         return v
 
     def _modified_names(self, stmts):
