@@ -89,25 +89,30 @@ collectCandidateLoops(func::FuncOp func) {
   return result;
 }
 
+// Walk through memref.cast / memref.subview chains to find the original
+// SSA root (an alloc result or function argument). Used by both
+// memrefBasesDisjoint and computeMinDepDistance.
+static Value memrefRoot(Value v) {
+  while (Operation *defOp = v.getDefiningOp()) {
+    if (auto cast = dyn_cast<memref::CastOp>(defOp)) v = cast.getSource();
+    else if (auto sv = dyn_cast<memref::SubViewOp>(defOp)) v = sv.getSource();
+    else break;
+  }
+  return v;
+}
+
+// Return the memref operand of a load or store op.
+static Value getMemRef(Operation *op) {
+  if (auto load = dyn_cast<memref::LoadOp>(op)) return load.getMemRef();
+  if (auto store = dyn_cast<memref::StoreOp>(op)) return store.getMemRef();
+  return Value{};
+}
+
 // Returns true if op1 and op2 reference distinct memref SSA roots
-// (different memref.alloc results, different function arguments). Walks
-// through memref.cast / memref.subview to find the root, then compares.
+// (different memref.alloc results, different function arguments).
 static bool memrefBasesDisjoint(Operation *op1, Operation *op2) {
-  auto getMemRef = [](Operation *op) -> Value {
-    if (auto load = dyn_cast<memref::LoadOp>(op)) return load.getMemRef();
-    if (auto store = dyn_cast<memref::StoreOp>(op)) return store.getMemRef();
-    return Value{};
-  };
-  auto root = [](Value v) -> Value {
-    while (Operation *defOp = v.getDefiningOp()) {
-      if (auto cast = dyn_cast<memref::CastOp>(defOp)) v = cast.getSource();
-      else if (auto sv = dyn_cast<memref::SubViewOp>(defOp)) v = sv.getSource();
-      else break;
-    }
-    return v;
-  };
-  Value r1 = root(getMemRef(op1));
-  Value r2 = root(getMemRef(op2));
+  Value r1 = memrefRoot(getMemRef(op1));
+  Value r2 = memrefRoot(getMemRef(op2));
   return r1 && r2 && r1 != r2;
 }
 
@@ -164,15 +169,7 @@ static int64_t computeMinDepDistance(LoopAnalysis &a) {
     }
 
     // Root the memref base (walk through casts/subviews).
-    auto rootFn = [](Value v) -> Value {
-      while (Operation *defOp = v.getDefiningOp()) {
-        if (auto cast = dyn_cast<memref::CastOp>(defOp)) v = cast.getSource();
-        else if (auto sv = dyn_cast<memref::SubViewOp>(defOp)) v = sv.getSource();
-        else break;
-      }
-      return v;
-    };
-    info.memBase = rootFn(info.memBase);
+    info.memBase = memrefRoot(info.memBase);
 
     if (addr) {
       llvm::DenseMap<Value, lego::AffineVal> cache;
@@ -311,7 +308,6 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
         }
       }
     }
-    (void)iv;
   }
 
   // Trip count: extract (upper - lower) / step if all three are

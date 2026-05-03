@@ -180,10 +180,6 @@ def _build(fn, grid, tile):
 # AST → MLIR compiler
 # ============================================================================
 
-# ============================================================================
-# AST → MLIR compiler
-# ============================================================================
-
 class _Compiler(_BaseCompiler):
     """Walk a Python function AST and emit MLIR via CPUKernelContext.
 

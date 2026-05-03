@@ -3,11 +3,9 @@
 // End-to-end MLIR pipeline that lowers Lego dialect → vector dialect (via
 // lego-vectorize) → LLVM IR targeting ARM NEON.
 //
-// V1 note: lego-vectorize currently emits AVX-512-width vectors (8xf64 for
-// f64 workloads).  When compiled for an aarch64 target the LLVM AArch64
-// backend will split these to NEON-width (2xf64) automatically.  Proper
-// NEON-width vector selection (2 f64 lanes, 4 f32 lanes) is captured as
-// future-work item R15 and will be addressed in a follow-up task.
+// V1: lego-vectorize accepts `target=neon` and emits 16-byte (128-bit)
+// NEON-width vectors directly: vector<2xf64> for f64, vector<4xf32> for f32.
+// Width-aware SVE emission (scalable vectors) is deferred to R15.
 //
 // Pipeline:
 //   1. buildLegoLowerPipeline   — shared front-end (LEGO → Arith)

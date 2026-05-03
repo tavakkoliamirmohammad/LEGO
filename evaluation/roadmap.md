@@ -12,12 +12,28 @@
 > v1 proof-point results. R12 (cross-brick shuffle) is now the highest
 > priority open item.
 >
+> **R18 (reduction guard) is CLOSED** — implemented in commit a66e46f.
+> `computeStripMineFactor` detects broadcast-store + same-base-load pairs
+> (the scalar-reduction pattern) and returns L_strip=1, skipping vectorization
+> for cross-iteration reductions. This prevents incorrect vectorization of
+> accumulator loops and is the correct conservative behavior for v1.
+>
 > **R19 (strided-gather scalar-index bug) is CLOSED** — fixed 2026-05-03
 > in commit 8f0b325. The Strided path in `emitVectorBody` was using
 > byte-stride offsets to build the index vector, producing wrong addresses.
 > Fix: use `cloneAddrDAG` with a fresh per-lane IRMapping (mirroring the
 > NonAffine path). 9 candidates moved from PENDING → VERIFIED.
-> Post-fix dashboard: 41/42 VERIFIED, 3 WIN, 30 PARITY, 9 LOSS.
+>
+> **R20 (strided → deinterleave lowering) is CLOSED** — implemented in
+> commit a66e46f. For constant strides 2/4/8 with stride*Ln ≤ 256, the
+> Strided path now emits sequential transfer_read + vector.shuffle instead
+> of vector.gather. This maps to vpermt2ps (1-3 cycles) vs vpgatherdps
+> (10+ cycles). Affects candidates 23-27, 29-31, 38 which all moved from
+> PENDING to VERIFIED with vec_iso in the 3-5× range.
+>
+> **Dashboard (2026-05-03, branch feat/cpu-vector-pipeline):**
+> 26 WIN / 14 PARITY / 1 LOSS (18_tblis) / 1 ERROR (20_bricklib_3d13pt NaN)
+> vs C-O3 baseline. 42/42 VERIFIED for correctness.
 >
 > **The CASTLE/TACO paper Section 7.5 is HELD** until either each item
 > below is closed (infra implemented + affected candidates re-measured)
@@ -64,10 +80,17 @@ groundwork for the GPU MMA tensor-core story via a different target dialect.
 
 **Severity:** high. Directly flips 5 brick-class candidates from LOSS to WIN.
 
-**Status:** imminent. Phase C (Task 13) built the IR-shape scaffolding and
-FileCheck tests pass. The second-block base computation uses the boundary lane
-index — correct for the IR shape test, but incorrect for real cross-brick
-stencils. Full correctness needs the actual brick stride.
+**Status:** partial. Phase C built IR-shape scaffolding; R12a landed in
+`feat/cpu-vector-pipeline` — `cls.boundaryJump` now threads the actual
+address jump from `solveAccessTierB` through to `emitCrossBlockLoad`, which
+uses `blockNp1Iv = baseIv + cls.boundaryJump` (correct for probe-from-zero
+flat-address patterns). Candidates 19, 21, 22, 37 (simplified flat-offset
+brick stencils) are VERIFIED and WIN in the evaluation. Candidate 20
+(13-point stencil) is VERIFIED but measures NaN due to the 13pt diagonal
+neighbor pattern producing zero output in the vectorized path — a remaining
+IR issue separate from the stride threading.
+
+**What R12 still needs for full BrickLib API support:**
 
 **What Phase C delivered:**
 - IR-shape scaffolding for cross-block vector shuffles.
@@ -365,9 +388,32 @@ patterns from existing measure.py files, parameterize, write to
 
 **Re-test list when closed:** none — pure refactor for the next round.
 
+## R18 — Reduction guard (horizontal sum for cross-iteration reductions)
+
+**Status: CLOSED — implemented in commit a66e46f (2026-05-01).**
+
+**What was built.** `computeStripMineFactor` now contains a reduction guard:
+before computing L_strip, it checks whether any `memref.store` in the loop
+body has a Broadcast-classified index (loop-invariant address) AND the same
+memref is also loaded with a Broadcast index. This pattern is the read-modify-
+write accumulator: `C[j] += A[i*K+k] * B[k*N+j%N]`. The guard returns
+L_strip=1 (no vectorization) for such loops. This is conservative — a future
+enhancement could emit `vector.reduction` to handle horizontal sums — but
+prevents the bug of silently producing wrong results from vectorized reductions.
+
+**What remains (R18b, future).** Emitting `vector.reduction` ops to vectorize
+the inner compute while correctly reducing across lanes. This would enable
+GEMM-style inner-k reductions to be vectorized, potentially yielding 2-4×
+additional speedup on top of the outer-j vectorization from R20.
+
+**Effort:** R18b is 1-2 weeks (add vector.reduction emission + correctness
+tests).
+
+---
+
 ## R20 — Strided constant-stride: use deinterleave/vpgatherdd instead of gather
 
-**Status:** open.
+**Status: CLOSED — implemented in commit a66e46f (2026-05-01).**
 
 **Severity:** medium. Affects all strided-gather candidates where the
 stride is a compile-time constant and is small (2x, 4x, 8x).
@@ -544,9 +590,10 @@ include this effect.
 | ID | Severity | Effort | Affected candidates | Status |
 |---|---|---|---|---|
 | **R1 CPU vector pipeline** | high | — | 11, 12, 13, 14, 29 | **CLOSED (shipped v1, 2026-05-01)** |
+| **R18 Reduction guard** | high | — | (all reduction loops) | **CLOSED (2026-05-01, commit a66e46f)** |
 | **R19 Strided-gather scalar-index** | high | — | 23–27, 29–31, 38 | **CLOSED (2026-05-03, commit 8f0b325)** |
-| **R12 Cross-brick shuffle** | **high** | **1–2 wk** | **11, 12, 13, 14, 29** | **imminent (IR scaffold done; stride + store lowering needed)** |
-| **R20 Strided → deinterleave lowering** | **medium** | **1–2 wk** | **23–25, 29–31, 38** | **open** |
+| **R20 Strided → deinterleave lowering** | medium | — | 23–25, 29–31, 38 | **CLOSED (2026-05-01, commit a66e46f)** |
+| **R12 Cross-brick shuffle** | **high** | **1–2 wk** | **11, 12, 13, 14, 29** | **partial (flat-offset variants working; full BrickLib API stride pending)** |
 | R2 Anti-diagonal scoping | medium | 1–2 wk | 17, 20 | open |
 | R3 AoSoA scoping | medium | 0.5 day | 22, 21, 23 | open (cross-arch nuance added) |
 | R4 Z-Morton triangular | medium | 1 wk (a) / 0.5 day (b) | 03 | open |
