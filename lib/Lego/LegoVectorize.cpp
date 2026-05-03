@@ -23,9 +23,13 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/Support/Debug.h"
+
 #include <algorithm>  // std::find
 #include <limits>
 #include <numeric>  // std::gcd (C++17)
+
+#define DEBUG_TYPE "lego-vectorize"
 
 using namespace mlir;
 
@@ -172,7 +176,7 @@ static int64_t computeMinDepDistance(LoopAnalysis &a) {
 
     if (addr) {
       llvm::DenseMap<Value, lego::AffineVal> cache;
-      lego::AffineVal sym = lego::evalAffine(addr, iv, cache);
+      lego::AffineVal sym = lego::evalLinearInIV(addr, iv, cache);
       if (sym.valid) {
         info.affineValid = true;
         info.coeff = sym.coeff;
@@ -298,8 +302,12 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
         for (size_t li = 0; li < a.accesses.size(); ++li) {
           if (!isa<memref::LoadOp>(a.accesses[li])) continue;
           Value loadBase = cast<memref::LoadOp>(a.accesses[li]).getMemRef();
-          if (loadBase == storeBase)
+          if (loadBase == storeBase) {
+            LLVM_DEBUG(llvm::dbgs()
+                       << "[lego-vectorize] computeStripMineFactor: L_strip=1"
+                          " — reduction loop (broadcast-store + same-base load)\n");
             return 1;  // reduction loop — skip vectorization
+          }
         }
       }
     }
@@ -341,12 +349,25 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
       Ln = std::min({R_T, T, Ld});
       sawConstraining = true;
     } else {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[lego-vectorize] computeStripMineFactor: L_strip=1"
+                    " — unknown AccessKind, conservative skip\n");
       return 1;
     }
-    if (Ln <= 1) return 1;
+    if (Ln <= 1) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[lego-vectorize] computeStripMineFactor: L_strip=1"
+                    " — Ln<=1 (register width insufficient for element type)\n");
+      return 1;
+    }
     L_strip = (L_strip == 1) ? Ln : lcm_i64(L_strip, Ln);
   }
-  if (!sawConstraining) return 1;  // all Broadcasts — nothing to vectorize.
+  if (!sawConstraining) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "[lego-vectorize] computeStripMineFactor: L_strip=1"
+                  " — all accesses are Broadcast (nothing constrains L)\n");
+    return 1;  // all Broadcasts — nothing to vectorize.
+  }
 
   // Cost-factor penalty for gather-style accesses.
   //
@@ -376,15 +397,23 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
     if (cls.kind == lego::AccessKind::Unit ||
         cls.kind == lego::AccessKind::CrossBlock)
       hasUnit = true;
-    else if (cls.kind == lego::AccessKind::NonAffine && worstPenalty < 10.0)
-      worstPenalty = 10.0;
-    else if (cls.kind == lego::AccessKind::Strided && worstPenalty < 5.0)
-      worstPenalty = 5.0;
+    else if (cls.kind == lego::AccessKind::NonAffine &&
+             worstPenalty < lego::CostModel::kNonAffineGatherPenalty)
+      worstPenalty = lego::CostModel::kNonAffineGatherPenalty;
+    else if (cls.kind == lego::AccessKind::Strided &&
+             worstPenalty < lego::CostModel::kStridedGatherPenalty)
+      worstPenalty = lego::CostModel::kStridedGatherPenalty;
   }
   if (!hasUnit) {
     // Pure gather loop: apply cost penalty.
     double score = static_cast<double>(L_strip) / worstPenalty;
-    if (score <= 1.0) return 1;
+    if (score <= 1.0) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[lego-vectorize] computeStripMineFactor: L_strip=1"
+                    " — cost-model rejected pure-gather loop"
+                    " (score=" << score << " <= 1.0)\n");
+      return 1;
+    }
   }
 
   // ILP unroll multiplier for pure unit-stride loops.
@@ -433,8 +462,8 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
   if (allUnit && hasAnyUnit &&
       Ld == std::numeric_limits<int64_t>::max()) {
     // Pure unit-stride loop with no loop-carried dependence.
-    // Apply 4× ILP unroll to match Clang's auto-vectorizer output quality.
-    constexpr int64_t kILPFactor = 4;
+    // Apply ILP unroll to match Clang's auto-vectorizer output quality.
+    constexpr int64_t kILPFactor = lego::CostModel::kILPFactor;
     int64_t R_T_max = 0;
     for (const auto &cls : a.classes) {
       if (cls.kind == lego::AccessKind::Unit)
@@ -506,15 +535,17 @@ static StripMineResult stripMineForOp(scf::ForOp forOp, int64_t L,
 }
 
 // ---------------------------------------------------------------------------
-// Address DAG cloner for NonAffine gather emission (Task 15).
+// cloneAddrChain — clone the address def-use chain for NonAffine gather emission.
 //
-// Recursively clones the def-use DAG rooted at `v`, substituting operands
+// Recursively clones the def-use chain rooted at `v`, substituting operands
 // through `laneMap`. Stops at values defined outside `parentLoop` (uses them
 // as-is) or at block arguments (uses the mapped value or original).
+// Named "cloneAddrChain" following MLIR convention of "chain" for def-use
+// sequences (rather than the more general graph-theory term "DAG").
 //
 // Returns the cloned (or reused) SSA value for the lane-specific address.
 // ---------------------------------------------------------------------------
-static Value cloneAddrDAG(Value v, IRMapping &laneMap, OpBuilder &builder,
+static Value cloneAddrChain(Value v, IRMapping &laneMap, OpBuilder &builder,
                           scf::ForOp parentLoop) {
   // Already mapped (including the iv substitution)?
   if (Value mapped = laneMap.lookupOrNull(v)) return mapped;
@@ -530,7 +561,7 @@ static Value cloneAddrDAG(Value v, IRMapping &laneMap, OpBuilder &builder,
   SmallVector<Value> newOperands;
   newOperands.reserve(defOp->getNumOperands());
   for (Value operand : defOp->getOperands())
-    newOperands.push_back(cloneAddrDAG(operand, laneMap, builder, parentLoop));
+    newOperands.push_back(cloneAddrChain(operand, laneMap, builder, parentLoop));
 
   // Clone the op with the remapped operands.
   OperationState state(defOp->getLoc(), defOp->getName());
@@ -594,6 +625,19 @@ struct EmitContext {
     return {mapping.lookupOrDefault(origOperand)};
   }
 
+  // Register a vectorized result: always keeps mapping[orig] == subVecs[orig][0].
+  // Use this instead of calling mapping.map + subVectorMap[orig] = ... separately
+  // to enforce the invariant that the two data structures stay in sync.
+  //
+  // This is the VectorFrame concept from Finding 7: the invariant
+  //   mapping[v] == subVecs[v][0]
+  // is enforced structurally here rather than by convention across all emit sites.
+  void mapVec(Value orig, SmallVector<Value> subs) {
+    assert(!subs.empty() && "mapVec: sub-vector list must be non-empty");
+    mapping.map(orig, subs[0]);
+    subVectorMap[orig] = std::move(subs);
+  }
+
   // Check whether `v` is defined outside origLoop.
   bool isOutsideLoop(Value v) {
     Operation *defOp = v.getDefiningOp();
@@ -637,8 +681,7 @@ struct EmitContext {
         auto vecTy = VectorType::get({Ln}, t);
         Value bc = vector::BroadcastOp::create(builder, loc, vecTy, operand);
         SmallVector<Value> subs(numSubOps, bc);
-        mapping.map(operand, bc);
-        subVectorMap[operand] = std::move(subs);
+        mapVec(operand, std::move(subs));
       }
     }
   }
@@ -664,9 +707,7 @@ struct EmitContext {
           /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
       subs.push_back(subVec.getVector());
     }
-    // Map first sub-vector for any single-lookup consumer paths.
-    mapping.map(load.getResult(), subs[0]);
-    subVectorMap[load.getResult()] = std::move(subs);
+    mapVec(load.getResult(), std::move(subs));
   }
 
   void emitBroadcastLoad(memref::LoadOp load,
@@ -684,8 +725,7 @@ struct EmitContext {
     Value bc = vector::BroadcastOp::create(builder, loc, vecTy,
                                            clonedLoad->getResult(0));
     SmallVector<Value> subs(numSubOps, bc);
-    mapping.map(load.getResult(), bc);
-    subVectorMap[load.getResult()] = std::move(subs);
+    mapVec(load.getResult(), std::move(subs));
   }
 
   void emitCrossBlockLoad(memref::LoadOp load,
@@ -740,8 +780,7 @@ struct EmitContext {
     }
     Value shuffled = vector::ShuffleOp::create(builder, loc, blockN,
                                                blockNp1, shuffleIndices);
-    subVectorMap[load.getResult()] = {shuffled};
-    mapping.map(load.getResult(), shuffled);
+    mapVec(load.getResult(), {shuffled});
   }
 
   void emitStridedLoad(memref::LoadOp load,
@@ -772,7 +811,7 @@ struct EmitContext {
     Value curIv = mapping.lookupOrDefault(origIv);
     IRMapping lane0Map;
     lane0Map.map(origIv, curIv);
-    Value physBase = cloneAddrDAG(load.getIndices().front(),
+    Value physBase = cloneAddrChain(load.getIndices().front(),
                                   lane0Map, builder, origLoop);
 
     // Load S blocks of Ln elements each: Block[b] starts at physBase + b*Ln.
@@ -848,8 +887,7 @@ struct EmitContext {
       result = vector::ShuffleOp::create(builder, loc, mid01, mid23, finalIdx);
     }
 
-    mapping.map(load.getResult(), result);
-    subVectorMap[load.getResult()] = {result};
+    mapVec(load.getResult(), {result});
   }
 
   // vector.gather for constant non-unit stride (large strides or non-power-of-2)
@@ -857,7 +895,7 @@ struct EmitContext {
   // the ORIGINAL scalar address DAG with origIv substituted by (newIv + j).
   //
   // R19 fix: use a fresh per-lane IRMapping (not the outer `mapping` which has
-  // vector subs for float values) so cloneAddrDAG produces scalar element-unit
+  // vector subs for float values) so cloneAddrChain produces scalar element-unit
   // addresses for each lane.
   void emitGatherLoad(memref::LoadOp load,
                       const lego::AccessClassification &cls) {
@@ -881,7 +919,7 @@ struct EmitContext {
       }
       IRMapping laneMap;
       laneMap.map(origIv, laneIv);
-      Value laneAddr = cloneAddrDAG(origAddr, laneMap, builder, origLoop);
+      Value laneAddr = cloneAddrChain(origAddr, laneMap, builder, origLoop);
       indexElements.push_back(laneAddr);
     }
     auto idxVecTy = VectorType::get({Ln}, builder.getIndexType());
@@ -902,8 +940,7 @@ struct EmitContext {
         builder, loc, vecTy, load.getMemRef(), ValueRange{c0}, indexVec,
         mask, passThru, /*alignment=*/mlir::IntegerAttr{});
 
-    mapping.map(load.getResult(), gathered);
-    subVectorMap[load.getResult()] = {gathered};
+    mapVec(load.getResult(), {gathered});
   }
 
   // -------------------------------------------------------------------------
@@ -1015,8 +1052,7 @@ struct EmitContext {
         state.addTypes(maskTy);
         Operation *newCmp = builder.create(state);
         Value resultVec = newCmp->getResult(0);
-        mapping.map(op.getResult(0), resultVec);
-        subVectorMap[op.getResult(0)] = {resultVec};
+        mapVec(op.getResult(0), {resultVec});
         return;
       }
       // Non-index cmpi/cmpf falls through to the general arith path below.
@@ -1061,8 +1097,7 @@ struct EmitContext {
 
         Value selected = arith::SelectOp::create(builder, loc, vecCond,
                                                   vecTrue, vecFalse);
-        mapping.map(origResult, selected);
-        subVectorMap[origResult] = {selected};
+        mapVec(origResult, {selected});
         return;
       }
       // Non-index select falls through to the general arith path below.
@@ -1187,8 +1222,7 @@ struct EmitContext {
       Operation *newOp = builder.create(state);
       resultSubs.push_back(newOp->getResult(0));
     }
-    mapping.map(origResult, resultSubs[0]);
-    subVectorMap[origResult] = std::move(resultSubs);
+    mapVec(origResult, std::move(resultSubs));
   }
 };  // struct EmitContext
 
@@ -1344,7 +1378,14 @@ class LegoVectorizePass
       a.L_strip = computeStripMineFactor(a, target);
 
       // Task 8: strip-mine + emit vector.transfer_read/write.
-      if (a.L_strip <= 1) continue;
+      if (a.L_strip <= 1) {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[lego-vectorize] skip loop in '"
+                   << func.getName() << "'"
+                   << " — L_strip=" << a.L_strip
+                   << " (reason: cost-model or reduction guard)\n");
+        continue;
+      }
 
       // Body whitelist: each rejection below is DOCUMENTED as either a
       // fundamental limitation or an unimplemented extension (roadmap item).
@@ -1371,11 +1412,11 @@ class LegoVectorizePass
       //   STATUS: PRINCIPLED SKIP — not a missing feature but a correctness guard.
       //   REASON: index_cast(vector<16xi32>) → index is not a valid MLIR type;
       //   the catch-all vectorizer would silently produce broken IR.  The NonAffine
-      //   gather path (cloneAddrDAG) handles Morton-style index chains correctly
+      //   gather path (cloneAddrChain) handles Morton-style index chains correctly
       //   ONLY for pure-address-compute paths where the entire chain is cloned
       //   per-lane.  The bodyOK guard ensures the catch-all path never sees an
       //   IV-dependent index_cast that it can't lower.  If index_cast were
-      //   hoistable (IV-independent), the allInvariant path in evalAffine already
+      //   hoistable (IV-independent), the allInvariant path in evalLinearInIV already
       //   handles it correctly without any bodyOK skip.
       //
       // [G3] Any op NOT in the arith dialect and NOT a memref load/store/yield/scf.if.
@@ -1410,7 +1451,7 @@ class LegoVectorizePass
           //
           // Both cases require a dedicated per-lane emit path (clone the index_cast once
           // per lane with a lane-specific index). This is not implemented in v1; it would
-          // require the same cloneAddrDAG technique used for NonAffine gathers.
+          // require the same cloneAddrChain technique used for NonAffine gathers.
           //
           // SAFE cases NOT rejected:
           //   - index_cast(i32 → i64) or (i64 → i32): no index type, caught elsewhere.
@@ -1426,6 +1467,13 @@ class LegoVectorizePass
                 return defOp && a.forOp->isAncestor(defOp);
               });
               if (ivDependent) {
+                // G2: emit a remark visible without --debug-only so the user
+                // learns WHY vectorization was skipped (the most counterintuitive
+                // rejection — legal-looking arith op that blocks vectorization).
+                op.emitRemark(
+                    "lego-vectorize: non-vectorizable — IV-dependent index_cast "
+                    "with index source/result; rewrite index arithmetic to avoid "
+                    "index_cast on the induction variable to enable vectorization");
                 bodyOK = false;
                 break;
               }
@@ -1437,6 +1485,10 @@ class LegoVectorizePass
         if (auto ifOp = dyn_cast<scf::IfOp>(&op)) {
           // Reject if there is an else branch (too complex for v1 maskedstore).
           if (ifOp.getNumRegions() > 1 && !ifOp.getElseRegion().empty()) {
+            LLVM_DEBUG(llvm::dbgs()
+                       << "[lego-vectorize] skip loop in '"
+                       << func.getName() << "'"
+                       << " — body contains scf.if with else-branch (G4)\n");
             bodyOK = false;
             break;
           }
@@ -1448,16 +1500,29 @@ class LegoVectorizePass
             break;
           }
           if (!thenOK) {
+            LLVM_DEBUG(llvm::dbgs()
+                       << "[lego-vectorize] skip loop in '"
+                       << func.getName() << "'"
+                       << " — scf.if then-block has non-store ops (G4)\n");
             bodyOK = false;
             break;
           }
           continue;
         }
         // [G3] Op outside the arith dialect and not an allowed scf.if.
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[lego-vectorize] skip loop in '" << func.getName()
+                   << "' — body contains op outside allowlist: "
+                   << op.getName().getStringRef() << " (G3)\n");
         bodyOK = false;
         break;
       }
-      if (!bodyOK) continue;
+      if (!bodyOK) {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[lego-vectorize] skip loop in '" << func.getName()
+                   << "' — body check failed (bodyOK=false)\n");
+        continue;
+      }
 
       OpBuilder builder(a.forOp);
       StripMineResult mined = stripMineForOp(a.forOp, a.L_strip, builder);

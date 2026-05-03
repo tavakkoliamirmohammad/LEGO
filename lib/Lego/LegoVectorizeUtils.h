@@ -49,8 +49,16 @@ struct AffineVal {
 // Evaluate the index expression `v` symbolically w.r.t. induction variable
 // `iv`. Caches intermediate results in `cache`.
 // Defined in LegoVectorizeAnalysis.cpp.
-AffineVal evalAffine(Value v, Value iv,
-                     llvm::DenseMap<Value, AffineVal> &cache);
+// evalLinearInIV: evaluate the index expression `v` symbolically w.r.t.
+// induction variable `iv`. Returns an AffineVal representing the linear model
+// `coeff * iv + constant + Σ invariant_i`. Named "LinearInIV" to be precise:
+// this is a linear (not general MLIR affine) test — it checks whether `v` is
+// linear in `iv`, which is exactly what the vectorizer needs.
+// (Not to be confused with the MLIR affine dialect.)
+// Defined in LegoVectorizeAnalysis.cpp.  Formerly named evalAffine (renamed
+// in Finding 10 to distinguish from the MLIR affine dialect).
+AffineVal evalLinearInIV(Value v, Value iv,
+                         llvm::DenseMap<Value, AffineVal> &cache);
 
 struct AccessClassification {
   AccessKind kind = AccessKind::NonAffine;
@@ -101,6 +109,24 @@ AccessClassification solveAccessTierA(Operation *memrefOp, Value iv,
 // Like Tier A, this function does NOT mutate the input IR.
 AccessClassification solveAccessTierB(Operation *memrefOp, Value iv,
                                       int64_t elementBytes, int64_t L);
+
+// ---------------------------------------------------------------------------
+// Cost model constants and register-lane helper (Finding 4).
+//
+// Centralises all tuning parameters so that a reader of the header sees the
+// full cost model without scanning LegoVectorize.cpp.  The constants are
+// compile-time values; no behavior change.
+// ---------------------------------------------------------------------------
+struct CostModel {
+  // Penalty applied to pure gather-only loops.
+  // SOURCE: Intel Optimization Reference Manual §2.5.5, Table 2-9.
+  static constexpr double kStridedGatherPenalty  = 5.0;
+  // SOURCE: Polychroniou et al., SIGMOD'15; Pandey et al., SC'19.
+  static constexpr double kNonAffineGatherPenalty = 10.0;
+  // ILP unroll multiplier for pure unit-stride loops.
+  // SOURCE: Agner Fog §12.7; matches Clang's UnrollFactor for AVX-512.
+  static constexpr int64_t kILPFactor = 4;
+};
 
 }  // namespace mlir::lego
 

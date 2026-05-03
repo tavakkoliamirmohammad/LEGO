@@ -114,6 +114,34 @@ func.func @cross_block_plus_unit(%A: memref<?xf64>, %B: memref<?xf64>, %C: memre
 
 // -----
 
+// ---------------------------------------------------------------------------
+// Test 4: @cross_brick_stencil (moved from lego_vectorize.mlir, Finding 8).
+// Same as cross_block_boundary7; kept here as canonical exhaustive test.
+// addr(z) = (z+1)/8*16 + (z+1)%8 → CrossBlock(boundary=7).
+// ---------------------------------------------------------------------------
+// CHECK-LABEL: func.func @cross_brick_stencil
+// CHECK: vector.transfer_read
+// CHECK: vector.transfer_read
+// CHECK: vector.shuffle
+func.func @cross_brick_stencil(%A: memref<?xf64>, %B: memref<?xf64>) {
+  %c0 = arith.constant 0 : index
+  %c8 = arith.constant 8 : index
+  %c16 = arith.constant 16 : index
+  %c1 = arith.constant 1 : index
+  scf.for %z = %c0 to %c8 step %c1 {
+    %zp1 = arith.addi %z, %c1 : index
+    %brick_idx = arith.divui %zp1, %c8 : index
+    %inner = arith.remui %zp1, %c8 : index
+    %brick_off = arith.muli %brick_idx, %c16 : index
+    %total = arith.addi %inner, %brick_off : index
+    %v = memref.load %A[%total] : memref<?xf64>
+    memref.store %v, %B[%z] : memref<?xf64>
+  }
+  return
+}
+
+// -----
+
 // V1 LIMITATION (Tier-B lb!=0 unsoundness): Tier-B probes addr at iv=0..L-1,
 // independent of the loop's actual lower bound. For piecewise-modular access
 // patterns (divui + remui + scaling), the boundary location depends on

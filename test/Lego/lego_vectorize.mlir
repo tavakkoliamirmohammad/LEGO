@@ -100,34 +100,10 @@ func.func @col_major_strided(%A: memref<?xf64>, %B: memref<?xf64>, %N: index) {
 
 // -----
 
-// Cross-brick read: the inner z loop sees an A[addr(z)] pattern where addr
-// uses a brick-style layout with brick_size=8 and brick_stride=16 (> within-
-// brick element stride 1):
-//
-//   addr(z) = (z+1)/8 * 16  +  (z+1)%8
-//
-// Concrete values for z=0..7 (BRICK_SIZE=8, BRICK_STRIDE=16):
-//   z=0: (1/8)*16 + (1%8) = 0*16+1 = 1
-//   z=1: (2/8)*16 + (2%8) = 0*16+2 = 2
-//   ...
-//   z=6: (7/8)*16 + (7%8) = 0*16+7 = 7
-//   z=7: (8/8)*16 + (8%8) = 1*16+0 = 16
-//
-// Differences: 1,1,1,1,1,1,9 — six unit steps then one jump of 9.
-// Tier-A cannot reduce divui/remui to an affine expression → NonAffine.
-// Tier-B probes z=0..7, computes diffs, finds boundaryCount==1 at z=7,
-// verifies both segments have unit element-index stride (diff==1), and
-// classifies as CrossBlock(boundary=7).
-//
-// Emission: two vector.transfer_reads (block N at baseIv, block N+1 at
-// baseIv+7) + a vector.shuffle that splices lanes [0..6] from block N and
-// lane [0] from block N+1.
-//
-// CHECK-LABEL: func.func @cross_brick_stencil
-// CHECK: vector.transfer_read
-// CHECK: vector.transfer_read
+// CrossBlock smoke test: see full coverage in lego_vectorize_cross_block.mlir.
+// CHECK-LABEL: func.func @cross_brick_stencil_smoke
 // CHECK: vector.shuffle
-func.func @cross_brick_stencil(%A: memref<?xf64>, %B: memref<?xf64>) {
+func.func @cross_brick_stencil_smoke(%A: memref<?xf64>, %B: memref<?xf64>) {
   %c0 = arith.constant 0 : index
   %c8 = arith.constant 8 : index
   %c16 = arith.constant 16 : index
@@ -146,11 +122,10 @@ func.func @cross_brick_stencil(%A: memref<?xf64>, %B: memref<?xf64>) {
 
 // -----
 
-// Non-affine access (Morton-style bit-interleave). Emit vector.gather with
-// runtime-computed index vector (per-lane clones of the address DAG).
-// CHECK-LABEL: func.func @morton_gather
+// NonAffine gather smoke test: see full coverage in lego_vectorize_gather.mlir.
+// CHECK-LABEL: func.func @morton_gather_smoke
 // CHECK: vector.gather
-func.func @morton_gather(%A: memref<?xf64>, %B: memref<?xf64>, %i_outer: index) {
+func.func @morton_gather_smoke(%A: memref<?xf64>, %B: memref<?xf64>, %i_outer: index) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c8 = arith.constant 8 : index

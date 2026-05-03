@@ -5,8 +5,8 @@
 // addresses 0..L-1 and detects non-uniform strides → emits vector.gather.
 
 // ---------------------------------------------------------------------------
-// Test 1: Morton-style bit-interleave (already covered in lego_vectorize.mlir,
-// repeated here as part of the gather matrix for completeness).
+// Test 1: Morton-style bit-interleave (moved from lego_vectorize.mlir,
+// Finding 8 — lego_vectorize_gather.mlir is the canonical home).
 // TierA: andi / shli / ori are not handled → NonAffine.
 // TierB: probes i=0..7 for the inner j loop, computes addresses, finds
 //        non-uniform differences → NonAffine → vector.gather.
@@ -14,6 +14,29 @@
 // CHECK-LABEL: func.func @morton_style
 // CHECK: vector.gather
 func.func @morton_style(%A: memref<?xf64>, %B: memref<?xf64>, %i_outer: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  %c5 = arith.constant 5 : index
+  scf.for %j = %c0 to %c8 step %c1 {
+    %ti = arith.andi %i_outer, %c5 : index
+    %tj = arith.andi %j, %c5 : index
+    %tj_shl = arith.shli %tj, %c1 : index
+    %morton = arith.ori %ti, %tj_shl : index
+    %v = memref.load %A[%morton] : memref<?xf64>
+    memref.store %v, %B[%j] : memref<?xf64>
+  }
+  return
+}
+
+// -----
+
+// ---------------------------------------------------------------------------
+// Test 1b: @morton_gather (moved from lego_vectorize.mlir, Finding 8).
+// Same as morton_style above but with the original name for backward compat.
+// CHECK-LABEL: func.func @morton_gather
+// CHECK: vector.gather
+func.func @morton_gather(%A: memref<?xf64>, %B: memref<?xf64>, %i_outer: index) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %c8 = arith.constant 8 : index

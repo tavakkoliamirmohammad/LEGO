@@ -90,8 +90,8 @@ static bool isLoopInvariant(Value v, Value iv) {
 // Previously: %tile_id → NonAffine (bailed). Now: %tile_id → invariant_val,
 // %off → {coeff=0, invariant=[%tile_id * tile_size conceptually]}, then
 // %idx → {coeff=1, invariant=[%off]}.  coeff==1 → Unit stride. Correct!
-AffineVal evalAffine(Value v, Value iv,
-                     llvm::DenseMap<Value, AffineVal> &cache) {
+AffineVal evalLinearInIV(Value v, Value iv,
+                         llvm::DenseMap<Value, AffineVal> &cache) {
   // Cache hit?
   auto it = cache.find(v);
   if (it != cache.end())
@@ -138,8 +138,8 @@ AffineVal evalAffine(Value v, Value iv,
 
   // addi(a, b)  →  (ca+cb)*iv + (ka+kb) + (ia∪ib)
   if (auto add = dyn_cast<arith::AddIOp>(defOp)) {
-    auto a = evalAffine(add.getLhs(), iv, cache);
-    auto b = evalAffine(add.getRhs(), iv, cache);
+    auto a = evalLinearInIV(add.getLhs(), iv, cache);
+    auto b = evalLinearInIV(add.getRhs(), iv, cache);
     if (!a.valid || !b.valid) {
       result = AffineVal::nonAffine();
     } else {
@@ -156,8 +156,8 @@ AffineVal evalAffine(Value v, Value iv,
 
   // subi(a, b)  →  (ca-cb)*iv + (ka-kb) + (ia∪ib)
   if (auto sub = dyn_cast<arith::SubIOp>(defOp)) {
-    auto a = evalAffine(sub.getLhs(), iv, cache);
-    auto b = evalAffine(sub.getRhs(), iv, cache);
+    auto a = evalLinearInIV(sub.getLhs(), iv, cache);
+    auto b = evalLinearInIV(sub.getRhs(), iv, cache);
     if (!a.valid || !b.valid) {
       result = AffineVal::nonAffine();
     } else {
@@ -181,8 +181,8 @@ AffineVal evalAffine(Value v, Value iv,
   //   Case 3: Both have coeff != 0 → quadratic, not affine.
   //   Case 4: a has invariant terms and b has iv → NonAffine (iv * invariant).
   if (auto mul = dyn_cast<arith::MulIOp>(defOp)) {
-    auto a = evalAffine(mul.getLhs(), iv, cache);
-    auto b = evalAffine(mul.getRhs(), iv, cache);
+    auto a = evalLinearInIV(mul.getLhs(), iv, cache);
+    auto b = evalLinearInIV(mul.getRhs(), iv, cache);
     if (!a.valid || !b.valid) {
       result = AffineVal::nonAffine();
     } else if (a.coeff == 0 && a.invariant.empty()) {
@@ -223,8 +223,8 @@ AffineVal evalAffine(Value v, Value iv,
   // shli(a, constant) — left shift by a constant is equivalent to muli by 2^n.
   // Used by strength-reduction of power-of-2 multiplications.
   if (auto shl = dyn_cast<arith::ShLIOp>(defOp)) {
-    auto a = evalAffine(shl.getLhs(), iv, cache);
-    auto b = evalAffine(shl.getRhs(), iv, cache);
+    auto a = evalLinearInIV(shl.getLhs(), iv, cache);
+    auto b = evalLinearInIV(shl.getRhs(), iv, cache);
     // b must be a pure integer constant for this to be affine.
     if (!a.valid || !b.valid || b.coeff != 0 || !b.invariant.empty()) {
       result = AffineVal::nonAffine();
@@ -248,7 +248,7 @@ AffineVal evalAffine(Value v, Value iv,
 
   // index_cast (arith.index_cast or arith.index_castui) — treat as identity.
   if (isa<arith::IndexCastOp, arith::IndexCastUIOp>(defOp)) {
-    result = evalAffine(defOp->getOperand(0), iv, cache);
+    result = evalLinearInIV(defOp->getOperand(0), iv, cache);
     cache[v] = result;
     return result;
   }
@@ -262,7 +262,7 @@ AffineVal evalAffine(Value v, Value iv,
   {
     bool allInvariant = true;
     for (Value operand : defOp->getOperands()) {
-      auto ov = evalAffine(operand, iv, cache);
+      auto ov = evalLinearInIV(operand, iv, cache);
       if (!ov.valid || ov.coeff != 0) {
         allInvariant = false;
         break;
@@ -304,7 +304,7 @@ AccessClassification solveAccessTierA(Operation *memrefOp, Value iv,
 
   // Evaluate S(iv) symbolically.
   llvm::DenseMap<Value, AffineVal> cache;
-  AffineVal sym = evalAffine(addr, iv, cache);
+  AffineVal sym = evalLinearInIV(addr, iv, cache);
 
   if (!sym.valid) {
     cls.kind = AccessKind::NonAffine;
@@ -347,7 +347,7 @@ namespace {
 // `root`, or std::nullopt if any node can't be evaluated (e.g. depends on
 // non-iv block args, has a non-supported op).
 static std::optional<int64_t>
-concreteEvaluate(Value root, Value iv, int64_t ivVal,
+evalConcreteIV(Value root, Value iv, int64_t ivVal,
                  llvm::DenseMap<Value, std::optional<int64_t>> &cache) {
   if (auto it = cache.find(root); it != cache.end()) return it->second;
   std::optional<int64_t> result;
@@ -373,8 +373,8 @@ concreteEvaluate(Value root, Value iv, int64_t ivVal,
     }
   // Binary integer ops.
   } else if (defOp->getNumOperands() == 2 && defOp->getNumResults() == 1) {
-    auto a = concreteEvaluate(defOp->getOperand(0), iv, ivVal, cache);
-    auto b = concreteEvaluate(defOp->getOperand(1), iv, ivVal, cache);
+    auto a = evalConcreteIV(defOp->getOperand(0), iv, ivVal, cache);
+    auto b = evalConcreteIV(defOp->getOperand(1), iv, ivVal, cache);
     if (a && b) {
       if (isa<arith::AddIOp>(defOp))          result = *a + *b;
       else if (isa<arith::SubIOp>(defOp))     result = *a - *b;
@@ -395,7 +395,7 @@ concreteEvaluate(Value root, Value iv, int64_t ivVal,
       // Otherwise: unsupported, leave result as nullopt.
     }
   } else if (isa<arith::IndexCastOp, arith::IndexCastUIOp>(defOp)) {
-    result = concreteEvaluate(defOp->getOperand(0), iv, ivVal, cache);
+    result = evalConcreteIV(defOp->getOperand(0), iv, ivVal, cache);
   }
   // (Add more ops as needed — the above covers most LEGO-generated index arithmetic.)
 
@@ -431,7 +431,7 @@ AccessClassification solveAccessTierB(Operation *memrefOp, Value iv,
   addrs.reserve(L);
   for (int64_t k = 0; k < L; ++k) {
     cache.clear();
-    auto v = concreteEvaluate(addr, iv, /*ivVal=*/k, cache);
+    auto v = evalConcreteIV(addr, iv, /*ivVal=*/k, cache);
     if (!v) return cls;  // NonAffine — can't evaluate.
     addrs.push_back(*v);
   }
