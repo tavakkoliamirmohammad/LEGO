@@ -884,6 +884,85 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
     if (score <= 1.0) return 1;
   }
 
+  // ILP unroll multiplier for pure unit-stride loops.
+  //
+  // When all constraining accesses are Unit stride AND there is no loop-carried
+  // dependence (Ld == max_int), emitting K independent vector body copies gives
+  // LLVM K independent SSA values that it can assign to K separate ZMM registers
+  // and schedule in parallel.  This is equivalent to what Clang's auto-vectorizer
+  // does naturally when it starts from scalar IR:
+  //
+  //   Clang (scalar → LLVM auto-vec):  4 accumulators (zmm2,3,4,5) → 4× ILP
+  //   LEGO (lego-vectorize, L_strip=16): 1 accumulator (zmm2) → serialized
+  //
+  // Setting L_strip = 4 × R_T for pure unit-stride loops produces 4 sub-ops in
+  // emitVectorBody(), each using a distinct SSA value → distinct register →
+  // instruction-level parallelism matches Clang's output.
+  //
+  // Conditions for applying the multiplier:
+  //   1. All constraining accesses are Unit (no gather/strided — those benefit
+  //      less from ILP unrolling and may increase register pressure unduly).
+  //   2. Ld == max_int (no loop-carried dependence — confirmed disjoint bases).
+  //   3. T >= K * R_T (trip count is large enough to amortise the extra tail).
+  //
+  // The multiplier K = 4 matches modern out-of-order superscalar pipelines:
+  //   - AMD Zen4: 2× FMA pipes (can sustain 2 FMAs/cycle/port × 2 ports = 4 ops
+  //     in flight per cycle given sufficient register-level independence).
+  //   - Intel Ice Lake: 2× FMA pipes with similar depth.
+  //   K = 4 is the standard recommendation for AVX-512 unit-stride streaming;
+  //   K = 8 is sometimes used for prefetch-heavy workloads.  Start with K = 4.
+  //
+  // When T < K * R_T, the normal L_strip (= R_T) is safe and the multiplier
+  // would mostly generate tail-loop iterations — not worth it.
+  //
+  // Reference: Agner Fog "Optimizing software in C++", §12.7 "Loop unrolling";
+  // LLVM LoopVectorize.cpp UnrollFactor logic; GCC -funroll-loops behavior.
+  bool allUnit = std::all_of(a.classes.begin(), a.classes.end(),
+                              [](const lego::AccessClassification &c) {
+                                return c.kind == lego::AccessKind::Unit ||
+                                       c.kind == lego::AccessKind::Broadcast;
+                              });
+  bool hasAnyUnit =
+      std::any_of(a.classes.begin(), a.classes.end(),
+                  [](const lego::AccessClassification &c) {
+                    return c.kind == lego::AccessKind::Unit;
+                  });
+  if (allUnit && hasAnyUnit &&
+      Ld == std::numeric_limits<int64_t>::max()) {
+    // Pure unit-stride loop with no loop-carried dependence.
+    // Apply 4× ILP unroll to match Clang's auto-vectorizer output quality.
+    constexpr int64_t kILPFactor = 4;
+    int64_t R_T_max = 0;
+    for (const auto &cls : a.classes) {
+      if (cls.kind == lego::AccessKind::Unit)
+        R_T_max = std::max(R_T_max, getRegisterLanesForType(target, cls.elementBytes));
+    }
+    // Only apply when:
+    //   (a) The trip count T is STATICALLY KNOWN (not max_int from an
+    //       unknown dynamic bound).  When T is unknown, applying the
+    //       multiplier unconditionally would produce L_strip > T in many
+    //       practical cases (e.g. small tile loops), generating an empty
+    //       vector body.
+    //   (b) T is large enough (≥ kILPFactor × R_T) so the tail is small
+    //       relative to the total work.
+    //   (c) The loop has at least one memref.load (read access).
+    //       Pure-store loops (e.g. fill_zeros) don't benefit from ILP
+    //       accumulator unrolling — their bottleneck is store bandwidth,
+    //       not compute ILP. More importantly, pure-store loops where the
+    //       stored value is a loop-invariant constant trigger a sub-vector
+    //       sizing mismatch in emitVectorBody() when L_strip > Ln (the
+    //       broadcastMap broadcasts to full L_strip, but the store path
+    //       expects numSubOps = L_strip/Ln separate Ln-wide pieces).
+    bool hasLoad =
+        std::any_of(a.accesses.begin(), a.accesses.end(), [](Operation *op) {
+          return isa<memref::LoadOp>(op);
+        });
+    bool T_is_known = (T != std::numeric_limits<int64_t>::max());
+    if (T_is_known && hasLoad && T >= kILPFactor * R_T_max) {
+      L_strip = kILPFactor * L_strip;
+    }
+  }
+
   return L_strip;
 }
 
@@ -1389,6 +1468,88 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
       Type subResTy = VectorType::get({Ln_result}, resTy);
       SmallVector<Value> resultSubs;
       resultSubs.reserve(numSubOpsResult);
+
+      // Fast-math flag injection for floating-point arith ops on vector types.
+      //
+      // When the original scalar op is arith.mulf or arith.addf and does NOT
+      // already carry a fastmath attribute, inject `fastmath<contract>`.
+      // The `contract` flag is the minimal flag needed for FMA fusion: it allows
+      // the backend to contract fmul(a,b)+c → vfmadd213ps without enabling
+      // the full semantics of -ffast-math (no-nan, no-inf, etc.).
+      //
+      // This matches what Clang emits when `-ffast-math` is passed: the LLVM IR
+      // carries `fmul fast` / `fadd fast` on the vectorised ops, which enables
+      // `contract` (among other flags).  Without `contract`, LLVM cannot fuse
+      // a separate vmulps + vaddps into a single vfmadd213ps, costing one extra
+      // 512-bit operation per 16-float group.
+      //
+      // Safety: `contract` does NOT change rounding mode or introduce non-IEEE
+      // results; it only allows reordering of the multiply-add into a fused op
+      // which is IEEE-correct when the FMA hardware round occurs once.
+      // We only inject the flag when:
+      //   (a) the result is a float or vector-of-float type (not integer), and
+      //   (b) the op is arith.mulf or arith.addf (the specific ops that fuse), and
+      //   (c) no fastmath attr is already present on the original op.
+      //
+      // Note: we do NOT add fast-math to arith.divf or arith.subf by default —
+      // division already has ffast-math implications, and subf is not fusable.
+      // Fast-math flag injection for floating-point arith ops on vector types.
+      //
+      // When the original scalar op is arith.mulf or arith.addf and does NOT
+      // already carry a fastmath attribute, inject `fastmath<contract>`.
+      // The `contract` flag is the minimal flag needed for FMA fusion: it allows
+      // the backend to contract fmul(a,b)+c → vfmadd213ps without enabling
+      // the full semantics of -ffast-math (no-nan, no-inf, etc.).
+      //
+      // This matches what Clang emits when `-ffast-math` is passed: the LLVM IR
+      // carries `fmul fast` / `fadd fast` on the vectorised ops, which enables
+      // `contract` (among other flags).  Without `contract`, LLVM cannot fuse
+      // a separate vmulps + vaddps into a single vfmadd213ps, costing one extra
+      // 512-bit operation per 16-float group.
+      //
+      // Safety: `contract` does NOT change rounding mode or introduce non-IEEE
+      // results; it only allows reordering of the multiply-add into a fused op
+      // which is IEEE-correct when the FMA hardware round occurs once.
+      // We only inject the flag when:
+      //   (a) the result is a float or vector-of-float type (not integer), and
+      //   (b) the op is arith.mulf or arith.addf (the specific ops that fuse), and
+      //   (c) the existing fastmath flags do NOT already include contract.
+      //
+      // Note: MLIR's canonicalizer adds `fastmath<none>` to arith.mulf/addf
+      // automatically, so we cannot use `!op.hasAttr("fastmath")` — instead we
+      // check whether the existing flags already include the `contract` bit.
+      //
+      // Note: we do NOT add fast-math to arith.divf or arith.subf by default —
+      // division already has ffast-math implications, and subf is not fusable.
+      bool injectContractFMF = false;
+      if (mlir::isa<FloatType, VectorType>(resTy)) {
+        if (isa<arith::MulFOp, arith::AddFOp>(op)) {
+          // Check if contract is already present in the existing flags.
+          auto existingFMF = arith::FastMathFlags::none;
+          if (auto fmfAttr = op.getAttrOfType<arith::FastMathFlagsAttr>("fastmath"))
+            existingFMF = fmfAttr.getValue();
+          bool hasContract = static_cast<bool>(
+              existingFMF & arith::FastMathFlags::contract);
+          if (!hasContract)
+            injectContractFMF = true;
+        }
+      }
+
+      // Pre-compute the merged fastmath attr to use for the cloned sub-ops.
+      // We do this once (before the j-loop) and override the fastmath attr in
+      // the OperationState after addAttributes() copies the original attrs.
+      // This avoids duplicate-key issues: addAttributes() copies fastmath<none>
+      // (or whatever existing flags), and then we overwrite with the merged value.
+      Attribute mergedFMFAttr;
+      if (injectContractFMF) {
+        MLIRContext *ctx = builder.getContext();
+        auto existingFMF = arith::FastMathFlags::none;
+        if (auto fmfAttr = op.getAttrOfType<arith::FastMathFlagsAttr>("fastmath"))
+          existingFMF = fmfAttr.getValue();
+        auto merged = existingFMF | arith::FastMathFlags::contract;
+        mergedFMFAttr = arith::FastMathFlagsAttr::get(ctx, merged);
+      }
+
       for (int64_t j = 0; j < numSubOpsResult; ++j) {
         SmallVector<Value> opOperands;
         for (auto &operandList : operandSubs) opOperands.push_back(operandList[j]);
@@ -1396,6 +1557,14 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
         state.addOperands(opOperands);
         state.addAttributes(op.getAttrs());
         state.addTypes(subResTy);
+        // Inject/merge contract fast-math flag for mulf/addf.
+        // We use NamedAttrList::set() which overwrites any existing "fastmath"
+        // entry added by addAttributes() above, preventing duplicate-key errors.
+        if (mergedFMFAttr) {
+          state.attributes.set(
+              mlir::StringAttr::get(builder.getContext(), "fastmath"),
+              mergedFMFAttr);
+        }
         Operation *newOp = builder.create(state);
         resultSubs.push_back(newOp->getResult(0));
       }
