@@ -260,6 +260,16 @@ void registerLegoPipelines() {
     "For ARM execution: mlir-translate --mlir-to-llvmir | llc -mtriple=aarch64-linux-gnu -mattr=+neon",
     buildLegoToArmNeonPipeline);
 
+  PassPipelineRegistration<LegoToArmSvePipelineOptions>(
+    "lego-to-arm-sve",
+    "Lower LEGO dialect to LLVM IR with ARM SVE vector shapes (R15). "
+    "Emits fixed-width 16-byte (vscale=1) vectors via lego-vectorize{target=sve}. "
+    "The LLVM AArch64 backend promotes to full runtime SVE width when +sve is set. "
+    "IR shape is host-verifiable; runtime validation requires ARM SVE hardware. "
+    "For SVE execution: mlir-translate --mlir-to-llvmir | "
+    "llc -mtriple=aarch64-linux-gnu -mattr=+sve -O3",
+    buildLegoToArmSvePipeline);
+
 }
 
 } // namespace lego

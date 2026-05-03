@@ -172,6 +172,21 @@ struct LegoToArmNeonPipelineOptions
       llvm::cl::init("cortex-a76")};
 };
 
+/// Options for the lego-to-arm-sve pipeline (R15).
+/// Emits fixed-width SVE-shaped vectors (vscale=1, 128-bit minimum).
+/// On SVE hardware, the LLVM AArch64 backend promotes these to the full
+/// runtime SVE vector length (+sve target feature).
+/// For runtime execution: mlir-translate --mlir-to-llvmir |
+///   llc -mtriple=aarch64-linux-gnu -mattr=+sve
+struct LegoToArmSvePipelineOptions
+    : public PassPipelineOptions<LegoToArmSvePipelineOptions> {
+  PassOptions::Option<std::string> cpu{
+      *this, "cpu",
+      llvm::cl::desc("ARM CPU with SVE: neoverse-v1|neoverse-v2|... "
+                     "(sets LLVM target features)"),
+      llvm::cl::init("neoverse-v1")};
+};
+
 void registerLegoPipelines();
 void buildLegoLowerPipeline(OpPassManager &pm);
 void buildLegoToLLVMPipeline(OpPassManager &pm);
@@ -179,6 +194,8 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
                                   const LegoToX86VectorPipelineOptions &opts);
 void buildLegoToArmNeonPipeline(OpPassManager &pm,
                                 const LegoToArmNeonPipelineOptions &opts);
+void buildLegoToArmSvePipeline(OpPassManager &pm,
+                               const LegoToArmSvePipelineOptions &opts);
 void buildLegoToSPIRVPipeline(OpPassManager &pm,
                                const LegoToSPIRVPipelineOptions &options);
 #ifdef LEGO_HAS_SPIRV

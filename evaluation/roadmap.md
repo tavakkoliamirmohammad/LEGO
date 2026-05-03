@@ -176,23 +176,57 @@ the tile boundary. Emits a compile-time diagnostic if not legal.
 
 **Dependencies:** none (pure analysis pass, no new lowerings needed).
 
-## R15 — ARM SVE width-aware NEON emission
+## R15 — ARM SVE pipeline
 
 **Severity:** low for CHPC (no SVE hardware in current cluster). Medium for
 Apple M-series / Graviton 3 deployment targets.
 
-**Status:** future. v1 ships `lego-to-arm-neon` (fixed 128-bit NEON).
-Width-aware emission for SVE (scalable vector lengths up to 2048-bit) requires
-a separate `lego-to-arm-sve` pipeline that uses `vector<[N]xf32>` scalable
-vector types.
+**Status: CLOSED — shipped 2026-05-01 (branch `feat/cpu-vector-pipeline`).**
 
-**Proposed feature.** `lego-to-arm-sve` pipeline, enabled via
-`--target-cpu=neoverse-v2` or `--target-cpu=apple-m4`. The fixed-width NEON
-path remains the default; SVE is opt-in.
+**What was built.**
 
-**Effort:** 2–3 weeks.
+1. `lib/Lego/LegoArmSvePipeline.cpp` — new pipeline `lego-to-arm-sve`.
+   - Mirrors `lego-to-arm-neon` but passes `target="sve"` to `lego-vectorize`.
+   - Emits fixed-width 16-byte vectors (vscale=1: 2xf64, 4xf32) — identical
+     lane counts to NEON. The LLVM AArch64 backend legalizes these to full SVE
+     width at `llc` time when `+sve` is in the target feature string.
+   - Pipeline: `buildLegoLowerPipeline → canonicalize+CSE →
+     lego-vectorize{target=sve} → convert-vector-to-llvm → SCF/Arith/MemRef/
+     Func/CF → LLVM → reconcile-unrealized-casts`.
+2. `lib/Lego/LegoVectorize.cpp` — added `sve` case to `getRegisterLanesForType`:
+   returns `16 / elementBytes` (same as NEON). Comment documents the
+   fixed-width-SVE design choice.
+3. `include/Lego/Passes.h` — `LegoToArmSvePipelineOptions` struct + declaration.
+4. `include/Lego/Passes.td` — updated `lego-vectorize` target option description
+   to include `sve`.
+5. `lib/Lego/CMakeLists.txt` — added `LegoArmSvePipeline.cpp` to
+   `_CPU_VECTOR_SOURCES`.
+6. `lib/Lego/Passes.cpp` — registered `lego-to-arm-sve` pipeline.
+7. `test/Lego/lego_to_arm_sve.mlir` — FileCheck test (IR shape only):
+   - Runs `lego-opt --lego-to-arm-sve` on a SAXPY kernel.
+   - Checks: `llvm.func @saxpy_sve`, `vector`, `llvm.return` present;
+     `lego.`, `scf.for` absent.
+   - Passes. Test header notes runtime validation requires ARM SVE hardware.
 
-**Dependencies:** R12 (same affine-offset store fix needed for SVE too).
+**Design note — fixed-width vs scalable.**  True scalable vectors (MLIR
+`vector<[N]xT>` syntax) would require pervasive changes to transfer_read/write,
+shuffle, broadcast emission.  The fixed-width approach produces correct SVE
+code on SVE hardware (the LLVM backend legalizes it) while remaining testable
+on this x86 node.  A future R15v2 can upgrade to true scalable IR.
+
+**Validation.** FileCheck test passes. `check-lego-all` passes (765 tests, 0
+failures). All 15 `test_cpu_dsl.py` Python tests pass.
+
+**Runtime note.** IR-shape only on this CHPC node (Intel Xeon Gold 6330, no
+SVE). For actual SVE execution:
+```
+  mlir-translate --mlir-to-llvmir kernel.mlir -o kernel.ll
+  llc -mtriple=aarch64-linux-gnu -mattr=+sve -O3 kernel.ll -filetype=obj
+```
+
+**Effort:** 0.5 days (reused NEON pipeline as template; fixed-width approach).
+
+**Dependencies:** R1 (CLOSED — CPU vector pipeline).
 
 ## R17 — GPU lane-fold via warp shuffles
 

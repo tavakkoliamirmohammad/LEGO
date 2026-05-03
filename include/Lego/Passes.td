@@ -123,6 +123,8 @@ def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
       avx512 — 64-byte ZMM registers (8xf64, 16xf32)
       avx2   — 32-byte YMM registers (4xf64, 8xf32)
       neon   — 16-byte NEON registers (2xf64, 4xf32)
+      sve    — 16-byte minimum (vscale=1); LLVM promotes to full SVE width
+               on hardware with +sve target features (R15).
     All vectorization decisions use getRegisterLanesForType(target, elemBytes)
     so NO AVX-specific lane widths are hardcoded.
   }];
@@ -135,7 +137,7 @@ def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
   ];
   let options = [
     Option<"target", "target", "std::string", /*default=*/"\"avx512\"",
-           "Target backend: avx512 | avx2 | neon (controls vector register lane width)">,
+           "Target backend: avx512 | avx2 | neon | sve (controls vector register lane width)">,
   ];
 }
 

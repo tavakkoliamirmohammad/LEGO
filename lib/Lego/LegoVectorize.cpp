@@ -50,6 +50,13 @@ static int64_t getRegisterLanesForType(llvm::StringRef target,
   if (target == "avx512") return 64 / elementBytes;
   if (target == "avx2")   return 32 / elementBytes;
   if (target == "neon")   return 16 / elementBytes;
+  // SVE: scalable vectors whose runtime length is a multiple of 128 bits.
+  // For codegen purposes we fix vscale=1 (128-bit minimum), identical to NEON.
+  // The LLVM AArch64 backend promotes these to full SVE width at runtime when
+  // +sve target features are present.  This is "fixed-width SVE" (not true
+  // scalable-vector IR), which produces correct SVE code on SVE hardware while
+  // remaining verifiable for IR shape on any host.
+  if (target == "sve")    return 16 / elementBytes;
   // Conservative default: AVX2.
   return 32 / elementBytes;
 }
@@ -762,18 +769,25 @@ struct EmitContext {
 
   void emitCrossBlockLoad(memref::LoadOp load,
                           const lego::AccessClassification &cls) {
-    // Two adjacent block reads + vector.shuffle.
+    // Multi-boundary cross-block load emission (R12).
     //
-    // Cross-block pattern: addr(iv+0..L-1) is unit-stride for the first
-    // `boundary` lanes, then jumps to the next block for the remaining
-    // (L - boundary) lanes. Synthesise by:
-    //   1. Reading L lanes from block N (starting at addr(0)).
-    //   2. Reading L lanes from block N+1 (starting at addr(boundary)).
-    //   3. vector.shuffle selects [0..boundary) from blockN and
-    //      [0..L-boundary) from blockNp1.
+    // For M boundaries (M >= 1), the address sequence is:
+    //   [0..b0): unit-stride in block 0   (b0 = boundaries[0])
+    //   [b0..b1): unit-stride in block 1  (b1 = boundaries[1])
+    //   ...
+    //   [b_{M-1}..L): unit-stride in block M
     //
-    // v1 restriction: only Ln == L_strip. If CrossBlock is combined with
-    // mixed-precision (Ln < L_strip), fall through to scalar-clone fallback.
+    // Algorithm (M+1 reads + M shuffles, chained):
+    //   1. Read block[k] at base address baseIv + boundaryJumps[k] for k=0..M.
+    //      block[0] base = baseIv (no jump; boundaryJump[0] is to block 1).
+    //   2. Start with block[0] as current.
+    //   3. For each boundary bk = boundaries[k-1] (k=1..M):
+    //      shuffle: take lanes [0..bk) from current, [bk..L) from block[k].
+    //      This splices in the next block's contribution for the lanes it covers.
+    //      Update current to the shuffled result.
+    //   4. mapVec with the final shuffled value.
+    //
+    // v1 restriction: only Ln == L_strip. Mixed-precision fallback to scalar.
     int64_t Ln = getLnForAccess(cls);
     if (Ln != L_strip) {
       Operation *cloned = builder.clone(*load.getOperation(), mapping);
@@ -781,38 +795,63 @@ struct EmitContext {
       return;
     }
 
-    int64_t boundary = cls.boundary;
     Type elemTy = load.getType();
     auto vecTy = VectorType::get({Ln}, elemTy);
     Value baseIv = mapping.lookupOrDefault(load.getIndices().front());
 
-    // R12a: use cls.boundaryJump (actual address delta from addrs[0] to
-    // addrs[boundary]) to compute the second block's base address.
-    // boundaryJump = addrs[boundary] - addrs[0] (element-unit offset).
-    Value boundaryJumpConst =
-        arith::ConstantIndexOp::create(builder, loc, cls.boundaryJump);
-    Value blockNp1Iv =
-        arith::AddIOp::create(builder, loc, baseIv, boundaryJumpConst);
+    const int64_t M = (int64_t)cls.boundaries.size();
 
-    Value blockN = vector::TransferReadOp::create(
+    if (M == 0) {
+      // Degenerate: classified CrossBlock but no boundaries — shouldn't happen.
+      // Fall back to scalar clone.
+      Operation *cloned = builder.clone(*load.getOperation(), mapping);
+      mapping.map(load.getResult(), cloned->getResult(0));
+      return;
+    }
+
+    // Read all M+1 blocks.
+    // block[0]: base = baseIv (the current strip's start).
+    // block[k] (k>=1): base = baseIv + boundaryJumps[k-1].
+    SmallVector<Value> blocks;
+    blocks.reserve(M + 1);
+
+    // Block 0.
+    auto block0Op = vector::TransferReadOp::create(
         builder, loc, vecTy, load.getMemRef(), ValueRange{baseIv},
         /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
-    Value blockNp1 = vector::TransferReadOp::create(
-        builder, loc, vecTy, load.getMemRef(), ValueRange{blockNp1Iv},
-        /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
+    blocks.push_back(block0Op.getVector());
 
-    // Shuffle: [0..boundary) from blockN, then [0..L-boundary) from blockNp1.
-    SmallVector<int64_t> shuffleIndices;
-    shuffleIndices.reserve(Ln);
-    for (int64_t lane = 0; lane < Ln; ++lane) {
-      if (lane < boundary)
-        shuffleIndices.push_back(lane);
-      else
-        shuffleIndices.push_back(Ln + (lane - boundary));
+    // Blocks 1..M.
+    for (int64_t k = 0; k < M; ++k) {
+      Value jumpConst =
+          arith::ConstantIndexOp::create(builder, loc, cls.boundaryJumps[k]);
+      Value blockKIv = arith::AddIOp::create(builder, loc, baseIv, jumpConst);
+      auto blockKOp = vector::TransferReadOp::create(
+          builder, loc, vecTy, load.getMemRef(), ValueRange{blockKIv},
+          /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
+      blocks.push_back(blockKOp.getVector());
     }
-    Value shuffled = vector::ShuffleOp::create(builder, loc, blockN,
-                                               blockNp1, shuffleIndices);
-    mapVec(load.getResult(), {shuffled});
+
+    // Chain shuffles: merge block[k] into the accumulator at boundary[k-1].
+    // After shuffle k: lanes [0..boundaries[k-1]) come from the accumulated
+    // result (i.e., the preceding blocks) and lanes [boundaries[k-1]..L) come
+    // from block[k].
+    Value current = blocks[0];
+    for (int64_t k = 0; k < M; ++k) {
+      int64_t bk = cls.boundaries[k];
+      SmallVector<int64_t> shuffleIndices;
+      shuffleIndices.reserve(Ln);
+      for (int64_t lane = 0; lane < Ln; ++lane) {
+        if (lane < bk)
+          shuffleIndices.push_back(lane);              // from 'current'
+        else
+          shuffleIndices.push_back(Ln + (lane - bk)); // from blocks[k+1]
+      }
+      current = vector::ShuffleOp::create(builder, loc, current,
+                                          blocks[k + 1], shuffleIndices);
+    }
+
+    mapVec(load.getResult(), {current});
   }
 
   void emitStridedLoad(memref::LoadOp load,

@@ -31,6 +31,7 @@ endif()
 set(_CPU_VECTOR_SOURCES
   LegoX86VectorPipeline.cpp
   LegoArmNeonPipeline.cpp
+  LegoArmSvePipeline.cpp
 )
 
 # --- GPU backend sources (conditional on LLVM targets) ---
