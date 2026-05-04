@@ -1,9 +1,12 @@
 // RUN: lego-opt %s --lego-vectorize | FileCheck %s
-// RUN: lego-opt %s --lego-vectorize='enable-smt-dep-analysis=true' | FileCheck %s --check-prefix=SMT
 
 // Dependence analysis tests.
 // The dep analysis (computeMinDepDistance) checks cross-iteration RAW/WAW/WAR
 // using affine expressions. If Ld < L_strip, the loop is not vectorized.
+//
+// (The opt-in --enable-smt-dep-analysis Z3 prover and its SMT- check-prefix
+// lines were removed alongside the underlying smtProveNoDep code; per
+// feedback_sympy_z3_slow.md the SymPy/Z3 path was avoided in practice.)
 
 // ---------------------------------------------------------------------------
 // Test 1: Self-update loop A[i] = A[i-1] + A[i] → RAW cross-iteration dep.
@@ -16,9 +19,6 @@
 // CHECK-NOT: vector.gather
 // CHECK: memref.load
 // CHECK: memref.store
-// SMT-LABEL: func.func @self_update_raw
-// SMT-NOT: vector.transfer_read
-// SMT: memref.load
 func.func @self_update_raw(%A: memref<?xf64>, %N: index) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -155,20 +155,13 @@ func.func @raw_distance_gt_L(%A: memref<?xf64>, %N: index) {
 // -----
 
 // ---------------------------------------------------------------------------
-// Test 7: R14 — enable-smt-dep-analysis flag smoke test.
-// A simple copy loop (disjoint memrefs A and B) that already vectorizes under
-// the default conservative analysis.  With enable-smt-dep-analysis=true the
-// same result is expected: SMT is invoked only for conservative Ld=1 pairs;
-// here Ld=max (disjoint bases), so SMT is never triggered.  This verifies:
-//   (a) the flag is accepted without crashing,
-//   (b) vectorization decisions are not regressed by the SMT wrapper.
+// Test 7: simple copy loop (disjoint memrefs A and B) — vectorises under
+// the default conservative analysis (Ld = max, no cross-iteration dep).
+// (Originally also exercised the now-removed --enable-smt-dep-analysis flag.)
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @smt_flag_smoke
 // CHECK: vector.transfer_read
 // CHECK: vector.transfer_write
-// SMT-LABEL: func.func @smt_flag_smoke
-// SMT: vector.transfer_read
-// SMT: vector.transfer_write
 func.func @smt_flag_smoke(%A: memref<?xf64>, %B: memref<?xf64>, %N: index) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index

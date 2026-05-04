@@ -15,18 +15,14 @@
 
 #include "LegoAffineExtract.h"
 #include "LegoVectorizeUtils.h"
-#include "Lego/SMTUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/SMT/IR/SMTOps.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
-#include "mlir/IR/AsmState.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
-#include "mlir/Target/SMTLIB/ExportSMTLIB.h"
 
 #include "llvm/Support/Debug.h"
 
@@ -382,188 +378,6 @@ static int64_t computeMinDepDistance(LoopAnalysis &a) {
   return Ld;
 }
 
-// ---------------------------------------------------------------------------
-// R14: SMT-driven dependence analysis (opt-in via enable-smt-dep-analysis).
-//
-// When the conservative dep analysis returns Ld=1 (due to different invariant
-// terms or non-affine addresses), this function invokes Z3 to attempt a proof
-// that no loop-carried dependence exists between the (store, load) pair.
-//
-// SMT formulation: for store at index S(i) and load at index L(j), with
-// i < j (later iteration writes before earlier iteration reads), we assert:
-//   ∃ i, j : lb ≤ i < j < ub ∧ S(i) = L(j)
-// If Z3 returns UNSAT: no such i,j exist → no cross-iteration RAW dep.
-// If Z3 returns SAT or UNKNOWN: conservative (Ld=1 stands).
-//
-// Default: off. Use lego-vectorize{enable-smt-dep-analysis=true} to enable.
-// MINDFUL of feedback_sympy_z3_slow.md: SMT is slow; this is opt-in only.
-//
-// Returns INT_MAX if SMT proves no dep; returns Ld_fallback otherwise.
-// ---------------------------------------------------------------------------
-static int64_t smtProveNoDep(scf::ForOp forOp,
-                              Operation *storeOp, Value storeAddr,
-                              Operation *loadOp,  Value loadAddr,
-                              int64_t Ld_fallback) {
-  using namespace mlir::lego;
-
-  // Extract loop bounds (if static — required for useful dep analysis).
-  int64_t lb = 0, ub = -1;
-  if (auto lbOp = forOp.getLowerBound().getDefiningOp<arith::ConstantIndexOp>())
-    lb = lbOp.value();
-  else
-    return Ld_fallback;  // dynamic bounds — can't prove
-  if (auto ubOp = forOp.getUpperBound().getDefiningOp<arith::ConstantIndexOp>())
-    ub = ubOp.value();
-  else
-    return Ld_fallback;  // dynamic bounds — can't prove
-
-  if (ub <= lb + 1) return Ld_fallback;  // trip count ≤ 1: no cross-iteration dep anyway
-
-  // Build an SMT module encoding:
-  //   declare i, j  (SMT int variables for the two loop iterations)
-  //   assert lb ≤ i
-  //   assert i < j
-  //   assert j < ub
-  //   encode store_addr(i) and load_addr(j) using SMTBuilder
-  //   assert store_addr(i) = load_addr(j)
-  //   check: if UNSAT → no dep
-  MLIRContext *ctx = forOp.getContext();
-  ctx->getOrLoadDialect<smt::SMTDialect>();
-
-  ModuleOp smtModule = ModuleOp::create(forOp.getLoc());
-  OpBuilder b(smtModule.getBodyRegion());
-
-  auto solver = smt::SolverOp::create(b, forOp.getLoc(), TypeRange{}, ValueRange{});
-  if (solver.getRegion().empty()) solver.getRegion().emplaceBlock();
-  b.setInsertionPointToStart(&solver.getRegion().front());
-  smt::SetLogicOp::create(b, forOp.getLoc(), "QF_NIA");
-
-  // Create SMT integer variables for i and j.
-  auto intTy = b.getType<smt::IntType>();
-  Value smtI = smt::DeclareFunOp::create(b, forOp.getLoc(), intTy,
-                                          b.getStringAttr("dep_i"));
-  Value smtJ = smt::DeclareFunOp::create(b, forOp.getLoc(), intTy,
-                                          b.getStringAttr("dep_j"));
-
-  // Assert lb ≤ i < j < ub.
-  Value smtLb = smt::IntConstantOp::create(b, forOp.getLoc(),
-                                            b.getI64IntegerAttr(lb));
-  Value smtUb = smt::IntConstantOp::create(b, forOp.getLoc(),
-                                            b.getI64IntegerAttr(ub));
-  Value lbLeI = smt::IntCmpOp::create(b, forOp.getLoc(),
-                                       smt::IntPredicate::le, smtLb, smtI);
-  Value iLtJ  = smt::IntCmpOp::create(b, forOp.getLoc(),
-                                       smt::IntPredicate::lt, smtI, smtJ);
-  Value jLtUb = smt::IntCmpOp::create(b, forOp.getLoc(),
-                                       smt::IntPredicate::lt, smtJ, smtUb);
-  smt::AssertOp::create(b, forOp.getLoc(), lbLeI);
-  smt::AssertOp::create(b, forOp.getLoc(), iLtJ);
-  smt::AssertOp::create(b, forOp.getLoc(), jLtUb);
-
-  // Encode address expressions using SMTBuilder.
-  // Build two SMTBuilders: one with IV→i substitution (for store), one with
-  // IV→j substitution (for load).
-  Value iv = forOp.getInductionVar();
-  AsmState asmState(smtModule);
-  unsigned nextId = 0;
-
-  // Store address with IV = i.
-  SMTBuilder storeBuilder(b, asmState, nextId);
-  storeBuilder.valMap[iv] = smtI;  // substitute IV → smtI
-  Value smtStoreAddr = storeBuilder.getOrCreate(storeAddr);
-
-  // Load address with IV = j.
-  SMTBuilder loadBuilder(b, asmState, nextId);
-  loadBuilder.valMap[iv] = smtJ;   // substitute IV → smtJ
-  Value smtLoadAddr = loadBuilder.getOrCreate(loadAddr);
-
-  // Assert store_addr(i) == load_addr(j).
-  Value addrEq = smt::EqOp::create(b, forOp.getLoc(), smtStoreAddr, smtLoadAddr);
-  smt::AssertOp::create(b, forOp.getLoc(), addrEq);
-
-  // Check satisfiability.
-  auto checkOp = smt::CheckOp::create(b, forOp.getLoc(), TypeRange{});
-  for (Region &r : checkOp->getRegions()) {
-    OpBuilder::InsertionGuard g(b);
-    b.setInsertionPointToStart(&r.emplaceBlock());
-    smt::YieldOp::create(b, forOp.getLoc(), ValueRange{});
-  }
-  smt::YieldOp::create(b, forOp.getLoc(), ValueRange{});
-
-  std::string smtLib;
-  llvm::raw_string_ostream os(smtLib);
-  if (failed(mlir::smt::exportSMTLIB(smtModule, os)))
-    return Ld_fallback;
-
-  // Remove the (reset) that exportSMTLIB appends.
-  size_t resetPos = smtLib.rfind("(reset)");
-  if (resetPos != std::string::npos) {
-    smtLib.erase(resetPos, 7);
-    if (resetPos < smtLib.size() && smtLib[resetPos] == '\n')
-      smtLib.erase(resetPos, 1);
-  }
-
-  // 200ms timeout to avoid hanging on complex expressions.
-  SMTResult result = runZ3WithModel(smtLib, 200);
-  if (!result.isSat && !result.isUnknown) {
-    // UNSAT: no i,j pair exists where addresses match → no dep.
-    LLVM_DEBUG(llvm::dbgs()
-               << "[lego-vectorize] R14 SMT proved no dep — vectorizing\n");
-    return std::numeric_limits<int64_t>::max();
-  }
-  return Ld_fallback;
-}
-
-// ---------------------------------------------------------------------------
-// R14: wrapper that applies SMT dep analysis when enabled.
-// Calls computeMinDepDistance, then optionally refines with SMT.
-// ---------------------------------------------------------------------------
-static int64_t computeMinDepDistanceWithSMT(LoopAnalysis &a,
-                                             bool enableSmt) {
-  int64_t Ld = computeMinDepDistance(a);
-  if (!enableSmt || Ld != 1)
-    return Ld;
-
-  // SMT pass: for each (store, load) pair on the same memref with Ld=1,
-  // try to prove independence via Z3.
-  Value iv = a.forOp.getInductionVar();
-  int64_t smtLd = std::numeric_limits<int64_t>::max();
-  bool anyConservative = false;
-
-  for (Operation *op1 : a.accesses) {
-    if (!isa<memref::StoreOp>(op1)) continue;
-    Value storeBase = memrefRoot(cast<memref::StoreOp>(op1).getMemRef());
-    Value storeIdx;
-    if (!cast<memref::StoreOp>(op1).getIndices().empty())
-      storeIdx = cast<memref::StoreOp>(op1).getIndices().front();
-    else
-      continue;
-
-    for (Operation *op2 : a.accesses) {
-      if (op1 == op2) continue;
-      Value loadBase;
-      Value loadIdx;
-      if (auto load = dyn_cast<memref::LoadOp>(op2)) {
-        loadBase = memrefRoot(load.getMemRef());
-        if (!load.getIndices().empty()) loadIdx = load.getIndices().front();
-      } else if (auto store = dyn_cast<memref::StoreOp>(op2)) {
-        loadBase = memrefRoot(store.getMemRef());
-        if (!store.getIndices().empty()) loadIdx = store.getIndices().front();
-      }
-      if (!loadBase || !loadIdx) continue;
-      if (storeBase != loadBase) continue;
-
-      // Same memref — try SMT.
-      anyConservative = true;
-      int64_t pairLd = smtProveNoDep(a.forOp, op1, storeIdx, op2, loadIdx, 1);
-      smtLd = std::min(smtLd, pairLd);
-    }
-  }
-
-  if (!anyConservative) return Ld;
-  return smtLd;
-}
-
 // Compute the strip-mine factor L_strip for a single LoopAnalysis.
 //
 // L_strip = lcm(Ln_access) over all constraining accesses, where:
@@ -579,8 +393,7 @@ static int64_t computeMinDepDistanceWithSMT(LoopAnalysis &a,
 // accessors (getLowerBound, getUpperBound, getStep) are non-const in this
 // MLIR version.  The function does not mutate `a`.
 static int64_t computeStripMineFactor(LoopAnalysis &a,
-                                      llvm::StringRef target,
-                                      bool enableSmt = false) {
+                                      llvm::StringRef target) {
   // R18b: if the loop carries an associative iter_arg reduction (e.g. a dot
   // product), detect it and allow vectorization with a vector accumulator.
   // The rewrite is handled in emitVectorBody/stripMineForOp when
@@ -658,8 +471,7 @@ static int64_t computeStripMineFactor(LoopAnalysis &a,
           T = (ub.value() - lb.value()) / st.value();
 
   // Dependence distance — Task 16: memref base distinctness analysis.
-  // R14: when enableSmt=true, refine conservative Ld=1 cases via Z3.
-  int64_t Ld = computeMinDepDistanceWithSMT(a, enableSmt);
+  int64_t Ld = computeMinDepDistance(a);
 
   int64_t L_strip = 1;
   bool sawConstraining = false;
@@ -2204,15 +2016,6 @@ class LegoVectorizePass
   using mlir::lego::impl::LegoVectorizePassBase<
       LegoVectorizePass>::LegoVectorizePassBase;
 
-  // R14: when enable-smt-dep-analysis is used, SMT dialect ops are created
-  // in smtProveNoDep.  Register the SMT dialect so the MLIRContext has it
-  // loaded before the pass runs.  The flag is opt-in (default off), so this
-  // is a no-cost registration in the common path.
-  void getDependentDialects(mlir::DialectRegistry &registry) const override {
-    LegoVectorizePassBase<LegoVectorizePass>::getDependentDialects(registry);
-    registry.insert<smt::SMTDialect>();
-  }
-
   void runOnOperation() final {
     func::FuncOp func = getOperation();
     auto loops = collectCandidateLoops(func);
@@ -2252,7 +2055,7 @@ class LegoVectorizePass
         a.classes.push_back(cls);
       }
 
-      a.L_strip = computeStripMineFactor(a, target, this->enableSmtDepAnalysis);
+      a.L_strip = computeStripMineFactor(a, target);
 
       // Task 8: strip-mine + emit vector.transfer_read/write.
       if (a.L_strip <= 1) {

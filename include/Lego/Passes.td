@@ -403,13 +403,6 @@ def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
   let options = [
     Option<"target", "target", "std::string", /*default=*/"\"avx512\"",
            "Target backend: avx512 | avx2 | neon | sve (controls vector register lane width)">,
-    Option<"enableSmtDepAnalysis", "enable-smt-dep-analysis", "bool",
-           /*default=*/"false",
-           "Opt-in: use Z3 SMT solver to prove loop-carried dep independence "
-           "for conservative cases. Default off — SMT invocation is slow. "
-           "When enabled, loops where computeMinDepDistance returns 1 due to "
-           "differing invariant sets or non-affine addresses are re-analyzed "
-           "with Z3. If Z3 proves UNSAT (no dep), the loop is vectorized.">,
   ];
 }
 
