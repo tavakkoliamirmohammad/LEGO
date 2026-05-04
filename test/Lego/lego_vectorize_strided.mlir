@@ -54,11 +54,12 @@ func.func @col_major_runtime_stride(%A: memref<?xf64>, %B: memref<?xf64>, %N: in
 
 // ---------------------------------------------------------------------------
 // Test 3: Stride 8 elements (f64, 8*8=64 bytes) — in {2,4,8}, stride*Ln=64.
-// R20 deinterleave fires: 8 transfer_reads + shuffle chain, no gather.
+// R20 deinterleave fires: one wide transfer_read + log2(stride) deinterleaves,
+// no gather.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @stride_equals_regwidth
 // CHECK: vector.transfer_read
-// CHECK: vector.shuffle
+// CHECK: vector.deinterleave
 // CHECK-NOT: vector.gather
 func.func @stride_equals_regwidth(%A: memref<?xf64>, %B: memref<?xf64>) {
   %c0 = arith.constant 0 : index
@@ -76,13 +77,13 @@ func.func @stride_equals_regwidth(%A: memref<?xf64>, %B: memref<?xf64>) {
 
 // ---------------------------------------------------------------------------
 // Test 4: Two strided accesses with different strides.
-// A[i*4]: f64, element-stride=4 (in {2,4,8}) → R20 deinterleave (4 reads + shuffle).
+// A[i*4]: f64, element-stride=4 (in {2,4,8}) → R20 deinterleave path.
 // B[i*16]: f64, element-stride=16 (> 8) → falls back to vector.gather.
 // C[i]: unit-stride store → transfer_write.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @two_strided_accesses
 // CHECK: vector.transfer_read
-// CHECK: vector.shuffle
+// CHECK: vector.deinterleave
 // CHECK: vector.gather
 // CHECK: vector.transfer_write
 func.func @two_strided_accesses(%A: memref<?xf64>, %B: memref<?xf64>, %C: memref<?xf64>) {
@@ -106,14 +107,16 @@ func.func @two_strided_accesses(%A: memref<?xf64>, %B: memref<?xf64>, %C: memref
 
 // ---------------------------------------------------------------------------
 // Test 5: Mixed unit + strided in same loop.
-// A[i] is unit-stride → transfer_read.
-// B[i*4]: f64, element-stride=4 (in {2,4,8}) → R20 deinterleave (4 reads + shuffle).
-// The result: transfer_reads + shuffle + transfer_write. No gather.
+// A[i] is unit-stride → transfer_read of vector<8xf64>.
+// B[i*4]: f64, element-stride=4 (in {2,4,8}) → R20 deinterleave path: one
+// wide read of vector<32xf64> followed by log2(4)=2 ``vector.deinterleave``
+// ops to peel out every 4th element.
+// The result: transfer_reads + deinterleave(s) + transfer_write. No gather.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @mixed_unit_strided
 // CHECK: vector.transfer_read {{.*}} : memref<?xf64>, vector<8xf64>
-// CHECK: vector.transfer_read {{.*}} : memref<?xf64>, vector<8xf64>
-// CHECK: vector.shuffle
+// CHECK: vector.transfer_read {{.*}} : memref<?xf64>, vector<32xf64>
+// CHECK: vector.deinterleave
 // CHECK: vector.transfer_write {{.*}} : vector<8xf64>, memref<?xf64>
 // CHECK-NOT: vector.gather
 func.func @mixed_unit_strided(%A: memref<?xf64>, %B: memref<?xf64>, %C: memref<?xf64>) {

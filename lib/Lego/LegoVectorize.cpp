@@ -1376,80 +1376,33 @@ struct EmitContext {
     Value physBase = cloneAddrChain(load.getIndices().front(),
                                   lane0Map, builder, origLoop);
 
-    // Load S blocks of Ln elements each: Block[b] starts at physBase + b*Ln.
-    SmallVector<Value> blocks;
-    blocks.reserve(stride);
-    for (int64_t b = 0; b < stride; ++b) {
-      Value blockBase;
-      if (b == 0) {
-        blockBase = physBase;
-      } else {
-        Value bOff = arith::ConstantIndexOp::create(builder, loc, b * Ln);
-        blockBase = arith::AddIOp::create(builder, loc, physBase, bOff);
-      }
-      auto block = vector::TransferReadOp::create(
-          builder, loc, vecTy, load.getMemRef(), ValueRange{blockBase},
-          /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true});
-      blocks.push_back(block.getVector());
+    // Read S*Ln contiguous elements as a single wide vector, then peel off
+    // every S-th element via log2(S) successive ``vector.deinterleave``
+    // ops. ``vector.deinterleave`` takes ``vector<2NxT>`` and returns a
+    // pair of ``vector<NxT>`` (evens, odds); we always keep the evens
+    // because element 0 of the input is at stride-aligned position 0 of
+    // every successive deinterleave's evens output.
+    //
+    // Trade-off vs. the prior hand-rolled shuffle chain:
+    //   - 1 wide TransferRead + log2(S) DeinterleaveOps,
+    //   - vs. S TransferReads + (S-1)+ shuffles previously.
+    // Net: fewer ops AND each op is the canonical upstream form, so the
+    // vector→LLVM lowering can pattern-match to ``vpunpck{l,h}{ps,pd}``
+    // type instructions reliably.
+    auto wideTy = VectorType::get({stride * Ln}, elemTy);
+    Value wide = vector::TransferReadOp::create(
+        builder, loc, wideTy, load.getMemRef(), ValueRange{physBase},
+        /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true})
+        .getVector();
+    Value evens = wide;
+    int64_t s = stride;
+    while (s > 1) {
+      auto deinter = vector::DeinterleaveOp::create(builder, loc, evens);
+      evens = deinter.getRes1();  // even-indexed half
+      s /= 2;
     }
 
-    // Deinterleave: select element k*stride from the concatenated blocks.
-    Value result;
-    if (stride == 2) {
-      // indices [0, 2, 4, ..., 2*(Ln-1)] selects even elements from [B0|B1].
-      SmallVector<int64_t> shuffleIdx;
-      shuffleIdx.reserve(Ln);
-      for (int64_t k = 0; k < Ln; ++k)
-        shuffleIdx.push_back(k * 2);
-      result = vector::ShuffleOp::create(builder, loc, blocks[0],
-                                         blocks[1], shuffleIdx);
-    } else if (stride == 4) {
-      // Two half-width shuffles then a merge.
-      int64_t half = Ln / 2;
-      SmallVector<int64_t> halfIdx;
-      halfIdx.reserve(half);
-      for (int64_t k = 0; k < half; ++k)
-        halfIdx.push_back(k * stride);
-      auto sh1Raw = vector::ShuffleOp::create(builder, loc, blocks[0],
-                                              blocks[1], halfIdx);
-      auto sh2Raw = vector::ShuffleOp::create(builder, loc, blocks[2],
-                                              blocks[3], halfIdx);
-      SmallVector<int64_t> combineIdx;
-      combineIdx.reserve(Ln);
-      for (int64_t k = 0; k < half; ++k) combineIdx.push_back(k);
-      for (int64_t k = 0; k < half; ++k) combineIdx.push_back(half + k);
-      result = vector::ShuffleOp::create(builder, loc, sh1Raw, sh2Raw,
-                                         combineIdx);
-    } else {
-      // stride == 8: four quarter-width shuffles, two pair-merges, one final.
-      int64_t qtr = Ln / 4;
-      SmallVector<int64_t> qtrIdx;
-      qtrIdx.reserve(qtr);
-      for (int64_t k = 0; k < qtr; ++k)
-        qtrIdx.push_back(k * stride);
-      SmallVector<Value> halves;
-      for (int64_t p = 0; p < 4; ++p) {
-        auto sh = vector::ShuffleOp::create(builder, loc,
-                                            blocks[2*p], blocks[2*p+1],
-                                            qtrIdx);
-        halves.push_back(sh);
-      }
-      SmallVector<int64_t> pairIdx;
-      pairIdx.reserve(Ln / 2);
-      for (int64_t k = 0; k < qtr; ++k) pairIdx.push_back(k);
-      for (int64_t k = 0; k < qtr; ++k) pairIdx.push_back(qtr + k);
-      auto mid01 = vector::ShuffleOp::create(builder, loc,
-                                             halves[0], halves[1], pairIdx);
-      auto mid23 = vector::ShuffleOp::create(builder, loc,
-                                             halves[2], halves[3], pairIdx);
-      SmallVector<int64_t> finalIdx;
-      finalIdx.reserve(Ln);
-      for (int64_t k = 0; k < Ln/2; ++k) finalIdx.push_back(k);
-      for (int64_t k = 0; k < Ln/2; ++k) finalIdx.push_back(Ln/2 + k);
-      result = vector::ShuffleOp::create(builder, loc, mid01, mid23, finalIdx);
-    }
-
-    mapVec(load.getResult(), {result});
+    mapVec(load.getResult(), {evens});
   }
 
   // vector.gather for constant non-unit stride (large strides or non-power-of-2)
