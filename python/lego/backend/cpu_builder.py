@@ -85,15 +85,16 @@ class CPUTarget:
         opts = []
         if c:
             opts.append(f"cpu={c}")
-        # Opt-in convert-lego-to-linalg + upstream linalg::vectorize, gated
-        # by the LEGO_USE_LINALG_VECTORIZE environment variable. Used during
-        # the lego→linalg refactor for A/B comparison; will become the
-        # default once the linalg path matches the custom path on every
-        # affine candidate.
+        # ``LEGO_USE_LINALG_VECTORIZE`` env var lets users explicitly enable
+        # or disable the convert-lego-to-linalg + upstream linalg::vectorize
+        # path. The pipeline itself defaults to ON; setting this env var to
+        # ``0``/``false``/``no`` disables it (useful for A/B comparison
+        # against the legacy custom path).
         import os
-        if os.environ.get("LEGO_USE_LINALG_VECTORIZE", "").lower() in ("1", "true", "yes"):
+        flag = os.environ.get("LEGO_USE_LINALG_VECTORIZE", "").lower()
+        if flag in ("0", "false", "no"):
             if self.name in ("x86", "cpu"):
-                opts.append("use-linalg-vectorize=true")
+                opts.append("use-linalg-vectorize=false")
         if opts:
             return f"builtin.module({self.pipeline}{{{' '.join(opts)}}})"
         return f"builtin.module({self.pipeline})"

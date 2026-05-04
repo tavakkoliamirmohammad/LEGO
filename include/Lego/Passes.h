@@ -181,8 +181,8 @@ struct LegoToX86VectorPipelineOptions
       *this, "use-linalg-vectorize",
       llvm::cl::desc("Use convert-lego-to-linalg + upstream linalg::vectorize "
                      "for affine loops; falls through to custom lego-vectorize "
-                     "for non-affine loops (Z-Morton et al)"),
-      llvm::cl::init(false)};
+                     "for non-affine loops (Z-Morton et al). Default: true."),
+      llvm::cl::init(true)};
 };
 
 /// Options for the lego-to-arm-neon pipeline.
