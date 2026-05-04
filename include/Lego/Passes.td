@@ -148,4 +148,28 @@ def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
   ];
 }
 
+def ConvertLegoToLinalgPass : Pass<"convert-lego-to-linalg", "mlir::func::FuncOp"> {
+  let summary = "Raise affine scf.for loops to linalg.generic";
+  let description = [{
+    Detects ``scf.for`` loops whose memref accesses are all affine in the IV
+    (per the ``tryBuildAffineExpr`` walker) and rewrites them to
+    ``linalg.generic`` so downstream upstream MLIR passes
+    (``linalg::vectorize``, ``transform.tile``, dependence analysis) can
+    consume them.
+
+    Loops that fail the affine check pass through unchanged — the existing
+    custom ``lego-vectorize`` pass handles them. This is the bridge that lets
+    LEGO reuse upstream vectorisation for the affine majority of layouts
+    while keeping custom code only for genuinely non-affine accesses
+    (Z-Morton, irregular brick neighbour reads, AoSoA struct fields).
+  }];
+  let constructor = "mlir::lego::createConvertLegoToLinalgPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
 #endif // LEGO_PASSES_TD

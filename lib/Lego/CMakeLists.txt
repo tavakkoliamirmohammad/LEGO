@@ -109,6 +109,7 @@ add_mlir_dialect_library(MLIRLego
   LegoArithSimplification.cpp
   LegoMaterializeAssumeBounds.cpp
   LegoAffineExtract.cpp
+  LegoToLinalg.cpp
   LegoVectorizeAnalysis.cpp
   LegoVectorize.cpp
   Passes.cpp
@@ -136,6 +137,10 @@ add_mlir_dialect_library(MLIRLego
   MLIRVectorDialect
   MLIRVectorToLLVM
   MLIRVectorToLLVMPass
+  # Linalg dialect + transforms (used by convert-lego-to-linalg + upstream
+  # linalg::vectorize as the affine-case fast path).
+  MLIRLinalgDialect
+  MLIRLinalgTransforms
   # SMT verification
   MLIRSMT
   MLIRExportSMTLIB

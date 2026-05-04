@@ -27,6 +27,7 @@ std::unique_ptr<Pass> createLegoVerifyPass();
 std::unique_ptr<Pass> createLegoStrengthReductionPass();
 std::unique_ptr<Pass> createLegoVectorizePass();
 std::unique_ptr<Pass> createLegoVectorizePass(llvm::StringRef target);
+std::unique_ptr<Pass> createConvertLegoToLinalgPass();
 
 /// Options for the lego-to-spirv pipeline.
 struct LegoToSPIRVPipelineOptions
@@ -256,6 +257,7 @@ void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format);
 #define GEN_PASS_DECL_LEGOVERIFYPASS
 #define GEN_PASS_DECL_LEGOSTRENGTHREDUCTIONPASS
 #define GEN_PASS_DECL_LEGOVECTORIZEPASS
+#define GEN_PASS_DECL_CONVERTLEGOTOLINALGPASS
 #define GEN_PASS_REGISTRATION
 #include "Lego/Passes.h.inc"
 
