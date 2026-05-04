@@ -28,6 +28,7 @@ std::unique_ptr<Pass> createLegoStrengthReductionPass();
 std::unique_ptr<Pass> createLegoVectorizePass();
 std::unique_ptr<Pass> createLegoVectorizePass(llvm::StringRef target);
 std::unique_ptr<Pass> createConvertLegoToLinalgPass();
+std::unique_ptr<Pass> createConvertLegoToLinalgPass(bool vectorize);
 
 /// Options for the lego-to-spirv pipeline.
 struct LegoToSPIRVPipelineOptions
@@ -161,6 +162,26 @@ struct LegoToX86VectorPipelineOptions
       *this, "use-vec-alignment",
       llvm::cl::desc("Emit aligned load/store hints (64-byte for AVX-512); "
                      "default false; only safe when ALL buffers are 64-byte aligned"),
+      llvm::cl::init(false)};
+
+  // use-linalg-vectorize (default: false; opt-in during the lego→linalg
+  // refactor)
+  //
+  // When true, run convert-lego-to-linalg + upstream linalg::vectorize
+  // BEFORE the custom lego-vectorize pass. The convert pass raises every
+  // affine scf.for to linalg.generic; linalg::vectorize then turns those
+  // into vector dialect ops directly. Any loop that wasn't affine
+  // (Z-Morton et al) stays as scf.for and the custom lego-vectorize
+  // handles it as before.
+  //
+  // Default false until the dashboard A/B confirms the linalg path
+  // matches or beats the custom path on every affine candidate. Will
+  // become the only path once the custom code is deleted.
+  PassOptions::Option<bool> useLinalgVectorize{
+      *this, "use-linalg-vectorize",
+      llvm::cl::desc("Use convert-lego-to-linalg + upstream linalg::vectorize "
+                     "for affine loops; falls through to custom lego-vectorize "
+                     "for non-affine loops (Z-Morton et al)"),
       llvm::cl::init(false)};
 };
 

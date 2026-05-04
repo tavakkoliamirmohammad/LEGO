@@ -32,13 +32,16 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassOptions.h"
 
 using namespace mlir;
 using namespace mlir::lego;
@@ -101,13 +104,18 @@ collectAffineAccesses(scf::ForOp forOp) {
     if (!extracted)
       return std::nullopt;
 
-    // Every symbol must be defined outside the loop (we already check this
-    // structurally inside tryBuildAffineExpr, but double-check for safety).
-    for (Value sym : extracted->symbols) {
-      if (forOp->isProperAncestor(sym.getDefiningOp() ? sym.getDefiningOp()
-                                                     : nullptr))
-        return std::nullopt;
-    }
+    // Conservative scope (this commit): only the pure-identity case where
+    // the address is exactly ``d0`` — i.e. unit-stride access starting at
+    // the IV with no offset. This covers saxpy-class kernels. Stencils
+    // (``A[i + 1]``), strided access, and brick layouts fall through to
+    // the existing custom lego-vectorize which handles them correctly.
+    //
+    // Wider coverage (offsets, masked vectorization for non-divisible
+    // sizes, multi-dim nests) is staged in subsequent commits — each
+    // gated by dashboard A/B to ensure no regressions.
+    auto dim = dyn_cast<AffineDimExpr>(extracted->expr);
+    if (!dim || dim.getPosition() != 0)
+      return std::nullopt;
 
     AccessInfo info;
     info.op = &op;
@@ -124,16 +132,29 @@ collectAffineAccesses(scf::ForOp forOp) {
   return accesses;
 }
 
-/// Rewrite ``forOp`` to ``linalg.generic`` when all accesses are affine.
+/// SIMD lane multiplier targeted by the linalg path. Loops whose iteration
+/// count isn't a multiple of this number aren't converted (they fall through
+/// to the existing custom lego-vectorize, which handles tail/mask emission).
+static constexpr int64_t kLinalgPathSimdWidth = 16;
+
+/// Rewrite ``forOp`` to ``linalg.generic`` when all accesses are affine and
+/// the iteration count is a multiple of ``kLinalgPathSimdWidth``.
 /// Returns success() iff the rewrite happened.
 static LogicalResult tryConvertForToLinalgGeneric(scf::ForOp forOp,
                                                   RewriterBase &rewriter) {
-  // Only convert step-1 loops with a constant zero lower bound (the simple
-  // case). A more general implementation would normalise the loop first.
+  // Only convert step-1 loops with a constant zero lower bound and a
+  // constant upper bound divisible by the SIMD width. These constraints
+  // ensure the subsequent linalg::tile + linalg::vectorize chain produces
+  // statically-shaped vector ops without tail handling. Loops outside this
+  // shape fall through to the custom lego-vectorize.
   auto lbConst = forOp.getLowerBound().getDefiningOp<arith::ConstantIndexOp>();
   auto stepConst = forOp.getStep().getDefiningOp<arith::ConstantIndexOp>();
+  auto ubConst = forOp.getUpperBound().getDefiningOp<arith::ConstantIndexOp>();
   if (!lbConst || lbConst.value() != 0) return failure();
   if (!stepConst || stepConst.value() != 1) return failure();
+  if (!ubConst) return failure();
+  if (ubConst.value() % kLinalgPathSimdWidth != 0) return failure();
+  if (ubConst.value() < kLinalgPathSimdWidth) return failure();
 
   auto accessesOpt = collectAffineAccesses(forOp);
   if (!accessesOpt) return failure();
@@ -149,6 +170,7 @@ static LogicalResult tryConvertForToLinalgGeneric(scf::ForOp forOp,
     else             reads.push_back(&acc);
   }
   if (writes.empty()) return failure();  // pure-load loops aren't useful
+  if (writes.size() > 1) return failure();  // multi-write needs more body work
 
   MLIRContext *ctx = forOp.getContext();
 
@@ -208,35 +230,53 @@ static LogicalResult tryConvertForToLinalgGeneric(scf::ForOp forOp,
       /*indexingMaps=*/indexingMaps,
       /*iteratorTypes=*/iterTypes,
       [&](OpBuilder &b, Location loc, ValueRange blockArgs) {
-        // Map original memref.load results to block args (in read order),
-        // and remember the corresponding output block-arg index for each
-        // store target.
+        // Map original memref.load results to block args (in read order).
         IRMapping bvm;
         unsigned readIdx = 0;
         for (auto *r : reads) {
-          // Each load returned one Value — replace with the corresponding
-          // block arg.
           bvm.map(cast<memref::LoadOp>(r->op).getResult(),
                   blockArgs[readIdx++]);
         }
 
-        // Clone every body op except the loads, stores, and the terminator.
-        // Loads are already replaced via the map; stores are converted into
-        // linalg.yield of the value being stored.
+        // The body of a linalg.generic is computational only — address
+        // arithmetic that drove the original memref.load/store ops is
+        // encoded in the indexing maps and must NOT be cloned (those ops
+        // reference the now-out-of-scope outer IV). Compute the use-def
+        // cone of the value that gets stored, restricted to ops INSIDE
+        // forOp's body, and clone only that cone.
         Value yieldVal;
+        memref::StoreOp theStore;
         for (Operation &op : forOp.getBody()->without_terminator()) {
-          if (isa<memref::LoadOp>(op))
-            continue;
           if (auto store = dyn_cast<memref::StoreOp>(op)) {
-            yieldVal = bvm.lookupOrDefault(store.getValueToStore());
-            continue;
+            theStore = store;
+            yieldVal = store.getValueToStore();
+            break;
           }
-          b.clone(op, bvm);
         }
+        assert(theStore && "writes.empty() check should have caught this");
 
-        // Yield the stored value(s). For a single-write loop, that's just
-        // the most-recent yieldVal.
-        linalg::YieldOp::create(b, loc, ValueRange{yieldVal});
+        // Backward closure: walk from yieldVal back through arith ops,
+        // collecting any op defined inside forOp's body that isn't already
+        // mapped (loads are mapped; constants and outer-scope values are
+        // referenced as-is).
+        SmallVector<Operation *> toClone;
+        DenseSet<Operation *> visited;
+        std::function<void(Value)> walk = [&](Value v) {
+          if (bvm.contains(v)) return;
+          Operation *def = v.getDefiningOp();
+          if (!def) return;  // block arg, leave as-is
+          if (def->getBlock() != forOp.getBody()) return;  // outside the loop
+          if (!visited.insert(def).second) return;
+          for (Value operand : def->getOperands()) walk(operand);
+          toClone.push_back(def);
+        };
+        walk(yieldVal);
+
+        // Clone in topological order (toClone is post-order).
+        for (Operation *def : toClone) b.clone(*def, bvm);
+
+        Value mappedYield = bvm.lookupOrDefault(yieldVal);
+        linalg::YieldOp::create(b, loc, ValueRange{mappedYield});
       });
 
   rewriter.eraseOp(forOp);
@@ -249,6 +289,10 @@ struct ConvertLegoToLinalgPass
                          OperationPass<func::FuncOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvertLegoToLinalgPass)
 
+  ConvertLegoToLinalgPass() = default;
+  ConvertLegoToLinalgPass(const ConvertLegoToLinalgPass &other)
+      : PassWrapper(other) {}
+
   StringRef getArgument() const override {
     return "convert-lego-to-linalg";
   }
@@ -257,8 +301,17 @@ struct ConvertLegoToLinalgPass
   }
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<linalg::LinalgDialect, memref::MemRefDialect,
-                    scf::SCFDialect, arith::ArithDialect>();
+                    scf::SCFDialect, arith::ArithDialect,
+                    vector::VectorDialect>();
   }
+
+  /// Pass option: after raising to linalg.generic, immediately call
+  /// upstream linalg::vectorize to produce vector-dialect code. This is
+  /// the "do everything" path: scf.for -> linalg.generic -> vector ops.
+  Option<bool> vectorize{*this, "vectorize",
+                          llvm::cl::desc("Run upstream linalg::vectorize on the "
+                                         "raised linalg.generic ops"),
+                          llvm::cl::init(false)};
 
   void runOnOperation() override {
     func::FuncOp func = getOperation();
@@ -280,9 +333,89 @@ struct ConvertLegoToLinalgPass
       if (!hasInnerFor) candidates.push_back(op);
     });
 
+    llvm::SmallVector<linalg::GenericOp, 4> created;
     for (scf::ForOp op : candidates) {
       // Try the conversion; ignore failure (loop just stays as scf.for).
-      (void)tryConvertForToLinalgGeneric(op, rewriter);
+      auto insertPoint = op->getNextNode();
+      if (succeeded(tryConvertForToLinalgGeneric(op, rewriter))) {
+        // The newly-inserted linalg.generic is the previous-sibling of the
+        // (now-deleted) scf.for. We can find it by walking back.
+        // Easier: collect all linalg.generic ops at the end of this pass.
+        (void)insertPoint;
+      }
+    }
+
+    // Re-collect linalg.generic ops created by the conversion. We do this
+    // AFTER all conversions to avoid iterator invalidation while rewriting.
+    //
+    // For each linalg.generic, we (a) tile by the SIMD width per dim,
+    // producing scf.for with inner linalg.generic of static SIMD-width
+    // shape, then (b) call linalg::vectorize on the inner op. This avoids
+    // the trap of vectorising at full iteration size (vector<1Mxf32> for
+    // saxpy) which makes LLVM lowering hang.
+    if (vectorize) {
+      func.walk([&](linalg::GenericOp gen) { created.push_back(gen); });
+      for (linalg::GenericOp gen : created) {
+        SmallVector<int64_t> staticRanges = gen.getStaticLoopRanges();
+        bool dynamic = false;
+        for (int64_t r : staticRanges) {
+          if (ShapedType::isDynamic(r)) { dynamic = true; break; }
+        }
+        if (dynamic) continue;
+
+        // Pick a tile size per dim. Default: kLinalgPathSimdWidth (16 f32
+        // / 8 f64 on AVX-512). The conversion above guarantees that every
+        // iteration dim is a multiple of this width.
+        int64_t simdWidth = kLinalgPathSimdWidth;
+        SmallVector<OpFoldResult> tileSizes;
+        bool anyToTile = false;
+        for (int64_t r : staticRanges) {
+          int64_t t = (r >= simdWidth && r % simdWidth == 0) ? simdWidth : r;
+          if (t < r) anyToTile = true;
+          tileSizes.push_back(rewriter.getIndexAttr(t));
+        }
+
+        // Tile the op (only if at least one dim is being tiled — otherwise
+        // tileLinalgOp degenerates to a no-op wrapper).
+        linalg::LinalgOp innerOp = gen;
+        if (anyToTile) {
+          linalg::LinalgTilingOptions tilingOpts;
+          tilingOpts.setTileSizes(
+              llvm::map_to_vector(tileSizes, [&](OpFoldResult v) -> Value {
+                return arith::ConstantIndexOp::create(
+                           rewriter, gen.getLoc(),
+                           cast<IntegerAttr>(cast<Attribute>(v)).getInt())
+                    .getResult();
+              }));
+          tilingOpts.setLoopType(linalg::LinalgTilingLoopType::Loops);
+          rewriter.setInsertionPoint(gen);
+          FailureOr<linalg::TiledLinalgOp> tiled =
+              linalg::tileLinalgOp(rewriter, gen, tilingOpts);
+          if (succeeded(tiled)) {
+            innerOp = tiled->op;
+            rewriter.eraseOp(gen);
+          } else {
+            // Tiling failed; skip vectorization for this op.
+            continue;
+          }
+        }
+
+        // Vectorize the (possibly tiled) inner linalg op at the static
+        // tile-size shape.
+        SmallVector<int64_t> vecSizes;
+        for (auto fold : tileSizes) {
+          vecSizes.push_back(cast<IntegerAttr>(cast<Attribute>(fold)).getInt());
+        }
+        rewriter.setInsertionPoint(innerOp);
+        FailureOr<linalg::VectorizationResult> result =
+            linalg::vectorize(rewriter, innerOp, vecSizes);
+        if (succeeded(result)) {
+          if (result->replacements.empty())
+            rewriter.eraseOp(innerOp);
+          else
+            rewriter.replaceOp(innerOp, result->replacements);
+        }
+      }
     }
   }
 };
@@ -292,5 +425,11 @@ struct ConvertLegoToLinalgPass
 namespace mlir::lego {
 std::unique_ptr<Pass> createConvertLegoToLinalgPass() {
   return std::make_unique<ConvertLegoToLinalgPass>();
+}
+
+std::unique_ptr<Pass> createConvertLegoToLinalgPass(bool vectorize) {
+  auto pass = std::make_unique<ConvertLegoToLinalgPass>();
+  pass->vectorize = vectorize;
+  return pass;
 }
 }  // namespace mlir::lego

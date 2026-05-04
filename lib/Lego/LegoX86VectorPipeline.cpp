@@ -15,6 +15,7 @@
 #include "Lego/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
@@ -38,6 +39,23 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   // Note: lego-vectorize is a func.func-level pass; nest inside func.func.
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
+
+  // Linalg path (opt-in): raise affine scf.for loops to linalg.generic and
+  // call upstream linalg::vectorize on them. Loops that fail the affine
+  // check (Z-Morton et al) survive as scf.for and the custom
+  // lego-vectorize below handles them — strict per-loop discriminator,
+  // not a fallback layer.
+  if (opts.useLinalgVectorize) {
+    // Raise affine scf.for loops to linalg.generic, then tile by SIMD width
+    // and call upstream linalg::vectorize on the inner tile. Loops that
+    // failed the affine check survive as scf.for and the lego-vectorize
+    // pass below handles them.
+    pm.addNestedPass<mlir::func::FuncOp>(
+        createConvertLegoToLinalgPass(/*vectorize=*/true));
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
+  }
+
   // R15: pass the target to lego-vectorize so lane widths are ISA-specific.
   // The x86 pipeline uses "avx512" by default (64-byte ZMM registers).
   // LLVM splits <16xf32>/<8xf64> ops to 256-bit pairs automatically on
@@ -66,6 +84,12 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   vecToLLVMOpts.reassociateFPReductions = opts.reassocFP;
   vecToLLVMOpts.useVectorAlignment = opts.useVecAlignment;
   pm.addPass(createConvertVectorToLLVMPass(vecToLLVMOpts));
+  // Expand strided memref metadata (memref.subview, memref.reinterpret_cast)
+  // BEFORE the final memref→LLVM conversion. Linalg tiling produces these
+  // ops on strided memref types; the canonical memref-to-llvm pass cannot
+  // lower them directly, so we expand them into base/offset/stride
+  // components first.
+  pm.addPass(memref::createExpandStridedMetadataPass());
   pm.addPass(createSCFToControlFlowPass());
   pm.addPass(createArithToLLVMConversionPass());
   pm.addPass(createFinalizeMemRefToLLVMConversionPass());

@@ -82,8 +82,20 @@ class CPUTarget:
 
     def pipeline_string(self, cpu: Optional[str] = None) -> str:
         c = cpu or self.default_cpu or ""
+        opts = []
         if c:
-            return f"builtin.module({self.pipeline}{{cpu={c}}})"
+            opts.append(f"cpu={c}")
+        # Opt-in convert-lego-to-linalg + upstream linalg::vectorize, gated
+        # by the LEGO_USE_LINALG_VECTORIZE environment variable. Used during
+        # the lego→linalg refactor for A/B comparison; will become the
+        # default once the linalg path matches the custom path on every
+        # affine candidate.
+        import os
+        if os.environ.get("LEGO_USE_LINALG_VECTORIZE", "").lower() in ("1", "true", "yes"):
+            if self.name in ("x86", "cpu"):
+                opts.append("use-linalg-vectorize=true")
+        if opts:
+            return f"builtin.module({self.pipeline}{{{' '.join(opts)}}})"
         return f"builtin.module({self.pipeline})"
 
     def register(self):
