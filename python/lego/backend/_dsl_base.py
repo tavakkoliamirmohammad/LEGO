@@ -6,7 +6,8 @@ the common subset of operations.  This module factors out all shared methods
 into :class:`_BaseCompiler` so neither subclass duplicates them.
 
 Override points (subclasses must implement):
-    ``_for()``          — CPU adds tile_range detection; GPU uses range() only.
+    ``_for()``          — both targets handle ``for i in range(...):``;
+                          GPU adds block_id/thread_id remapping.
     ``_name()``         — GPU handles block_id/thread_id; CPU handles scalars.
     ``_attribute()``    — GPU resolves e.g. block_id.x; CPU rejects.
     ``_load()``         — different error-checking strictness.

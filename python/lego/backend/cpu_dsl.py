@@ -181,8 +181,9 @@ class _Compiler(_BaseCompiler):
 
     Inherits shared AST-dispatch, binop, if/while, compare, and utility
     methods from _BaseCompiler.  Only CPU-specific overrides are here:
-    - __init__: scalar_params, grid, tile support.
-    - _for: tile_range detection.
+    - __init__: scalar_params (no grid/tile — kernels use plain range()).
+    - _for: emits scf.for from ``for i in range(...):`` directly; the
+      vectoriser picks SIMD width from the target.
     - _name: scalar function arguments; no GPU dimension names.
     - _attribute: rejects GPU-only dimension accessors.
     - _load/_store: strict error checking on buffer name.
