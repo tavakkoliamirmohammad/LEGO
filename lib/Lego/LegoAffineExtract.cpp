@@ -22,13 +22,22 @@ namespace {
 /// already-visited Values so we don't re-walk shared sub-DAGs.
 struct ExtractState {
   MLIRContext *ctx;
-  Value iv;
+  /// IVs in order; ``ivs[i]`` becomes ``d_i``. Single-IV use: ``ivs.size() == 1``.
+  llvm::SmallVector<Value, 4> ivs;
   llvm::SmallVector<Value, 4> symbols;
   /// Cache: Value -> AffineExpr (if affine) or nullopt (if non-affine).
   /// We use a separate set for nullopt entries since DenseMap can't store
   /// std::optional<AffineExpr> cleanly.
   llvm::DenseMap<Value, AffineExpr> cache;
   llvm::DenseSet<Value> rejected;
+
+  /// Look up ``v`` in the IV table; returns ``std::nullopt`` if not an IV.
+  std::optional<unsigned> getIvDimPos(Value v) const {
+    for (size_t i = 0; i < ivs.size(); ++i) {
+      if (ivs[i] == v) return static_cast<unsigned>(i);
+    }
+    return std::nullopt;
+  }
 
   /// Bind a loop-invariant Value to a symbol index, reusing an existing
   /// symbol if we've seen this Value before.
@@ -66,26 +75,28 @@ static std::optional<int64_t> matchPowerOfTwoMinusOne(int64_t mask) {
   return k;
 }
 
-/// Is ``v`` loop-invariant w.r.t. the IV? Decided structurally: walk the SSA
-/// cone of ``v``; if it never reaches ``iv``, it's invariant.
-static bool isLoopInvariant(Value v, Value iv,
+/// Is ``v`` loop-invariant w.r.t. the given IVs? Decided structurally: walk
+/// the SSA cone of ``v``; if it never reaches any IV in ``ivs``, it's invariant.
+static bool isLoopInvariant(Value v, ArrayRef<Value> ivs,
                             llvm::DenseMap<Value, bool> &cache) {
   if (auto it = cache.find(v); it != cache.end())
     return it->second;
-  if (v == iv) {
-    cache[v] = false;
-    return false;
+  for (Value iv : ivs) {
+    if (v == iv) {
+      cache[v] = false;
+      return false;
+    }
   }
   Operation *def = v.getDefiningOp();
   if (!def) {
-    // Block or function argument: invariant unless it IS the iv (handled above).
+    // Block or function argument: invariant unless it IS one of the ivs.
     cache[v] = true;
     return true;
   }
   // Recursively check operands.
   bool inv = true;
   for (Value op : def->getOperands()) {
-    if (!isLoopInvariant(op, iv, cache)) {
+    if (!isLoopInvariant(op, ivs, cache)) {
       inv = false;
       break;
     }
@@ -111,9 +122,9 @@ static AffineExpr build(Value v, ExtractState &S) {
     return e;
   };
 
-  // The IV itself becomes dim 0.
-  if (v == S.iv)
-    return accept(getAffineDimExpr(0, S.ctx));
+  // The IV itself becomes its dim. (Single-IV → d0; multi-IV → d_i.)
+  if (auto pos = S.getIvDimPos(v))
+    return accept(getAffineDimExpr(*pos, S.ctx));
 
   // Compile-time constants.
   if (auto c = matchConstantInt(v))
@@ -240,7 +251,7 @@ static AffineExpr build(Value v, ExtractState &S) {
   // Anything else: not affine — but if every operand is loop-invariant, the
   // whole result is invariant and we can bind it as a symbol.
   llvm::DenseMap<Value, bool> invCache;
-  if (isLoopInvariant(v, S.iv, invCache))
+  if (isLoopInvariant(v, S.ivs, invCache))
     return accept(S.getOrCreateSymbol(v));
 
   return reject();
@@ -252,7 +263,17 @@ std::optional<AffineExtractResult>
 tryBuildAffineExpr(Value v, Value iv, MLIRContext *ctx) {
   ExtractState S;
   S.ctx = ctx;
-  S.iv = iv;
+  S.ivs.push_back(iv);
+  AffineExpr e = build(v, S);
+  if (!e) return std::nullopt;
+  return AffineExtractResult{e, std::move(S.symbols)};
+}
+
+std::optional<AffineExtractResult>
+tryBuildAffineExpr(Value v, ValueRange ivs, MLIRContext *ctx) {
+  ExtractState S;
+  S.ctx = ctx;
+  S.ivs.assign(ivs.begin(), ivs.end());
   AffineExpr e = build(v, S);
   if (!e) return std::nullopt;
   return AffineExtractResult{e, std::move(S.symbols)};

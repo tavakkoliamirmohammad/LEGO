@@ -31,6 +31,7 @@
 
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/ValueRange.h"
 #include "llvm/ADT/SmallVector.h"
 #include <optional>
 
@@ -86,6 +87,13 @@ std::optional<int64_t> getDim0Coefficient(AffineExpr e);
 ///   - Any op whose operand cone reaches a non-affine op
 std::optional<AffineExtractResult>
 tryBuildAffineExpr(Value v, Value iv, MLIRContext *ctx);
+
+/// Multi-IV variant. Each IV in ``ivs`` becomes a distinct dim
+/// (``ivs[0]`` → ``d0``, ``ivs[1]`` → ``d1``, ...). All other rules apply.
+/// Loop-invariance is generalised: a Value is a symbol iff its SSA cone reaches
+/// none of the IVs. Used by the multi-D linalg.generic conversion path.
+std::optional<AffineExtractResult>
+tryBuildAffineExpr(Value v, ValueRange ivs, MLIRContext *ctx);
 
 }  // namespace mlir::lego
 
