@@ -132,10 +132,17 @@ collectAffineAccesses(scf::ForOp forOp) {
   return accesses;
 }
 
-/// SIMD lane multiplier targeted by the linalg path. Loops whose iteration
-/// count isn't a multiple of this number aren't converted (they fall through
-/// to the existing custom lego-vectorize, which handles tail/mask emission).
-static constexpr int64_t kLinalgPathSimdWidth = 16;
+/// SIMD lane multiplier × ILP unroll factor targeted by the linalg path.
+/// Matches lego-vectorize's choice (kILPFactor=4 × 16-lane AVX-512). Loops
+/// whose iteration count isn't a multiple of this number aren't converted —
+/// they fall through to the existing custom lego-vectorize, which handles
+/// tail/mask emission.
+///
+/// Using SIMD*ILP (=64 for AVX-512 f32) instead of just SIMD (=16) gives
+/// the LLVM backend room to produce 4 independent vmovups+vfmadd chains per
+/// iteration, restoring the ILP that lego-vectorize gets via its unroll-by-4
+/// heuristic.
+static constexpr int64_t kLinalgPathSimdWidth = 64;
 
 /// Rewrite ``forOp`` to ``linalg.generic`` when all accesses are affine and
 /// the iteration count is a multiple of ``kLinalgPathSimdWidth``.
