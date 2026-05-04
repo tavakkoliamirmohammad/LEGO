@@ -676,11 +676,17 @@ static Value emitSpreadStage(OpBuilder &b, Location loc, Value y, Type ty,
   return arith::AndIOp::create(b, loc, ored, mskC);
 }
 
-/// Emit the standard 4-stage 2-D Morton bit-spread, truncated to ``nbits``
-/// input bits. Returns a Value of type ``ty`` whose low 2*nbits bits hold
-/// the spread result.
+/// Emit the Hacker's Delight bit-spread for ``stride``-d Morton, truncated
+/// to ``nbits`` input bits.  Returns a Value of type ``ty`` whose low
+/// stride*nbits bits hold the spread result with input bit ``i`` placed
+/// at output position ``stride * i``.
+///
+/// Stride 2 (2-D Morton) and stride 3 (3-D Morton) are supported.  The
+/// stage masks for each stride are derived from Hacker's Delight 4.1 §7-2
+/// (delta-swap form for stride-2) and §7.1.3 (general perfect shuffle for
+/// stride > 2) — see comments below.
 static Value emitMortonSpread(OpBuilder &b, Location loc, Value src, Type ty,
-                              unsigned nbits) {
+                              unsigned nbits, unsigned stride = 2) {
   // Truncate input to nbits.
   uint64_t headMask = (nbits >= 64) ? ~0ULL : ((1ULL << nbits) - 1ULL);
   Value y = src;
@@ -694,10 +700,22 @@ static Value emitMortonSpread(OpBuilder &b, Location loc, Value src, Type ty,
       b, loc, ty, b.getIntegerAttr(ty, headMask));
   y = arith::AndIOp::create(b, loc, y, mskHead);
 
-  if (nbits > 8) y = emitSpreadStage(b, loc, y, ty, 8, 0x00FF00FFULL);
-  if (nbits > 4) y = emitSpreadStage(b, loc, y, ty, 4, 0x0F0F0F0FULL);
-  if (nbits > 2) y = emitSpreadStage(b, loc, y, ty, 2, 0x33333333ULL);
-  y = emitSpreadStage(b, loc, y, ty, 1, 0x55555555ULL);
+  if (stride == 2) {
+    // 2-D Morton.  Spread input bit i → output position 2i.
+    if (nbits > 8) y = emitSpreadStage(b, loc, y, ty, 8, 0x00FF00FFULL);
+    if (nbits > 4) y = emitSpreadStage(b, loc, y, ty, 4, 0x0F0F0F0FULL);
+    if (nbits > 2) y = emitSpreadStage(b, loc, y, ty, 2, 0x33333333ULL);
+    y = emitSpreadStage(b, loc, y, ty, 1, 0x55555555ULL);
+  } else {
+    assert(stride == 3 && "emitMortonSpread: only stride 2 / 3 supported");
+    // 3-D Morton.  Spread input bit i → output position 3i.
+    // Constants are the standard libmorton-style 32-bit stage masks for
+    // up to 10-bit input → 30-bit output (covers integer indices < 2^10).
+    if (nbits > 8) y = emitSpreadStage(b, loc, y, ty, 16, 0xFF0000FFULL);
+    if (nbits > 4) y = emitSpreadStage(b, loc, y, ty,  8, 0x0F00F00FULL);
+    if (nbits > 2) y = emitSpreadStage(b, loc, y, ty,  4, 0xC30C30C3ULL);
+    y = emitSpreadStage(b, loc, y, ty,  2, 0x49249249ULL);
+  }
   return y;
 }
 
@@ -731,7 +749,8 @@ struct RecognizeBitSpread : public OpRewritePattern<arith::AddIOp> {
     struct GroupInfo {
       Value src;
       unsigned nbits;        // number of contiguous bits being spread
-      unsigned offset;       // S_min: 0 or 1 (which Morton lane)
+      unsigned offset;       // S_min: which Morton lane (0..stride-1)
+      unsigned stride;       // 2 for 2-D Morton, 3 for 3-D Morton
       unsigned k_min;        // pre-shift amount applied to src before spread
     };
     SmallVector<GroupInfo, 4> infos;
@@ -746,15 +765,25 @@ struct RecognizeBitSpread : public OpRewritePattern<arith::AddIOp> {
       for (size_t i = 0; i < grp.size(); ++i)
         if (grp[i].K != k_min + static_cast<unsigned>(i))
           return failure();
-      // S = offset + 2*i (stride-2 spread for 2-D Morton).
+      // Detect stride from the S sequence.  S = offset + stride*i with
+      // stride ∈ {2, 3} (2-D / 3-D Morton).  Larger strides are rejected
+      // so the matcher is not over-eager on unrelated bit-spread patterns.
       unsigned offset = grp[0].S;
-      if (offset > 1) return failure();
+      unsigned stride = 2;     // default if grp.size() == 1
+      if (grp.size() >= 2) {
+        if (grp[1].S <= grp[0].S) return failure();
+        stride = grp[1].S - grp[0].S;
+      }
+      if (stride < 2 || stride > 3) return failure();
+      if (offset >= stride) return failure();
       for (size_t i = 0; i < grp.size(); ++i)
-        if (grp[i].S != offset + 2u * static_cast<unsigned>(i))
+        if (grp[i].S != offset + stride * static_cast<unsigned>(i))
           return failure();
       unsigned nbits = static_cast<unsigned>(grp.size());
       if (nbits == 0 || nbits > 16) return failure();
-      infos.push_back({kv.first, nbits, offset, k_min});
+      // Stride-3 emit currently covers up to 10-bit input (32-bit output).
+      if (stride == 3 && nbits > 10) return failure();
+      infos.push_back({kv.first, nbits, offset, stride, k_min});
     }
 
     // All checks passed — emit the bit-magic for each group, OR together.
@@ -776,11 +805,13 @@ struct RecognizeBitSpread : public OpRewritePattern<arith::AddIOp> {
         }
         src = arith::ShRUIOp::create(rewriter, loc, src, kc);
       }
-      Value spread = emitMortonSpread(rewriter, loc, src, resTy, g.nbits);
-      if (g.offset == 1) {
-        Value one = arith::ConstantOp::create(
-            rewriter, loc, resTy, rewriter.getIntegerAttr(resTy, 1));
-        spread = arith::ShLIOp::create(rewriter, loc, spread, one);
+      Value spread =
+          emitMortonSpread(rewriter, loc, src, resTy, g.nbits, g.stride);
+      // Shift the lane (lane 0 → no shift, lane k → << k).
+      if (g.offset > 0) {
+        Value sh = arith::ConstantOp::create(
+            rewriter, loc, resTy, rewriter.getIntegerAttr(resTy, g.offset));
+        spread = arith::ShLIOp::create(rewriter, loc, spread, sh);
       }
       acc = acc ? arith::OrIOp::create(rewriter, loc, acc, spread).getResult()
                 : spread;
