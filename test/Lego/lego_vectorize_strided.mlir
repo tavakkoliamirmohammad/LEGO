@@ -77,14 +77,19 @@ func.func @stride_equals_regwidth(%A: memref<?xf64>, %B: memref<?xf64>) {
 
 // ---------------------------------------------------------------------------
 // Test 4: Two strided accesses with different strides.
-// A[i*4]: f64, element-stride=4 (in {2,4,8}) → R20 deinterleave path.
-// B[i*16]: f64, element-stride=16 (> 8) → falls back to vector.gather.
+// A[i*4]: f64, element-stride=4 (power-of-2, ≤ 8) → R20 deinterleave path.
+// B[i*16]: f64, element-stride=16 (non-pow-2-but-≤16, stride·Ln=128 ≤ 256)
+//          → wide-load + vector.shuffle path (since 16 isn't in the
+//          deinterleave fast set {2,4,8}).  Was vector.gather before the
+//          shuffle generalisation; the change wins on stride-7-class
+//          kernels where gather was microcoded on Zen 4.
 // C[i]: unit-stride store → transfer_write.
 // ---------------------------------------------------------------------------
 // CHECK-LABEL: func.func @two_strided_accesses
 // CHECK: vector.transfer_read
 // CHECK: vector.deinterleave
-// CHECK: vector.gather
+// CHECK: vector.shuffle
+// CHECK-NOT: vector.gather
 // CHECK: vector.transfer_write
 func.func @two_strided_accesses(%A: memref<?xf64>, %B: memref<?xf64>, %C: memref<?xf64>) {
   %c0 = arith.constant 0 : index

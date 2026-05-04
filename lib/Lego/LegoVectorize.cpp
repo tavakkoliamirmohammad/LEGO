@@ -1179,20 +1179,31 @@ struct EmitContext {
 
   void emitStridedLoad(memref::LoadOp load,
                        const lego::AccessClassification &cls) {
-    // R20: Deinterleave path for small constant strides (2, 4, 8).
+    // R20 + non-pow-2 extension: wide-load + extract-every-S-th path for
+    // small constant strides.
     //
-    // For stride=S: load S consecutive blocks of Ln elements, then shuffle
-    // to extract every S-th element. Maps to vpermt2ps (1-3 cycles) rather
-    // than vpgatherdps (10+ cycles for L1-hot data on x86 AVX-512).
+    //   For stride=S, lane width Ln:
+    //     - Power-of-2 S in {2,4,8}: load S*Ln contiguous elements then
+    //       peel off the even half via log2(S) ``vector.deinterleave`` ops.
+    //       Lowers to ``vpunpck{l,h}{ps,pd}`` (1-cycle each) on AVX-512.
+    //     - Non-power-of-2 S in [3, 16] with S*Ln <= 256: load S*Ln
+    //       contiguous elements then extract lanes 0, S, 2S, ..., (Ln-1)S
+    //       via a single ``vector.shuffle``.  Lowers to ``vpermt2ps`` /
+    //       ``vpermt2pd`` chains (~3-7 cycles per zmm); still far better
+    //       than ``vpgatherdps`` which is microcoded on Zen 4.
     //
-    // Conditions: S in {2,4,8} and S*Ln <= 256. Otherwise falls through to
-    // the gather path (emitGatherLoad).
+    //   Beyond S*Ln > 256 the wide load becomes too big to schedule
+    //   efficiently — fall back to ``vector.gather``.  Stride 0 is
+    //   ``Broadcast`` and never reaches here.
     int64_t stride = cls.stride / cls.elementBytes;  // stride in elements
     int64_t Ln = getLnForAccess(cls);
-    bool useDeinterleave = (stride == 2 || stride == 4 || stride == 8) &&
+    bool isPow2 = (stride > 0) && ((stride & (stride - 1)) == 0);
+    bool useDeinterleave = isPow2 && (stride == 2 || stride == 4 || stride == 8) &&
                            (stride * Ln <= 256);
+    bool useShuffle = !useDeinterleave && stride >= 2 && stride <= 16 &&
+                      (stride * Ln <= 256);
 
-    if (!useDeinterleave) {
+    if (!useDeinterleave && !useShuffle) {
       emitGatherLoad(load, cls);
       return;
     }
@@ -1208,33 +1219,43 @@ struct EmitContext {
     Value physBase = cloneAddrChain(load.getIndices().front(),
                                   lane0Map, builder, origLoop);
 
-    // Read S*Ln contiguous elements as a single wide vector, then peel off
-    // every S-th element via log2(S) successive ``vector.deinterleave``
-    // ops. ``vector.deinterleave`` takes ``vector<2NxT>`` and returns a
-    // pair of ``vector<NxT>`` (evens, odds); we always keep the evens
-    // because element 0 of the input is at stride-aligned position 0 of
-    // every successive deinterleave's evens output.
-    //
-    // Trade-off vs. the prior hand-rolled shuffle chain:
-    //   - 1 wide TransferRead + log2(S) DeinterleaveOps,
-    //   - vs. S TransferReads + (S-1)+ shuffles previously.
-    // Net: fewer ops AND each op is the canonical upstream form, so the
-    // vector→LLVM lowering can pattern-match to ``vpunpck{l,h}{ps,pd}``
-    // type instructions reliably.
     auto wideTy = VectorType::get({stride * Ln}, elemTy);
     Value wide = vector::TransferReadOp::create(
         builder, loc, wideTy, load.getMemRef(), ValueRange{physBase},
         /*padding=*/std::nullopt, /*inBounds=*/ArrayRef<bool>{true})
         .getVector();
-    Value evens = wide;
-    int64_t s = stride;
-    while (s > 1) {
-      auto deinter = vector::DeinterleaveOp::create(builder, loc, evens);
-      evens = deinter.getRes1();  // even-indexed half
-      s /= 2;
+
+    Value strided;
+    if (useDeinterleave) {
+      // Power-of-2 stride: log2(S) successive deinterleaves keep evens.
+      // Trade-off vs. the prior hand-rolled shuffle chain:
+      //   - 1 wide TransferRead + log2(S) DeinterleaveOps,
+      //   - vs. S TransferReads + (S-1)+ shuffles previously.
+      // Each op is the canonical upstream form, so the vector→LLVM
+      // lowering pattern-matches to ``vpunpck{l,h}`` reliably.
+      strided = wide;
+      int64_t s = stride;
+      while (s > 1) {
+        auto deinter = vector::DeinterleaveOp::create(builder, loc, strided);
+        strided = deinter.getRes1();  // even-indexed half
+        s /= 2;
+      }
+    } else {
+      // Non-power-of-2 stride: extract via single ``vector.shuffle`` with
+      // mask [0, S, 2S, ..., (Ln-1)*S].  This is what clang emits for
+      // stride-7-style accesses (loops it auto-vectorises by emitting a
+      // sequence of zmm masked loads + ``vmovaps {kmask}`` merges); LEGO
+      // generates the canonical MLIR form and lets vector→LLVM perform
+      // the same lowering — avoiding the microcoded ``vpgatherdps``
+      // entirely.
+      SmallVector<int64_t> mask(Ln);
+      for (int64_t j = 0; j < Ln; ++j)
+        mask[j] = j * stride;
+      strided = vector::ShuffleOp::create(builder, loc, wide, wide, mask);
     }
 
-    mapVec(load.getResult(), {evens});
+    mapVec(load.getResult(), {strided});
+    (void)vecTy;
   }
 
   // vector.gather for constant non-unit stride (large strides or non-power-of-2)
