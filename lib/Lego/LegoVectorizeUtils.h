@@ -25,40 +25,11 @@ enum class AccessKind {
   NonAffine,   // simplification stalls; iv survives in S(k)
 };
 
-// ---------------------------------------------------------------------------
-// Lightweight symbolic integer evaluator (Tier A).
-//
-// Represents an index expression as (coeff * iv + constant + invariant_terms).
-// Declared here so that pass code (computeMinDepDistance) can call evalAffine
-// directly without going through solveAccessTierA.
-// ---------------------------------------------------------------------------
-struct AffineVal {
-  bool valid = true;
-  int64_t coeff = 0;
-  int64_t constant = 0;
-  llvm::SmallVector<Value, 2> invariant;
-
-  static AffineVal nonAffine()            { AffineVal v; v.valid = false; return v; }
-  static AffineVal constant_val(int64_t c){ AffineVal v; v.coeff = 0; v.constant = c; return v; }
-  static AffineVal iv_val()               { AffineVal v; v.coeff = 1; v.constant = 0; return v; }
-  static AffineVal invariant_val(Value inv) {
-    AffineVal v; v.coeff = 0; v.constant = 0; v.invariant.push_back(inv); return v;
-  }
-};
-
-// Evaluate the index expression `v` symbolically w.r.t. induction variable
-// `iv`. Caches intermediate results in `cache`.
-// Defined in LegoVectorizeAnalysis.cpp.
-// evalLinearInIV: evaluate the index expression `v` symbolically w.r.t.
-// induction variable `iv`. Returns an AffineVal representing the linear model
-// `coeff * iv + constant + Σ invariant_i`. Named "LinearInIV" to be precise:
-// this is a linear (not general MLIR affine) test — it checks whether `v` is
-// linear in `iv`, which is exactly what the vectorizer needs.
-// (Not to be confused with the MLIR affine dialect.)
-// Defined in LegoVectorizeAnalysis.cpp.  Formerly named evalAffine (renamed
-// in Finding 10 to distinguish from the MLIR affine dialect).
-AffineVal evalLinearInIV(Value v, Value iv,
-                         llvm::DenseMap<Value, AffineVal> &cache);
+// (The custom ``AffineVal`` symbolic-integer evaluator and ``evalLinearInIV``
+// previously lived here. Both call sites — ``solveAccessTierA`` and
+// ``computeMinDepDistance`` — now use the upstream-MLIR-based
+// ``tryBuildAffineExpr`` from ``LegoAffineExtract.h``, so the local
+// hand-rolled solver was deleted.)
 
 struct AccessClassification {
   AccessKind kind = AccessKind::NonAffine;
