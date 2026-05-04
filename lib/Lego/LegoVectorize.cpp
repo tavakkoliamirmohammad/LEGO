@@ -1486,6 +1486,61 @@ struct EmitContext {
     }
   }
 
+  /// NonAffine scatter-store: emit ``vector.scatter`` for stores whose flat
+  /// address is data-dependent (e.g. layout-applied indices like Morton).
+  /// Symmetric counterpart of :meth:`emitGatherLoad`.
+  void emitScatterStore(memref::StoreOp store,
+                        const lego::AccessClassification &cls) {
+    int64_t Ln = getLnForAccess(cls);
+    Value origIv = origLoop.getInductionVar();
+    Value origAddr = store.getIndices().front();
+    Value baseIv = mapping.lookupOrDefault(origIv);
+
+    SmallVector<Value> indexElements;
+    indexElements.reserve(Ln);
+    for (int64_t j = 0; j < Ln; ++j) {
+      Value laneIv;
+      if (j == 0) {
+        laneIv = baseIv;
+      } else {
+        Value addend = arith::ConstantIndexOp::create(builder, loc, j);
+        laneIv = arith::AddIOp::create(builder, loc, baseIv, addend);
+      }
+      IRMapping laneMap = innerScalarMappings;
+      laneMap.map(origIv, laneIv);
+      Value laneAddr = cloneAddrChain(origAddr, laneMap, builder, origLoop);
+      indexElements.push_back(laneAddr);
+    }
+    auto idxVecTy = VectorType::get({Ln}, builder.getIndexType());
+    Value indexVec = vector::FromElementsOp::create(
+        builder, loc, idxVecTy, ValueRange(indexElements));
+
+    auto i1Ty = builder.getI1Type();
+    auto maskTy = VectorType::get({Ln}, i1Ty);
+    Value mask = arith::ConstantOp::create(
+        builder, loc, maskTy,
+        DenseElementsAttr::get(maskTy, builder.getBoolAttr(true)));
+
+    // The value being stored — pick the (single) sub-vector of width Ln.
+    auto subs = getSubsFor(store.getValue());
+    Value valueVec;
+    if (subs.size() == 1)
+      valueVec = subs.front();
+    else
+      valueVec = mapping.lookupOrDefault(store.getValue());
+    if (auto vt = dyn_cast<VectorType>(valueVec.getType());
+        !vt || vt.getNumElements() != Ln) {
+      // Width mismatch — fall back to scalar store loop. Conservative.
+      builder.clone(*store.getOperation(), mapping);
+      return;
+    }
+
+    Value c0 = arith::ConstantIndexOp::create(builder, loc, 0);
+    vector::ScatterOp::create(
+        builder, loc, /*result=*/Type{}, store.getMemRef(), ValueRange{c0},
+        indexVec, mask, valueVec, /*alignment=*/mlir::IntegerAttr{});
+  }
+
   // R17: scf.if predicated maskedstore.
   // Supports the pattern:
   //   scf.if %cond {
@@ -1946,6 +2001,8 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
 
       if (cls.kind == lego::AccessKind::Unit)
         ctx.emitUnitStore(store, cls);
+      else if (cls.kind == lego::AccessKind::NonAffine)
+        ctx.emitScatterStore(store, cls);
       else
         builder.clone(*store.getOperation(), ctx.mapping);
 

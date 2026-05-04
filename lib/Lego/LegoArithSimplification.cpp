@@ -2,6 +2,7 @@
 #define GEN_PASS_DEF_LEGOSTRENGTHREDUCTIONPASS
 #include "Lego/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -364,6 +365,57 @@ static std::optional<unsigned> matchPowerOfTwo(Value value) {
   return std::nullopt;
 }
 
+/// Recognize a value as provably-nonnegative without a full value-range
+/// analysis.  Used to gate strength-reduction of signed div/rem by powers of
+/// two: ``divsi(x, 2^k)`` equals ``shrsi(x, k)`` only when ``x >= 0``.
+///
+/// We accept block arguments of `lego.gen_p` apply/inv regions (these are
+/// layout indices by construction), `scf.for` IVs whose lower bound is a
+/// nonneg constant, results of unsigned ops (``divui``/``remui``/``shrui``),
+/// constants ``>= 0``, and recursively closed-form combinations through
+/// addi/muli/andi (preserving nonneg).
+static bool isProvablyNonNegative(Value v, unsigned depth = 0) {
+  if (depth > 8) return false;             // avoid pathological chains
+  if (!v) return false;
+  if (auto cst = v.getDefiningOp<arith::ConstantOp>()) {
+    APInt iv;
+    if (matchPattern(cst.getOperation(), m_ConstantInt(&iv)))
+      return !iv.isNegative();
+  }
+  // Block-argument cases: lego.gen_p apply/inv region or scf.for IV.
+  if (auto bArg = dyn_cast<BlockArgument>(v)) {
+    Operation *parent = bArg.getOwner()->getParentOp();
+    if (!parent) return false;
+    StringRef name = parent->getName().getStringRef();
+    if (name == "lego.gen_p" || name == "lego.reg_p")
+      return true;                         // layout index args
+    if (auto forOp = dyn_cast<scf::ForOp>(parent)) {
+      if (bArg == forOp.getInductionVar())
+        return isProvablyNonNegative(forOp.getLowerBound(), depth + 1);
+    }
+    return false;
+  }
+  // Unsigned ops always produce nonneg results.
+  if (v.getDefiningOp<arith::DivUIOp>() ||
+      v.getDefiningOp<arith::RemUIOp>() ||
+      v.getDefiningOp<arith::ShRUIOp>())
+    return true;
+  // Bitwise AND with a nonneg operand is bounded above by it ⇒ nonneg.
+  if (auto andOp = v.getDefiningOp<arith::AndIOp>())
+    return isProvablyNonNegative(andOp.getLhs(), depth + 1) ||
+           isProvablyNonNegative(andOp.getRhs(), depth + 1);
+  // Closed-form: addi/muli/shli over nonneg operands stay nonneg.
+  if (auto addOp = v.getDefiningOp<arith::AddIOp>())
+    return isProvablyNonNegative(addOp.getLhs(), depth + 1) &&
+           isProvablyNonNegative(addOp.getRhs(), depth + 1);
+  if (auto mulOp = v.getDefiningOp<arith::MulIOp>())
+    return isProvablyNonNegative(mulOp.getLhs(), depth + 1) &&
+           isProvablyNonNegative(mulOp.getRhs(), depth + 1);
+  if (auto shlOp = v.getDefiningOp<arith::ShLIOp>())
+    return isProvablyNonNegative(shlOp.getLhs(), depth + 1);
+  return false;
+}
+
 struct StrengthReduceDiv : public OpRewritePattern<arith::DivUIOp> {
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(arith::DivUIOp op,
@@ -385,6 +437,43 @@ struct StrengthReduceRem : public OpRewritePattern<arith::RemUIOp> {
                                 PatternRewriter &rewriter) const override {
     auto log2 = matchPowerOfTwo(op.getRhs());
     if (!log2 || *log2 == 0) // skip mod-by-1
+      return failure();
+    uint64_t maskValue = (1ULL << *log2) - 1;
+    Value mask = arith::ConstantOp::create(
+        rewriter, op.getLoc(),
+        rewriter.getIndexAttr(maskValue));
+    rewriter.replaceOpWithNewOp<arith::AndIOp>(op, op.getLhs(), mask);
+    return success();
+  }
+};
+
+// divsi(x, 2^k) → shrui(x, k)   when x is provably nonneg.
+struct StrengthReduceDivSI : public OpRewritePattern<arith::DivSIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::DivSIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto log2 = matchPowerOfTwo(op.getRhs());
+    if (!log2 || *log2 == 0)
+      return failure();
+    if (!isProvablyNonNegative(op.getLhs()))
+      return failure();
+    Value shift = arith::ConstantOp::create(
+        rewriter, op.getLoc(),
+        rewriter.getIndexAttr(*log2));
+    rewriter.replaceOpWithNewOp<arith::ShRUIOp>(op, op.getLhs(), shift);
+    return success();
+  }
+};
+
+// remsi(x, 2^k) → andi(x, mask)   when x is provably nonneg.
+struct StrengthReduceRemSI : public OpRewritePattern<arith::RemSIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::RemSIOp op,
+                                PatternRewriter &rewriter) const override {
+    auto log2 = matchPowerOfTwo(op.getRhs());
+    if (!log2 || *log2 == 0)
+      return failure();
+    if (!isProvablyNonNegative(op.getLhs()))
       return failure();
     uint64_t maskValue = (1ULL << *log2) - 1;
     Value mask = arith::ConstantOp::create(
@@ -423,6 +512,7 @@ struct LegoStrengthReductionPass
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<StrengthReduceDiv, StrengthReduceRem,
+                 StrengthReduceDivSI, StrengthReduceRemSI,
                  StrengthReduceMul>(&getContext());
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
