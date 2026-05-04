@@ -87,6 +87,14 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
 
+  // Recognise inclusive prefix-scan loops (cumulative sum).  Loop-carried
+  // dependency defeats clang's auto-vec; LEGO emits a Hillis-Steele
+  // in-vector prefix sum + scalar carry.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      createLegoVectorizeScanPass("avx512"));
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+
   pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("avx512"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.

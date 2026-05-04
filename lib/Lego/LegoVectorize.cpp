@@ -163,10 +163,28 @@ struct LoopAnalysis {
   ReductionInfo reduction;
 };
 
+/// Marker attributes set by the specialised pre-passes
+/// (LegoVectorizeCompact / Argmin / ScatterAdd / Scan) on the loops
+/// they emit, so the main vectoriser doesn't re-strip-mine them and
+/// mangle the hand-rolled vector body.
+static constexpr llvm::StringRef kVectorizeSkipAttrs[] = {
+    "lego.compact_done",
+    "lego.argmin_done",
+    "lego.scatter_add_done",
+    "lego.scan_done",
+};
+
+static bool hasVectorizeSkipAttr(scf::ForOp forOp) {
+  for (llvm::StringRef attr : kVectorizeSkipAttrs)
+    if (forOp->hasAttr(attr)) return true;
+  return false;
+}
+
 static llvm::SmallVector<LoopAnalysis, 0>
 collectCandidateLoops(func::FuncOp func) {
   llvm::SmallVector<LoopAnalysis, 0> result;
   func.walk([&](scf::ForOp forOp) {
+    if (hasVectorizeSkipAttr(forOp)) return;        // already-vectorised
     LoopAnalysis a;
     a.forOp = forOp;
     forOp.getBody()->walk([&](Operation *op) {

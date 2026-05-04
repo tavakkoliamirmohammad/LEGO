@@ -125,6 +125,7 @@ void legoRegisterPasses() {
   mlir::lego::registerLegoVectorizeCompactPass();
   mlir::lego::registerLegoVectorizeScatterAddPass();
   mlir::lego::registerLegoVectorizeArgminPass();
+  mlir::lego::registerLegoVectorizeScanPass();
   mlir::lego::registerConvertLegoToLinalgPass();
 
   // Named pipelines: "lego-lower", "lego-to-llvm", "lego-to-spirv", "lego-to-llvmspirv"

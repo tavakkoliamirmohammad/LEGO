@@ -256,6 +256,49 @@ def LegoVectorizeArgminPass
   ];
 }
 
+def LegoVectorizeScanPass
+    : Pass<"lego-vectorize-scan", "mlir::func::FuncOp"> {
+  let summary = "Recognize inclusive prefix-scan loops and emit a "
+                "Hillis-Steele in-vector scan with scalar carry";
+  let description = [{
+    Recognizes the canonical inclusive prefix-scan / cumulative-sum
+    pattern that ``clang -O3`` scalarises (loop-carried scalar acc
+    defeats vectorisation):
+
+        acc = 0
+        for i in 0..N:
+            acc = acc + A[i]
+            B[i] = acc
+
+    Detected as ``scf.for`` with one float iter_arg, body
+    ``load(A[i]) + addf(acc, A[i]) + store(addf, B[i]) + yield(addf)``.
+
+    Rewrites to a strip-mined vector loop:
+      * ``vector.transfer_read``  (A[i:i+L])
+      * Hillis-Steele in-vector prefix sum: log2(L) stages of
+        ``vector.shuffle`` + ``arith.addf``
+      * ``arith.addf`` with broadcast of the running scalar carry
+      * ``vector.transfer_write`` (B[i:i+L])
+      * ``vector.extract`` of the last lane → new scalar carry
+      * Tail loop preserves the original scalar body for ``(N mod L)``.
+
+    Combine op restricted to ``arith.addf`` for v1 (``mulf`` /
+    ``maximumf`` / ``minimumf`` are trivial extensions).  Uses upstream
+    MLIR vector ops only — no architecture-specific intrinsics.
+  }];
+  let constructor = "mlir::lego::createLegoVectorizeScanPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"target", "target", "std::string", /*default=*/"\"avx512\"",
+           "Target backend (controls vector lane width)">,
+  ];
+}
+
 def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
   let summary = "Layout-agnostic vectorization for LEGO via symbolic stride solve";
   let description = [{
