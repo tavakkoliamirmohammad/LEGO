@@ -27,7 +27,7 @@ def _ref(A, B, C):
     n_iters=1000, warmup=100, rtol=1e-3,
     meta={"N": N, "layout_class": "GETT tile", "prior_verdict": "WIN"},
 )
-@cpu_kernel(grid=(N,))
+@cpu_kernel
 def tensor_contraction_gett(A: Buffer[N], B: Buffer[N], C: Buffer[N]):
     for i in range(N):
         C[i] = A[i] * B[i] + C[i]

@@ -44,7 +44,7 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": _INNER, "layout_class": "Brick+non-pow2", "prior_verdict": "LOSS"},
 )
-@cpu_kernel(grid=(_INNER,))
+@cpu_kernel
 def stencil_nonpow2_brick(A: Buffer[N_FLAT], B: Buffer[N_FLAT]):
     """5-point 2D stencil on non-pow2 grid — flat 1D tiling."""
     for n in range(_INNER):

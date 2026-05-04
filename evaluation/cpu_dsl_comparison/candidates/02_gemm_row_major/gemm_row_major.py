@@ -30,7 +30,7 @@ def _ref(A, B, C):
     n_iters=1000, warmup=100, rtol=1e-3,
     meta={"N": M},
 )
-@cpu_kernel(grid=(M,))
+@cpu_kernel
 def gemm_row_major(A: Buffer[_MK], B: Buffer[_KN], C: Buffer[_MN]):
     for i in range(M):
         for k in range(K):

@@ -29,7 +29,7 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": N},
 )
-@cpu_kernel(grid=(N,))
+@cpu_kernel
 def brick_within_cell(A: Buffer[N], B: Buffer[N]):
     for i in range(N):
         B[i] = A[i] * 2.0 + 1.0

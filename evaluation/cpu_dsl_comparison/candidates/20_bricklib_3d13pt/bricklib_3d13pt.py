@@ -65,7 +65,7 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": _INNER, "layout_class": "Brick", "prior_verdict": "WIN"},
 )
-@cpu_kernel(grid=(_INNER,))
+@cpu_kernel
 def bricklib_3d13pt(A: Buffer[N_FLAT], B: Buffer[N_FLAT]):
     """13-point stencil -- flat 1D tiling with compile-time neighbor offsets."""
     for n in range(_INNER):

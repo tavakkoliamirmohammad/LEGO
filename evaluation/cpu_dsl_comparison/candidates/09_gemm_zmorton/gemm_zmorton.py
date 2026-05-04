@@ -33,7 +33,7 @@ def _ref(A, B, C):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": N, "layout_class": "Z-Morton", "prior_verdict": "WIN"},
 )
-@cpu_kernel(grid=(N,))
+@cpu_kernel
 def gemm_zmorton(A: Buffer[N], B: Buffer[N], C: Buffer[N]):
     for i in range(N):
         ti = i & 0x5555

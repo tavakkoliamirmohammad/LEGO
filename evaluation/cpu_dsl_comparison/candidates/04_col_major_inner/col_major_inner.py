@@ -33,7 +33,7 @@ def _ref(A, C):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": M},
 )
-@cpu_kernel(grid=(_MN,))
+@cpu_kernel
 def col_major_inner(A: Buffer[_MN], C: Buffer[_MN]):
     for j in range(_MN):
         i = j // N

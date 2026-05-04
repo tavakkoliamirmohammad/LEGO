@@ -33,7 +33,7 @@ def _ref(A, B, C):
     n_iters=1000, warmup=100, rtol=1e-3,
     meta={"N": M, "layout_class": "TBLIS", "prior_verdict": "LOSS"},
 )
-@cpu_kernel(grid=(N,))
+@cpu_kernel
 def tblis_notranspose(A: Buffer[_MK], B: Buffer[_KN], C: Buffer[_MN]):
     for j in range(N):
         for ik in range(_MK):

@@ -30,7 +30,7 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": N},
 )
-@cpu_kernel(grid=(N_INNER,))
+@cpu_kernel
 def self_update(A: Buffer[N], B: Buffer[N]):
     for i in range(N_INNER):
         # i in [0, N-1): read A[i] and A[i+1], write B[i+1].

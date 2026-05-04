@@ -14,7 +14,7 @@ Usage::
 
     N = 1024
 
-    @cpu_kernel(grid=(N,))
+    @cpu_kernel
     def saxpy(a: float, X: Buffer[N], Y: Buffer[N]):
         for i in range(N):
             Y[i] = a * X[i] + Y[i]
@@ -24,7 +24,8 @@ Usage::
     jit_fn(2.5, X_np, Y_np)   # modifies Y_np in-place
 
 Key differences from gpu_dsl:
-  - ``@cpu_kernel(grid=(N,))`` — no ``block`` parameter.
+  - ``@cpu_kernel`` — no decorator arguments. Iteration is described by
+    explicit ``for i in range(N):`` in the body.
   - No ``Shared[...]``, no ``block_id``/``thread_id``/``block_dim``.
   - Scalar parameters are allowed (annotated with Python ``float`` or
     ``int``); they map to f32/index function arguments.
@@ -88,21 +89,19 @@ class _BufferType:
 # Decorator
 # ============================================================================
 
-def cpu_kernel(grid: Tuple):
+def cpu_kernel(fn=None):
     """Decorator: transform a Python function into a :class:`CPUKernelBuilder`.
 
-    Args:
-        grid: Total iteration space shape, e.g. ``(N,)`` or ``(M, N)``.
-              The kernel body runs over the full grid extent. The body must
-              use explicit ``for i in range(N):`` (or nested ranges) to
-              describe its iteration; SIMD width is picked automatically
-              by the vectoriser from the target hardware.
+    The kernel's iteration space is described entirely by the body's
+    ``for i in range(...):`` loops. SIMD width is picked automatically by
+    the vectoriser from the target hardware. No decorator arguments are
+    required — both ``@cpu_kernel`` and ``@cpu_kernel()`` are accepted.
 
     Example::
 
         N = 1 << 20
 
-        @cpu_kernel(grid=(N,))
+        @cpu_kernel
         def saxpy(a: float, X: Buffer[N], Y: Buffer[N]):
             for i in range(N):
                 Y[i] = a * X[i] + Y[i]
@@ -110,13 +109,12 @@ def cpu_kernel(grid: Tuple):
         jit_fn = saxpy.compile()       # selects x86 / AVX-512 automatically
         jit_fn(2.5, X_np, Y_np)       # modifies Y_np in-place
     """
-    def decorator(fn):
-        return _build(fn, grid)
-    return decorator
+    if fn is None:
+        return lambda f: _build(f)
+    return _build(fn)
 
 
-def _build(fn, grid):
-    tile = None  # legacy parameter; kept as None for _Compiler API compat
+def _build(fn):
     source = textwrap.dedent(inspect.getsource(fn))
     tree = ast.parse(source)
     func_def = tree.body[0]
@@ -155,19 +153,15 @@ def _build(fn, grid):
     scalar_dtypes = [dtype_str for _, dtype_str in scalar_params_meta]
 
     def kernel_body(ctx):
-        # Emit a SINGLE flat loop over [0, grid[0]).
-        # lego-vectorize will strip-mine this loop by the tile factor internally,
-        # eliminating the outer tile_id overhead that the old two-level nest had.
-        # The tile parameter is passed to _Compiler only to inform tile_range
-        # rewrites; no outer scf.for over tile_id is emitted here.
+        # The body's ``for i in range(...):`` describes the iteration
+        # space directly; the compiler walks the AST and emits scf.for ops
+        # one-to-one. lego-vectorize then strip-mines the inner loop.
         _Compiler(
             ctx=ctx,
             func_def=func_def,
             buf_params=buf_params,
             scalar_params=scalar_params_meta,
             outer=outer,
-            grid=grid,
-            tile=tile,
         ).run()
 
     return CPUKernelBuilder(
@@ -195,13 +189,10 @@ class _Compiler(_BaseCompiler):
     - _call/_method_call: CPU ops only; clear error for GPU ops.
     """
 
-    def __init__(self, ctx, func_def, buf_params, scalar_params, outer,
-                 grid=None, tile=None):
+    def __init__(self, ctx, func_def, buf_params, scalar_params, outer):
         self.ctx = ctx
         self.func_def = func_def
         self.outer = outer
-        self.grid = grid
-        self.tile = tile
         self.env = {}         # name → (value, tag)
         self.buf_map = {}     # name → buffer index (among buf_params only)
 

@@ -28,7 +28,7 @@ def _saxpy_ref(a, X, Y):
 
 
 @benchmark(reference=_saxpy_ref, n_iters=1000, warmup=100)
-@cpu_kernel(grid=(N,))
+@cpu_kernel
 def saxpy(a: float, X: Buffer[N], Y: Buffer[N]):
     """SAXPY: Y[i] = a*X[i] + Y[i] — unit-stride, vectorisable."""
     for i in range(N):

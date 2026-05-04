@@ -29,7 +29,7 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": N, "layout_class": "AoSoA", "prior_verdict": "PARITY"},
 )
-@cpu_kernel(grid=(N,))
+@cpu_kernel
 def particlefilter_aosoA(A: Buffer[N_BUF], B: Buffer[N]):
     for i in range(N):
         B[i] = A[i * 4] * 2.0
