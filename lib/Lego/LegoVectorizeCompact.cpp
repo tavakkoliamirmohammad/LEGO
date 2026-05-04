@@ -36,6 +36,7 @@
 
 #define GEN_PASS_DEF_LEGOVECTORIZECOMPACTPASS
 #include "Lego/Passes.h"
+#include "LegoSpecializedVectorize.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
@@ -50,14 +51,8 @@ using namespace mlir;
 
 namespace {
 
-/// Lane width chosen by the target option (parallel to LegoVectorize.cpp).
-/// For now: AVX-512 → 16 (f32), 8 (f64); NEON → 4 (f32), 2 (f64); else 8 / 4.
-static int64_t getLanesForType(llvm::StringRef target, int64_t elemBytes) {
-  if (target == "avx512") return elemBytes == 4 ? 16 : 8;
-  if (target == "avx2")   return elemBytes == 4 ? 8 : 4;
-  if (target == "neon" || target == "sve") return elemBytes == 4 ? 4 : 2;
-  return 16 / std::max<int64_t>(elemBytes, 1);
-}
+using mlir::lego::specialised::computeStripBounds;
+using mlir::lego::specialised::getDefaultLanesForType;
 
 /// The decoded shape of a compaction loop.  Holds the values the rewrite
 /// needs without re-walking the IR.
@@ -228,21 +223,15 @@ struct VectorizeCompactPattern : public OpRewritePattern<scf::ForOp> {
     Type elemTy = shape->dataLoad.getType();
     if (!elemTy.isIntOrFloat()) return failure();
     int64_t elemBytes = elemTy.getIntOrFloatBitWidth() / 8;
-    int64_t L = getLanesForType(target, elemBytes);
+    int64_t L = getDefaultLanesForType(target, elemBytes);
     if (L < 2) return failure();
 
     Value lb = forOp.getLowerBound();
     Value ub = forOp.getUpperBound();
     Value k0 = forOp.getInits().front();
-
-    // Compute strip-mined upper bound:
-    //   stripUb = lb + ((ub - lb) / L) * L
-    //   tail runs from stripUb to ub.
-    Value lenV   = arith::SubIOp::create(rewriter, loc, ub, lb);
-    Value cL     = arith::ConstantIndexOp::create(rewriter, loc, L);
-    Value chunks = arith::DivUIOp::create(rewriter, loc, lenV, cL);
-    Value stripBody = arith::MulIOp::create(rewriter, loc, chunks, cL);
-    Value stripUb = arith::AddIOp::create(rewriter, loc, lb, stripBody);
+    auto sb = computeStripBounds(rewriter, loc, lb, ub, L);
+    Value cL = sb.cL;
+    Value stripUb = sb.stripUb;
 
     // Build the vector loop: scf.for %i = %lb to %stripUb step %L
     //                          iter_args(%k = %k0) -> (index)

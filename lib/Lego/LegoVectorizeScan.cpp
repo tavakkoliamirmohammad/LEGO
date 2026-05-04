@@ -41,6 +41,7 @@
 
 #define GEN_PASS_DEF_LEGOVECTORIZESCANPASS
 #include "Lego/Passes.h"
+#include "LegoSpecializedVectorize.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -55,12 +56,8 @@ using namespace mlir;
 
 namespace {
 
-static int64_t getLanesForType(llvm::StringRef target, int64_t elemBytes) {
-  if (target == "avx512") return elemBytes == 4 ? 16 : 8;
-  if (target == "avx2")   return elemBytes == 4 ? 8  : 4;
-  if (target == "neon" || target == "sve") return elemBytes == 4 ? 4 : 2;
-  return 16 / std::max<int64_t>(elemBytes, 1);
-}
+using mlir::lego::specialised::computeStripBounds;
+using mlir::lego::specialised::getDefaultLanesForType;
 
 /// Which associative combine the loop is folding with — drives identity
 /// constant + emitted vector op.
@@ -266,17 +263,14 @@ struct VectorizeScanPattern : public OpRewritePattern<scf::ForOp> {
     Location loc = forOp.getLoc();
     auto fpTy = cast<FloatType>(shape->initAcc.getType());
     int64_t elemBytes = fpTy.getWidth() / 8;
-    int64_t L = getLanesForType(target, elemBytes);
+    int64_t L = getDefaultLanesForType(target, elemBytes);
     if (!llvm::isPowerOf2_64(L) || L < 2) return failure();
 
     Value lb = forOp.getLowerBound();
     Value ub = forOp.getUpperBound();
-
-    Value lenV   = arith::SubIOp::create(rewriter, loc, ub, lb);
-    Value cL     = arith::ConstantIndexOp::create(rewriter, loc, L);
-    Value chunks = arith::DivUIOp::create(rewriter, loc, lenV, cL);
-    Value stripBody = arith::MulIOp::create(rewriter, loc, chunks, cL);
-    Value stripUb = arith::AddIOp::create(rewriter, loc, lb, stripBody);
+    auto sb = computeStripBounds(rewriter, loc, lb, ub, L);
+    Value cL = sb.cL;
+    Value stripUb = sb.stripUb;
 
     auto vecTy = VectorType::get({L}, fpTy);
     // Pad value for transfer_read of A[i:i+L].  Strip-mined to a multiple
