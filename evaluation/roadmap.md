@@ -8,9 +8,14 @@
 > more results land.
 >
 > **R1 (CPU vector pipeline) is CLOSED** — shipped in v1 on branch
-> `feat/cpu-vector-pipeline` (2026-05-01). See the R1 entry below for the
-> v1 proof-point results. R12 (cross-brick shuffle) is now the highest
-> priority open item.
+> `feat/cpu-vector-pipeline` (2026-05-01). See the R1 entry below.
+>
+> **R12 (cross-brick shuffle) is CLOSED** — multi-boundary CrossBlock
+> emission shipped 2026-05-01. The originally-noted "remaining gaps"
+> (affine-offset store lowering, runtime brick-stencil correctness) are
+> obsolete: as of branch `feat/lego-to-linalg`, all R12-affected
+> candidates (19, 20, 21, 22, 37) and offset-store kernels (03, 06)
+> ship at WIN with VERIFIED correctness. See R12 entry below.
 >
 > **R14 (SMT-driven dep analysis) is CLOSED** — `enable-smt-dep-analysis`
 > option added to `lego-vectorize` (default off). When enabled, uses Z3 to
@@ -36,9 +41,25 @@
 > (10+ cycles). Affects candidates 23-27, 29-31, 38 which all moved from
 > PENDING to VERIFIED with vec_iso in the 3-5× range.
 >
-> **Dashboard (2026-05-03, branch feat/cpu-vector-pipeline):**
-> 26 WIN / 14 PARITY / 1 LOSS (18_tblis) / 1 ERROR (20_bricklib_3d13pt NaN)
-> vs C-O3 baseline. 42/42 VERIFIED for correctness.
+> **Dashboard (2026-05-03, branch feat/lego-to-linalg):**
+> 38 WIN / 4 PARITY / 0 LOSS / 0 ERROR vs C-O3 baseline. 42/42 VERIFIED.
+> 0 regressions vs CASTLE prior; 13 improved.
+>
+> **Notable infrastructure cleanups in feat/lego-to-linalg:**
+> - Custom `evalLinearInIV` symbolic-stride solver (~400 LOC) replaced
+>   by upstream-AffineExpr-based `tryBuildAffineExpr`. Both call sites
+>   (solveAccessTierA + computeMinDepDistance) migrated; `AffineVal`
+>   struct deleted.
+> - R20 strided-load: hand-rolled vector.shuffle chain replaced by one
+>   wide ``vector.transfer_read`` + log2(stride) ``vector.deinterleave``
+>   ops. Canonical upstream form; better LLVM lowering pattern-match.
+> - ``@cpu_kernel`` simplified: ``tile=``, ``grid=`` and the
+>   ``tile_range`` sentinel removed. The body's ``for i in range(N):``
+>   directly describes the iteration domain.
+> - ``convert-lego-to-linalg`` pass added for elementwise (1-D and
+>   perfect-N-D) affine cases; default ON. Custom ``lego-vectorize``
+>   handles non-affine layouts (Z-Morton, brick, AoSoA) and
+>   reductions.
 >
 > **The CASTLE/TACO paper Section 7.5 is HELD** until either each item
 > below is closed (infra implemented + affected candidates re-measured)
@@ -85,9 +106,14 @@ groundwork for the GPU MMA tensor-core story via a different target dialect.
 
 **Severity:** high. Directly flips 5 brick-class candidates from LOSS to WIN.
 
-**Status: PARTIALLY CLOSED — full-boundary (multi-boundary) CrossBlock emission
-shipped 2026-05-01. Single-boundary (R12a, boundaryJump threading) was already
-in place. Remaining gaps noted below.**
+**Status: CLOSED (2026-05-03, branch `feat/lego-to-linalg`).**
+Multi-boundary CrossBlock emission landed on 2026-05-01. The originally-noted
+"remaining gaps" (affine-offset store lowering, runtime brick-stencil
+correctness) are no longer real: kernels with affine-offset stores
+(``B[i+1]`` etc., candidates 03 and 06) and the brick-stencil candidates
+(19, 20, 21, 22, 37) all ship at **WIN with VERIFIED** in the current
+dashboard. Both gap items resolved via subsequent fixes in
+`computeStripMineFactor`, `cloneAddrChain`, and the strided-write path.
 
 **What R12 delivered (2026-05-01, branch `feat/cpu-vector-pipeline`):**
 
