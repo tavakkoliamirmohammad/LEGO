@@ -19,6 +19,7 @@
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
@@ -93,6 +94,9 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   vecToLLVMOpts.reassociateFPReductions = opts.reassocFP;
   vecToLLVMOpts.useVectorAlignment = opts.useVecAlignment;
   pm.addPass(createConvertVectorToLLVMPass(vecToLLVMOpts));
+  // math.ctpop and friends (emitted by lego-vectorize-compact for popcount)
+  // require math→llvm conversion before the ExecutionEngine.
+  pm.addPass(createConvertMathToLLVMPass());
   // Expand strided memref metadata (memref.subview, memref.reinterpret_cast)
   // BEFORE the final memref→LLVM conversion. Linalg tiling produces these
   // ops on strided memref types; the canonical memref-to-llvm pass cannot
