@@ -204,6 +204,58 @@ def LegoVectorizeScatterAddPass
   ];
 }
 
+def LegoVectorizeArgminPass
+    : Pass<"lego-vectorize-argmin", "mlir::func::FuncOp"> {
+  let summary = "Recognize argmin / argmax loops and emit a vector "
+                "min/max + per-lane index-select reduction";
+  let description = [{
+    Recognizes the canonical argmin / argmax pattern that
+    ``clang -O3`` scalarises (paired iter_args defeat its heuristics):
+
+        m  = +inf
+        mi = 0
+        for i in 0..N:
+            if A[i] < m:
+                m  = A[i]
+                mi = i
+
+    Detected as ``scf.for`` with two iter_args ``(T, index)``, body
+    ``load(A[i]) + cmpf <pred> + scf.if -> (T, index) { yield A[i], i }
+    else { yield m, mi }``.
+
+    Rewrites to a strip-mined vector loop with vector accumulators and
+    a final reduction:
+
+      * vector accumulator per lane: ``acc_min : vector<L x T>``,
+        ``acc_idx : vector<L x index>``
+      * inside loop: ``arith.minimumf`` + ``arith.select`` (no scalar
+        branches)
+      * after loop: ``vector.reduction <minimumf>`` then locate the
+        smallest lane index where the reduced min is reached
+      * scalar tail loop for ``(N mod L)`` iterations seeded from the
+        reduced (val, idx)
+
+    Predicates supported: ``olt`` (argmin) and ``ogt`` (argmax) — both
+    map directly to ``arith.minimumf`` / ``arith.maximumf`` and the
+    matching ``vector.reduction`` kinds.
+
+    Uses upstream MLIR vector ops only — no architecture-specific
+    intrinsics.  Runs *before* ``lego-vectorize`` so the main
+    vectoriser never sees the rewritten loop.
+  }];
+  let constructor = "mlir::lego::createLegoVectorizeArgminPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"target", "target", "std::string", /*default=*/"\"avx512\"",
+           "Target backend (controls vector lane width)">,
+  ];
+}
+
 def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
   let summary = "Layout-agnostic vectorization for LEGO via symbolic stride solve";
   let description = [{

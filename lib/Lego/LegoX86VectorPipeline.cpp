@@ -78,6 +78,15 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   // scatter are competitive and the pass should help.  Run it explicitly
   // via ``--lego-vectorize-scatter-add`` to opt in on Intel hardware.
 
+  // Recognise argmin / argmax loops: paired (val, idx) reduction with
+  // data-dependent updates that clang scalarises.  Emits vector
+  // accumulators + arith.minimumf + arith.select inside the loop, and a
+  // single vector.reduction pair after.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      createLegoVectorizeArgminPass("avx512"));
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+
   pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("avx512"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
