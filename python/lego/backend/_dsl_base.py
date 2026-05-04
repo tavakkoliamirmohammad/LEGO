@@ -369,7 +369,11 @@ class _BaseCompiler:
             v, t = self._expr(e)
             if _is_ct(t):
                 v, t = _to_runtime(self.ctx, v, t, INDEX)
-            elif t == I32:
+            elif t == I32 or (
+                isinstance(t, str) and t.startswith("i") and t != INDEX):
+                # Cast any integer-typed value (i8/i16/i32/i64) to index
+                # for use as a subscript. Common pattern: ``A[idx[i]]``
+                # where ``idx`` is an integer-typed buffer.
                 v = arith_dialect.IndexCastOp(IndexType.get(), v).result
                 t = INDEX
             out.append(v)

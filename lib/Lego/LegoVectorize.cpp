@@ -1901,6 +1901,54 @@ struct EmitContext {
   }
 };  // struct EmitContext
 
+/// Walk the def-use chain backwards from ``addr`` (the address operand of a
+/// NonAffine memref op), inserting every op whose ONLY downstream uses are
+/// inside other address chains or on the same NonAffine access(es).  These
+/// ops are reproduced per-lane by ``cloneAddrChain`` during gather/scatter
+/// emission and must be skipped during the main per-op dispatcher to avoid
+/// emitting them a second time (or, worse, attempting to vectorize an
+/// ``index_cast`` to ``vector<Nxindex>`` which is an invalid MLIR type).
+static void collectNonAffineAddrChain(
+    Value addr, scf::ForOp parent,
+    const llvm::SmallPtrSetImpl<Operation *> &nonAffineAccesses,
+    llvm::SmallPtrSetImpl<Operation *> &out) {
+  Operation *defOp = addr.getDefiningOp();
+  if (!defOp || !parent->isAncestor(defOp))
+    return;
+  if (!out.insert(defOp).second)
+    return;                                  // already visited
+  for (Value operand : defOp->getOperands())
+    collectNonAffineAddrChain(operand, parent, nonAffineAccesses, out);
+}
+
+/// True if every user of ``op``'s results (1) is also in the
+/// address-chain set, OR (2) consumes the value as a memref-op address
+/// (i.e., not as the value-to-store and not as the memref handle).
+/// Such ops are safely skipped during the main dispatcher.
+static bool addrChainHasOnlyAddrUses(
+    Operation *op,
+    const llvm::SmallPtrSetImpl<Operation *> &addrChain,
+    const llvm::SmallPtrSetImpl<Operation *> &nonAffineAccesses) {
+  for (Operation *user : op->getUsers()) {
+    if (addrChain.count(user)) continue;
+    if (nonAffineAccesses.count(user)) {
+      // Must be used as an address (index), not as the memref base or value.
+      bool isAddrUse = false;
+      if (auto load = dyn_cast<memref::LoadOp>(user)) {
+        for (Value idx : load.getIndices())
+          if (idx.getDefiningOp() == op) { isAddrUse = true; break; }
+      } else if (auto store = dyn_cast<memref::StoreOp>(user)) {
+        for (Value idx : store.getIndices())
+          if (idx.getDefiningOp() == op) { isAddrUse = true; break; }
+      }
+      if (!isAddrUse) return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 /// Populate `vecLoop`'s body by dispatching each original loop op to the
 /// appropriate per-kind emit helper in EmitContext.
 /// When `reduction.kind != None` (R18b), the vecLoop carries a vector iter_arg
@@ -1913,6 +1961,66 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
                            OpBuilder &builder,
                            const ReductionInfo &reduction = ReductionInfo{}) {
   builder.setInsertionPointToStart(vecLoop.getBody());
+
+  // Precompute the set of ops that lie in the address chain of any NonAffine
+  // memref access AND must be skipped by the main dispatcher because the
+  // catch-all vectorizer would generate broken IR for them.
+  //
+  // The canonical example is ``arith.index_cast %idx_i64 : i64 to index``
+  // following an indirect ``memref.load %idx[%i] : memref<?xi64>``.  Lifting
+  // this index_cast to a vector form would require ``vector<L x index>``,
+  // an invalid MLIR type.  The address chain is reproduced per-lane by
+  // ``cloneAddrChain`` inside the gather/scatter emit helpers, so skipping
+  // it in the dispatcher is what enables the vectorizer to admit the loop.
+  //
+  // Critically, we ONLY skip when the chain *needs* skipping.  When ``idx``
+  // is already ``memref<?xindex>`` the existing dispatch (Unit load →
+  // ``vector.transfer_read`` of ``vector<L x index>``) is faster than the
+  // per-lane scalar loads that ``cloneAddrChain`` would emit.  Detecting
+  // this distinction:
+  //   - Walk back from each NonAffine access's address.
+  //   - If the chain contains *any* ``arith.index_cast``/``index_castui``
+  //     with an ``index`` source or result type, mark the whole chain
+  //     as skip.
+  //   - Otherwise leave the chain's ops alone — they'll be dispatched
+  //     normally and the gather/scatter can consume the resulting
+  //     ``vector<L x index>``.
+  llvm::SmallPtrSet<Operation *, 8> nonAffineAccesses;
+  llvm::SmallPtrSet<Operation *, 16> addrChainOps;
+  for (size_t i = 0; i < accesses.size(); ++i) {
+    if (classes[i].kind != lego::AccessKind::NonAffine) continue;
+    nonAffineAccesses.insert(accesses[i]);
+    Value addr;
+    if (auto load = dyn_cast<memref::LoadOp>(accesses[i])) {
+      if (!load.getIndices().empty()) addr = load.getIndices().front();
+    } else if (auto store = dyn_cast<memref::StoreOp>(accesses[i])) {
+      if (!store.getIndices().empty()) addr = store.getIndices().front();
+    }
+    if (!addr) continue;
+    llvm::SmallPtrSet<Operation *, 16> chainForThisAccess;
+    collectNonAffineAddrChain(addr, origLoop, nonAffineAccesses,
+                              chainForThisAccess);
+    // Does this chain contain a vector-unsafe index_cast?
+    bool needsPerLaneEmit = false;
+    for (Operation *op : chainForThisAccess) {
+      if (isa<arith::IndexCastOp, arith::IndexCastUIOp>(op)) {
+        bool srcIsIndex = op->getOperand(0).getType().isIndex();
+        bool resIsIndex = op->getResult(0).getType().isIndex();
+        if (srcIsIndex || resIsIndex) { needsPerLaneEmit = true; break; }
+      }
+    }
+    if (needsPerLaneEmit) addrChainOps.insert(chainForThisAccess.begin(),
+                                              chainForThisAccess.end());
+  }
+  // Filter: only count an op as "skip" if its uses are exclusively in the
+  // address chain or as the address operand of NonAffine accesses.  Anything
+  // with a value-domain user must still be emitted (no info available to the
+  // gather/scatter clone path for that user).
+  llvm::SmallPtrSet<Operation *, 16> addrOnlyOps;
+  for (Operation *op : addrChainOps) {
+    if (addrChainHasOnlyAddrUses(op, addrChainOps, nonAffineAccesses))
+      addrOnlyOps.insert(op);
+  }
 
   // Construct context; map orig IV -> new IV upfront.
   EmitContext ctx{origLoop.getLoc(),
@@ -1956,6 +2064,14 @@ static void emitVectorBody(scf::ForOp vecLoop, scf::ForOp origLoop,
       // Non-reduction: vecLoop already has its own empty yield; skip.
       continue;
     }
+
+    // Skip ops that lie purely in the address chain of NonAffine accesses.
+    // These are reproduced per-lane by ``cloneAddrChain`` inside the
+    // gather/scatter emit helpers; running the catch-all dispatcher on them
+    // would either double-emit (memref.load on the index buffer) or attempt
+    // an invalid cast (``arith.index_cast vector<Lxi64> to vector<Lxindex>``,
+    // which has no MLIR type).
+    if (addrOnlyOps.count(&op)) continue;
 
     // -------------------------------------------------------------------
     // memref.load
@@ -2237,15 +2353,48 @@ class LegoVectorizePass
                 return defOp && a.forOp->isAncestor(defOp);
               });
               if (ivDependent) {
-                // G2: emit a remark visible without --debug-only so the user
-                // learns WHY vectorization was skipped (the most counterintuitive
-                // rejection — legal-looking arith op that blocks vectorization).
-                op.emitRemark(
-                    "lego-vectorize: non-vectorizable — IV-dependent index_cast "
-                    "with index source/result; rewrite index arithmetic to avoid "
-                    "index_cast on the induction variable to enable vectorization");
-                bodyOK = false;
-                break;
+                // R21: relax G2 when the index_cast feeds *only* the address
+                // operand of NonAffine memref accesses.  In that case the cast
+                // is part of an address chain that cloneAddrChain reproduces
+                // per-lane during gather/scatter emission, and the main
+                // dispatcher's addrOnlyOps skip prevents the broken
+                // vector<L x index> cast from ever being emitted.  This is
+                // exactly the indirect-load-as-index pattern (e.g.
+                // ``B[idx[i]] = ...``) where we want vector.scatter.
+                bool addressOnly = true;
+                for (Operation *user : op.getUsers()) {
+                  // Address use of a memref op?
+                  if (auto load = dyn_cast<memref::LoadOp>(user)) {
+                    bool isAddr = false;
+                    for (Value idx : load.getIndices())
+                      if (idx.getDefiningOp() == &op) { isAddr = true; break; }
+                    if (!isAddr) { addressOnly = false; break; }
+                    continue;
+                  }
+                  if (auto store = dyn_cast<memref::StoreOp>(user)) {
+                    bool isAddr = false;
+                    for (Value idx : store.getIndices())
+                      if (idx.getDefiningOp() == &op) { isAddr = true; break; }
+                    if (!isAddr) { addressOnly = false; break; }
+                    continue;
+                  }
+                  // Anything else (arith op consuming the index) — must be
+                  // a chain-internal op that itself only feeds addresses.
+                  // For v1 we conservatively allow only direct memref-address
+                  // uses; richer chains can be relaxed when needed.
+                  addressOnly = false;
+                  break;
+                }
+                if (!addressOnly) {
+                  op.emitRemark(
+                      "lego-vectorize: non-vectorizable — IV-dependent "
+                      "index_cast whose result is consumed in a value "
+                      "context; rewrite index arithmetic to avoid index_cast "
+                      "on the induction variable to enable vectorization");
+                  bodyOK = false;
+                  break;
+                }
+                // OK: index_cast is purely address-chain — let it through.
               }
             }
           }

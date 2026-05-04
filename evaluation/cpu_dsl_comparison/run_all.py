@@ -131,6 +131,10 @@ _C_BASELINE_MAP = {
     "40_mvt_L1_tile":            ("fma_1M",            None),
     "41_bicg_L1_tile":           ("fma_1M",            None),
     "42_dgemm_reg_L1_L2_tile":   ("fma_1M",            None),
+    # ---- New clang-blind-spot candidates (43-45) ----
+    "43_spmv_indirect":          ("spmv_indirect",     None),
+    "44_predicated_fma":         ("predicated_fma",    None),
+    "45_stride_runtime":         ("stride7",           None),
 }
 
 

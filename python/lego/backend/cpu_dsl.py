@@ -195,6 +195,7 @@ class _Compiler(_BaseCompiler):
         self.outer = outer
         self.env = {}         # name → (value, tag)
         self.buf_map = {}     # name → buffer index (among buf_params only)
+        self.buf_dtype = {}   # name → dtype string ("f32"/"f64"/"i32"/"i64"/...)
 
         # Populate env with scalar function arguments (MLIR Values already
         # bound by the function's entry block, exposed via ctx._scalar_vals).
@@ -204,9 +205,15 @@ class _Compiler(_BaseCompiler):
                 tag = F32 if dtype_str == "f32" else INDEX
                 self.env[name] = (scalar_vals[i], tag)
 
-        # Map buffer parameter names → indices
-        for i, (name, _) in enumerate(buf_params):
+        # Map buffer parameter names → indices and remember each buffer's
+        # element dtype.  The ``_load`` site uses this to tag the loaded
+        # value correctly so subsequent uses (e.g., as a subscript index)
+        # see the right element type.
+        for i, (name, bt) in enumerate(buf_params):
             self.buf_map[name] = i
+            # bt.dtype is a DType enum that inherits str — use the string value.
+            dt = bt.dtype
+            self.buf_dtype[name] = dt.value if hasattr(dt, "value") else str(dt)
 
     # -- for -----------------------------------------------------------
 
@@ -296,7 +303,10 @@ class _Compiler(_BaseCompiler):
             raise NameError(
                 f"'{name}' is not a declared Buffer parameter in this kernel")
         idx = self.buf_map[name]
-        return (self.ctx.load(idx, self._indices(node)), F32)
+        # Tag the loaded value with the buffer's actual element dtype so
+        # downstream uses (subscript indices, arithmetic) see the right type.
+        return (self.ctx.load(idx, self._indices(node)),
+                self.buf_dtype.get(name, F32))
 
     def _store(self, node, val, tag):
         if _is_ct(tag):
