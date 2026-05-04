@@ -16,7 +16,11 @@ import numpy as np
 
 from lego.backend.cpu_dsl import cpu_kernel, Buffer
 from lego.core import Row
-from lego.backend.fast_morton import Morton2DFast as Morton2D
+# Use the SLOW per-bit-loop ZCurve to test the bit-spread recognizer pass.
+# If the recognizer is firing, this should produce code as fast as the
+# hand-rolled Morton2DFast (bit-magic) variant.
+from lego.frontends.python_mlir import ZCurve
+def Morton2D(N): return ZCurve((N, N))._layout
 
 
 # ----------------------------------------------------------------------
@@ -98,21 +102,32 @@ def main():
             rel_tol=0,
         ), f"perm sanity failed at ({i},{j})"
 
+    # Scale measurement reps with N so each LEGO kernel call burns ≈ <30s
+    # of wall time at large N (where each iter already takes 100s of ms).
+    if N <= 2048:
+        nit_row, nwu_row, nit_mor, nwu_mor = 50, 5, 50, 5
+    elif N <= 4096:
+        nit_row, nwu_row, nit_mor, nwu_mor = 50, 5, 20, 3
+    elif N <= 8192:
+        nit_row, nwu_row, nit_mor, nwu_mor = 20, 3, 5, 2
+    else:  # 16384 and above
+        nit_row, nwu_row, nit_mor, nwu_mor = 5, 2, 3, 1
+
     print()
-    # Both vector + scalar so we can disentangle vectorisation from locality.
+    print(f"  (using row=({nit_row}, {nwu_row}), morton=({nit_mor}, {nwu_mor}))")
     print("  LEGO Row, vector ...")
     t_row_vec = jacobi_row.bench_self_timed(
-        A_row_flat, B_row_flat, n_iters=50, n_warmup=5, target="x86")
+        A_row_flat, B_row_flat, n_iters=nit_row, n_warmup=nwu_row, target="x86")
 
     print("  LEGO Row, scalar ...")
     t_row_sca = jacobi_row.bench_self_timed(
-        A_row_flat, B_row_flat, n_iters=50, n_warmup=5, target="scalar")
+        A_row_flat, B_row_flat, n_iters=nit_row, n_warmup=nwu_row, target="scalar")
 
     t_morton_vec = float("nan")
     try:
         print("  LEGO Morton, vector ...")
         t_morton_vec = jacobi_morton.bench_self_timed(
-            A_morton_flat, B_morton_flat, n_iters=50, n_warmup=5, target="x86")
+            A_morton_flat, B_morton_flat, n_iters=nit_mor, n_warmup=nwu_mor, target="x86")
     except Exception as e:
         print(f"    FAILED: {type(e).__name__}: {str(e).splitlines()[0]}")
 
@@ -120,7 +135,7 @@ def main():
     try:
         print("  LEGO Morton, scalar ...")
         t_morton_sca = jacobi_morton.bench_self_timed(
-            A_morton_flat, B_morton_flat, n_iters=50, n_warmup=5, target="scalar")
+            A_morton_flat, B_morton_flat, n_iters=nit_mor, n_warmup=nwu_mor, target="scalar")
     except Exception as e:
         print(f"    FAILED: {type(e).__name__}: {str(e).splitlines()[0]}")
 

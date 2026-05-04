@@ -506,6 +506,290 @@ struct StrengthReduceMul : public OpRewritePattern<arith::MulIOp> {
   }
 };
 
+// ============================================================================
+// Bit-spread recognition → portable log-time bit-magic
+//
+// Recognizes the per-bit form of a bit-spread (e.g., the apply body of a
+// Morton/Z-order GenP after strength reduction):
+//
+//   sum_k  shli( andi( shrui(x_g, K_g_k), 1 ), S_g_k )
+//
+// across one or more source values (groups). For each group g:
+//   * source bits K_g_k are 0, 1, 2, ..., n_g - 1 (contiguous, ascending)
+//   * destination positions S_g_k are offset_g + 2 * k (stride-2 spread,
+//     i.e., 2-D Morton — the most common case)
+//   * offset_g ∈ {0, 1}
+//
+// When matched the addi tree is replaced by a portable 4-stage bit-magic
+// spread per source, OR'd together at the end:
+//
+//   y = x & ((1 << n) - 1)
+//   y = (y | (y << 8)) & 0x00FF00FF        (when n > 8)
+//   y = (y | (y << 4)) & 0x0F0F0F0F        (when n > 4)
+//   y = (y | (y << 2)) & 0x33333333        (when n > 2)
+//   y = (y | (y << 1)) & 0x55555555
+//   if offset == 1:  y = y << 1
+//
+// vs the per-bit form: 4*n_g ops per source becomes ≈ 12 ops per source
+// (independent of n_g for n_g ≤ 16). For 2-D Morton with n=10 this is a
+// ~3-4× reduction in per-access arithmetic. Pure ``arith`` ops — portable
+// across x86, ARM, GPU.
+//
+// Soundness: the rewrite is bit-exact for non-negative x with x < (1<<n).
+// Strength reduction (above) gates on ``isProvablyNonNegative`` for the
+// upstream div/rem→shift conversions, so by the time this pattern fires
+// every shrui/andi has the right semantics. The ``& ((1<<n)-1)`` head of
+// the bit-magic chain truncates any high garbage explicitly.
+// ============================================================================
+
+struct BitTerm { Value src; unsigned K; unsigned S; };
+
+static std::optional<uint64_t> matchConstUInt(Value v) {
+  APInt a;
+  if (matchPattern(v, m_ConstantInt(&a))) {
+    if (a.isNonNegative()) return a.getZExtValue();
+  }
+  return std::nullopt;
+}
+
+/// If a constant is a power of 2, return log2; else nullopt.
+static std::optional<unsigned> constLog2(Value v) {
+  auto c = matchConstUInt(v);
+  if (!c || *c == 0) return std::nullopt;
+  if ((*c & (*c - 1)) != 0) return std::nullopt;     // not power of 2
+  return static_cast<unsigned>(llvm::Log2_64(*c));
+}
+
+/// Match a value as "bit 0 extraction": ``andi(x, 1)`` OR ``remsi(x, 2)`` OR
+/// ``remui(x, 2)``.  Returns the inner ``x`` on success.
+static std::optional<Value> matchBitZero(Value v) {
+  if (auto andOp = v.getDefiningOp<arith::AndIOp>()) {
+    if (auto m = matchConstUInt(andOp.getRhs()); m && *m == 1ULL)
+      return andOp.getLhs();
+    if (auto m = matchConstUInt(andOp.getLhs()); m && *m == 1ULL)
+      return andOp.getRhs();
+    return std::nullopt;
+  }
+  if (auto rem = v.getDefiningOp<arith::RemUIOp>()) {
+    if (auto m = matchConstUInt(rem.getRhs()); m && *m == 2ULL)
+      return rem.getLhs();
+    return std::nullopt;
+  }
+  if (auto rem = v.getDefiningOp<arith::RemSIOp>()) {
+    if (auto m = matchConstUInt(rem.getRhs()); m && *m == 2ULL)
+      return rem.getLhs();
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+/// Match a single "shift right by k" step: ``shrui(x, k)`` OR
+/// ``divui(x, 2^k)`` OR ``divsi(x, 2^k)``. Returns (x, k) on success.
+static std::optional<std::pair<Value, unsigned>> matchShiftRightOne(Value v) {
+  if (auto shr = v.getDefiningOp<arith::ShRUIOp>()) {
+    auto k = matchConstUInt(shr.getRhs());
+    if (!k) return std::nullopt;
+    return std::make_pair(shr.getLhs(), static_cast<unsigned>(*k));
+  }
+  if (auto dv = v.getDefiningOp<arith::DivUIOp>()) {
+    auto k = constLog2(dv.getRhs());
+    if (!k) return std::nullopt;
+    return std::make_pair(dv.getLhs(), *k);
+  }
+  if (auto dv = v.getDefiningOp<arith::DivSIOp>()) {
+    auto k = constLog2(dv.getRhs());
+    if (!k) return std::nullopt;
+    return std::make_pair(dv.getLhs(), *k);
+  }
+  return std::nullopt;
+}
+
+/// Walk a chain of shift-right (shrui / divui / divsi) operations,
+/// accumulating the total shift amount.  Returns (deepest_source, total_k).
+/// If ``v`` itself is not a shift, returns (v, 0) — distinguishable from
+/// a no-op only by the K value.
+static std::pair<Value, unsigned> matchShiftRightChain(Value v) {
+  unsigned K = 0;
+  while (true) {
+    auto step = matchShiftRightOne(v);
+    if (!step) break;
+    K += step->second;
+    v = step->first;
+  }
+  return std::make_pair(v, K);
+}
+
+/// Match a "shift left by k" operation: ``shli(x, k)`` OR ``muli(x, 2^k)``.
+/// Returns (x, k) on success.
+static std::optional<std::pair<Value, unsigned>> matchShiftLeft(Value v) {
+  if (auto shl = v.getDefiningOp<arith::ShLIOp>()) {
+    auto k = matchConstUInt(shl.getRhs());
+    if (!k) return std::nullopt;
+    return std::make_pair(shl.getLhs(), static_cast<unsigned>(*k));
+  }
+  if (auto mul = v.getDefiningOp<arith::MulIOp>()) {
+    if (auto k = constLog2(mul.getRhs()))
+      return std::make_pair(mul.getLhs(), *k);
+    if (auto k = constLog2(mul.getLhs()))
+      return std::make_pair(mul.getRhs(), *k);
+  }
+  return std::nullopt;
+}
+
+static std::optional<BitTerm> matchBitTerm(Value v) {
+  unsigned S = 0;
+  // Outer placement: shli(x, S) or muli(x, 2^S).  Optional (S=0).
+  if (auto sl = matchShiftLeft(v)) {
+    S = sl->second;
+    v = sl->first;
+  }
+  // Bit-zero extraction: andi(_, 1), remsi(_, 2), or remui(_, 2).
+  auto z = matchBitZero(v);
+  if (!z) return std::nullopt;
+  Value rest = *z;
+  // Walk the full shift-right chain.  Canonicalize/CSE may compose multiple
+  // shifts into nested ops (e.g. ``shrui(shrui(flat, 6), k)`` for the i-bits
+  // of a flat-merged Morton index after lego-to-arith); we want the deepest
+  // non-shift source so that all bit-extracts on the same logical coordinate
+  // group together.
+  auto [src, K] = matchShiftRightChain(rest);
+  return BitTerm{src, K, S};
+}
+
+static void flattenAddTree(Value v, SmallVectorImpl<Value> &leaves) {
+  if (auto add = v.getDefiningOp<arith::AddIOp>()) {
+    flattenAddTree(add.getLhs(), leaves);
+    flattenAddTree(add.getRhs(), leaves);
+  } else {
+    leaves.push_back(v);
+  }
+}
+
+/// Emit one stage of the bit-magic spread:
+///   y = (y | (y << shift)) & mask
+static Value emitSpreadStage(OpBuilder &b, Location loc, Value y, Type ty,
+                             unsigned shift, uint64_t mask) {
+  Value sft = arith::ConstantOp::create(b, loc, ty, b.getIntegerAttr(ty, shift));
+  Value shifted = arith::ShLIOp::create(b, loc, y, sft);
+  Value ored = arith::OrIOp::create(b, loc, y, shifted);
+  Value mskC = arith::ConstantOp::create(b, loc, ty, b.getIntegerAttr(ty, mask));
+  return arith::AndIOp::create(b, loc, ored, mskC);
+}
+
+/// Emit the standard 4-stage 2-D Morton bit-spread, truncated to ``nbits``
+/// input bits. Returns a Value of type ``ty`` whose low 2*nbits bits hold
+/// the spread result.
+static Value emitMortonSpread(OpBuilder &b, Location loc, Value src, Type ty,
+                              unsigned nbits) {
+  // Truncate input to nbits.
+  uint64_t headMask = (nbits >= 64) ? ~0ULL : ((1ULL << nbits) - 1ULL);
+  Value y = src;
+  if (y.getType() != ty) {
+    if (isa<IndexType>(y.getType()) && isa<IntegerType>(ty))
+      y = arith::IndexCastOp::create(b, loc, ty, y);
+    else if (isa<IntegerType>(y.getType()) && isa<IndexType>(ty))
+      y = arith::IndexCastOp::create(b, loc, ty, y);
+  }
+  Value mskHead = arith::ConstantOp::create(
+      b, loc, ty, b.getIntegerAttr(ty, headMask));
+  y = arith::AndIOp::create(b, loc, y, mskHead);
+
+  if (nbits > 8) y = emitSpreadStage(b, loc, y, ty, 8, 0x00FF00FFULL);
+  if (nbits > 4) y = emitSpreadStage(b, loc, y, ty, 4, 0x0F0F0F0FULL);
+  if (nbits > 2) y = emitSpreadStage(b, loc, y, ty, 2, 0x33333333ULL);
+  y = emitSpreadStage(b, loc, y, ty, 1, 0x55555555ULL);
+  return y;
+}
+
+struct RecognizeBitSpread : public OpRewritePattern<arith::AddIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::AddIOp op,
+                                PatternRewriter &rewriter) const override {
+    // Only fire on the *root* of an addi tree (no addi user).
+    for (Operation *user : op->getUsers())
+      if (isa<arith::AddIOp>(user))
+        return failure();
+
+    SmallVector<Value> leaves;
+    flattenAddTree(op.getResult(), leaves);
+    if (leaves.size() < 4) return failure();      // tiny trees aren't worth it.
+
+    // Decompose every leaf into a bit-extract-and-place term.
+    SmallVector<BitTerm, 32> terms;
+    terms.reserve(leaves.size());
+    for (Value leaf : leaves) {
+      auto bt = matchBitTerm(leaf);
+      if (!bt) return failure();
+      terms.push_back(*bt);
+    }
+
+    // Group by source.
+    llvm::SmallDenseMap<Value, SmallVector<BitTerm, 16>, 4> groups;
+    for (auto &t : terms) groups[t.src].push_back(t);
+    if (groups.empty()) return failure();
+
+    struct GroupInfo {
+      Value src;
+      unsigned nbits;        // number of contiguous bits being spread
+      unsigned offset;       // S_min: 0 or 1 (which Morton lane)
+      unsigned k_min;        // pre-shift amount applied to src before spread
+    };
+    SmallVector<GroupInfo, 4> infos;
+    infos.reserve(groups.size());
+    for (auto &kv : groups) {
+      auto &grp = kv.second;
+      std::sort(grp.begin(), grp.end(),
+                [](const BitTerm &a, const BitTerm &b) { return a.K < b.K; });
+      if (grp.empty()) return failure();
+      // K = k_min, k_min+1, ..., k_min+n-1 (contiguous from some k_min ≥ 0).
+      unsigned k_min = grp[0].K;
+      for (size_t i = 0; i < grp.size(); ++i)
+        if (grp[i].K != k_min + static_cast<unsigned>(i))
+          return failure();
+      // S = offset + 2*i (stride-2 spread for 2-D Morton).
+      unsigned offset = grp[0].S;
+      if (offset > 1) return failure();
+      for (size_t i = 0; i < grp.size(); ++i)
+        if (grp[i].S != offset + 2u * static_cast<unsigned>(i))
+          return failure();
+      unsigned nbits = static_cast<unsigned>(grp.size());
+      if (nbits == 0 || nbits > 16) return failure();
+      infos.push_back({kv.first, nbits, offset, k_min});
+    }
+
+    // All checks passed — emit the bit-magic for each group, OR together.
+    Location loc = op.getLoc();
+    Type resTy = op.getType();
+    Value acc;
+    for (auto &g : infos) {
+      // Pre-shift source by k_min if needed (e.g. if the per-bit form was
+      // composed with an outer shrui by `k_min` during canonicalize).
+      Value src = g.src;
+      if (g.k_min > 0) {
+        Value kc = arith::ConstantOp::create(
+            rewriter, loc, resTy, rewriter.getIntegerAttr(resTy, g.k_min));
+        if (src.getType() != resTy) {
+          if (isa<IndexType>(src.getType()) && isa<IntegerType>(resTy))
+            src = arith::IndexCastOp::create(rewriter, loc, resTy, src);
+          else if (isa<IntegerType>(src.getType()) && isa<IndexType>(resTy))
+            src = arith::IndexCastOp::create(rewriter, loc, resTy, src);
+        }
+        src = arith::ShRUIOp::create(rewriter, loc, src, kc);
+      }
+      Value spread = emitMortonSpread(rewriter, loc, src, resTy, g.nbits);
+      if (g.offset == 1) {
+        Value one = arith::ConstantOp::create(
+            rewriter, loc, resTy, rewriter.getIntegerAttr(resTy, 1));
+        spread = arith::ShLIOp::create(rewriter, loc, spread, one);
+      }
+      acc = acc ? arith::OrIOp::create(rewriter, loc, acc, spread).getResult()
+                : spread;
+    }
+    rewriter.replaceOp(op, acc);
+    return success();
+  }
+};
+
 struct LegoStrengthReductionPass
     : public mlir::lego::impl::LegoStrengthReductionPassBase<
           LegoStrengthReductionPass> {
@@ -513,13 +797,12 @@ struct LegoStrengthReductionPass
     RewritePatternSet patterns(&getContext());
     patterns.add<StrengthReduceDiv, StrengthReduceRem,
                  StrengthReduceDivSI, StrengthReduceRemSI,
-                 StrengthReduceMul>(&getContext());
+                 StrengthReduceMul, RecognizeBitSpread>(&getContext());
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
     }
   }
 };
-
 } // namespace
 
 namespace mlir {
