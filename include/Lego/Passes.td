@@ -299,6 +299,46 @@ def LegoVectorizeScanPass
   ];
 }
 
+def LegoVectorizeFilteredReducePass
+    : Pass<"lego-vectorize-filtered-reduce", "mlir::func::FuncOp"> {
+  let summary = "Recognize filtered (predicated) reductions and emit a "
+                "vector accumulator + per-chunk masked select";
+  let description = [{
+    Recognises the canonical filtered-reduction pattern that
+    ``clang -O3`` scalarises:
+
+        acc = identity
+        for i in 0..N:
+            if cond[i] <pred> threshold:
+                acc = combine(acc, A[i])
+
+    where ``combine`` is one of ``arith.addf`` / ``mulf`` /
+    ``maximumf`` / ``minimumf``.  Detected as ``scf.for`` with one float
+    iter_arg and body ``cmpf + scf.if -> T { combine; yield } else { yield acc }``.
+
+    Rewrites to a strip-mined vector loop with a vector accumulator:
+    per chunk, compute ``mask = cmpf <pred>, v_cond, threshold`` and
+    ``contrib = select(mask, v_a, identity)`` — non-passing lanes get the
+    combine's identity element so they don't perturb the accumulator.
+    A single ``vector.reduction`` collapses to scalar after the loop;
+    the original initAcc is folded back in.
+
+    Uses upstream MLIR vector ops only — no architecture-specific
+    intrinsics.
+  }];
+  let constructor = "mlir::lego::createLegoVectorizeFilteredReducePass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"target", "target", "std::string", /*default=*/"\"avx512\"",
+           "Target backend (controls vector lane width)">,
+  ];
+}
+
 def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
   let summary = "Layout-agnostic vectorization for LEGO via symbolic stride solve";
   let description = [{

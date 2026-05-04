@@ -95,6 +95,15 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
 
+  // Recognise filtered (predicated) reductions: clang scalarises the
+  // data-dependent branch.  LEGO emits a vector accumulator + per-chunk
+  // arith.cmpf + arith.select(mask, v, identity) + combine; one
+  // vector.reduction at the end.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      createLegoVectorizeFilteredReducePass("avx512"));
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+
   pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("avx512"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.

@@ -365,6 +365,11 @@ class _Compiler(_BaseCompiler):
         if name == "rsqrt":
             val, _ = self._expr(node.args[0])
             return (self.ctx.rsqrt(val), F32)
+        if name in ("max", "min"):
+            a, _ = self._expr(node.args[0])
+            b, _ = self._expr(node.args[1])
+            op = self.ctx.maximumf if name == "max" else self.ctx.minimumf
+            return (op(a, b), F32)
 
         # GPU-only constructs — raise with a helpful message
         _gpu_only = {

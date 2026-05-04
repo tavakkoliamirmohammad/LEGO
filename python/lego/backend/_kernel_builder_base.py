@@ -186,6 +186,14 @@ class _KernelContextBase:
         from lego.mlir.ir import Operation
         return Operation.create("math.rsqrt", results=[val.type], operands=[val]).result
 
+    def maximumf(self, a, b):
+        """Emit arith.maximumf."""
+        return arith_dialect.MaximumFOp(a, b).result
+
+    def minimumf(self, a, b):
+        """Emit arith.minimumf."""
+        return arith_dialect.MinimumFOp(a, b).result
+
     # --- Comparisons ---
 
     def lt(self, a, b):

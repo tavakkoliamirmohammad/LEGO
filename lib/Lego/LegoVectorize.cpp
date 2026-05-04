@@ -172,6 +172,7 @@ static constexpr llvm::StringRef kVectorizeSkipAttrs[] = {
     "lego.argmin_done",
     "lego.scatter_add_done",
     "lego.scan_done",
+    "lego.filtered_reduce_done",
 };
 
 static bool hasVectorizeSkipAttr(scf::ForOp forOp) {

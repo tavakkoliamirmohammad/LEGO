@@ -62,15 +62,29 @@ static int64_t getLanesForType(llvm::StringRef target, int64_t elemBytes) {
   return 16 / std::max<int64_t>(elemBytes, 1);
 }
 
+/// Which associative combine the loop is folding with — drives identity
+/// constant + emitted vector op.
+enum class ScanKind { AddF, MulF, MaximumF, MinimumF };
+
 /// Decoded shape of an inclusive prefix-scan loop.
 struct ScanShape {
-  memref::LoadOp  inLoad;     // A[i] — the streamed-in element
-  arith::AddFOp   addOp;      // arith.addf %acc, %A[i]
-  memref::StoreOp outStore;   // B[i] = newAcc
-  Value           initAcc;    // initial accumulator (iter_arg init)
+  memref::LoadOp   inLoad;     // A[i] — the streamed-in element
+  Operation       *combineOp;  // arith.addf / mulf / maximumf / minimumf
+  memref::StoreOp  outStore;   // B[i] = newAcc
+  Value            initAcc;    // initial accumulator (iter_arg init)
+  ScanKind         kind;
 };
 
 static constexpr llvm::StringRef kScanDoneAttr = "lego.scan_done";
+
+/// Identify the combine op kind, or std::nullopt if not a supported scan op.
+static std::optional<ScanKind> classifyCombine(Operation *op) {
+  if (isa<arith::AddFOp>(op))     return ScanKind::AddF;
+  if (isa<arith::MulFOp>(op))     return ScanKind::MulF;
+  if (isa<arith::MaximumFOp>(op)) return ScanKind::MaximumF;
+  if (isa<arith::MinimumFOp>(op)) return ScanKind::MinimumF;
+  return std::nullopt;
+}
 
 static std::optional<ScanShape> matchScanPattern(scf::ForOp forOp) {
   if (forOp->hasAttr(kScanDoneAttr)) return std::nullopt;
@@ -88,12 +102,14 @@ static std::optional<ScanShape> matchScanPattern(scf::ForOp forOp) {
   Block *body = forOp.getBody();
   Value iv = forOp.getInductionVar();
 
-  arith::AddFOp addOp;
+  Operation *combineOp = nullptr;
+  std::optional<ScanKind> combineKind;
   memref::StoreOp outStore;
   for (Operation &op : body->getOperations()) {
-    if (auto a = dyn_cast<arith::AddFOp>(&op)) {
-      if (addOp) return std::nullopt;
-      addOp = a;
+    if (auto k = classifyCombine(&op)) {
+      if (combineOp) return std::nullopt;       // only one combine
+      combineOp   = &op;
+      combineKind = k;
     } else if (auto s = dyn_cast<memref::StoreOp>(&op)) {
       if (outStore) return std::nullopt;
       outStore = s;
@@ -103,11 +119,11 @@ static std::optional<ScanShape> matchScanPattern(scf::ForOp forOp) {
       return std::nullopt;
     }
   }
-  if (!addOp || !outStore) return std::nullopt;
+  if (!combineOp || !outStore || !combineKind) return std::nullopt;
 
-  // The addf must combine the iter_arg with a unit-stride load on iv.
-  Value lhs = addOp.getLhs();
-  Value rhs = addOp.getRhs();
+  // The combine op must mix the iter_arg with a unit-stride load on iv.
+  Value lhs = combineOp->getOperand(0);
+  Value rhs = combineOp->getOperand(1);
   memref::LoadOp inLoad;
   if (lhs == iaAcc) {
     inLoad = rhs.getDefiningOp<memref::LoadOp>();
@@ -120,53 +136,100 @@ static std::optional<ScanShape> matchScanPattern(scf::ForOp forOp) {
   if (inLoad.getIndices().size() != 1) return std::nullopt;
   if (inLoad.getIndices().front() != iv) return std::nullopt;
 
-  // The store must write addf's result to B[iv].
-  if (outStore.getValueToStore() != addOp.getResult()) return std::nullopt;
+  // The store must write the combine's result to B[iv].
+  Value combined = combineOp->getResult(0);
+  if (outStore.getValueToStore() != combined) return std::nullopt;
   if (outStore.getIndices().size() != 1) return std::nullopt;
   if (outStore.getIndices().front() != iv) return std::nullopt;
 
-  // The scf.for must yield addf's result.
+  // The scf.for must yield the combine's result.
   auto y = cast<scf::YieldOp>(body->getTerminator());
   if (y.getNumOperands() != 1) return std::nullopt;
-  if (y.getOperand(0) != addOp.getResult()) return std::nullopt;
+  if (y.getOperand(0) != combined) return std::nullopt;
 
   ScanShape shape;
-  shape.inLoad   = inLoad;
-  shape.addOp    = addOp;
-  shape.outStore = outStore;
-  shape.initAcc  = forOp.getInits().front();
+  shape.inLoad    = inLoad;
+  shape.combineOp = combineOp;
+  shape.outStore  = outStore;
+  shape.initAcc   = forOp.getInits().front();
+  shape.kind      = *combineKind;
   return shape;
 }
 
-/// Build a Hillis-Steele in-vector prefix sum: input ``v`` of width L,
-/// returns the inclusive prefix-summed vector of the same width.  Uses
-/// ``vector.shuffle`` + ``arith.addf`` for log2(L) stages.
-static Value hillisSteele(OpBuilder &b, Location loc, Value v, int64_t L) {
-  auto vecTy = cast<VectorType>(v.getType());
-  Type elemTy = vecTy.getElementType();
+/// Emit the appropriate associative combine on two SSA values — used by
+/// hillisSteele for the in-vector tree and by the final per-chunk merge.
+static Value emitCombine(OpBuilder &b, Location loc, ScanKind kind,
+                         Value lhs, Value rhs) {
+  switch (kind) {
+    case ScanKind::AddF:
+      return arith::AddFOp::create(b, loc, lhs, rhs).getResult();
+    case ScanKind::MulF:
+      return arith::MulFOp::create(b, loc, lhs, rhs).getResult();
+    case ScanKind::MaximumF:
+      return arith::MaximumFOp::create(b, loc, lhs, rhs).getResult();
+    case ScanKind::MinimumF:
+      return arith::MinimumFOp::create(b, loc, lhs, rhs).getResult();
+  }
+  llvm_unreachable("unknown ScanKind");
+}
 
-  // Zero-padding vector for the shifted-in lanes.
-  Value zero = arith::ConstantOp::create(b, loc, vecTy,
-                                         b.getZeroAttr(vecTy));
+/// Identity element of the combine op as a vector constant of the
+/// matching shape (used to pad shifted-in lanes during Hillis-Steele).
+///   AddF      → 0
+///   MulF      → 1
+///   MaximumF  → -inf
+///   MinimumF  → +inf
+static Value emitIdentityVector(OpBuilder &b, Location loc, ScanKind kind,
+                                VectorType vecTy) {
+  auto fpTy = cast<FloatType>(vecTy.getElementType());
+  APFloat val(fpTy.getFloatSemantics());
+  switch (kind) {
+    case ScanKind::AddF:
+      val = APFloat::getZero(fpTy.getFloatSemantics());
+      break;
+    case ScanKind::MulF:
+      val = APFloat(fpTy.getFloatSemantics(), 1);
+      break;
+    case ScanKind::MaximumF:
+      val = APFloat::getInf(fpTy.getFloatSemantics(), /*Negative=*/true);
+      break;
+    case ScanKind::MinimumF:
+      val = APFloat::getInf(fpTy.getFloatSemantics(), /*Negative=*/false);
+      break;
+  }
+  auto attr = DenseElementsAttr::get(vecTy, FloatAttr::get(fpTy, val));
+  return arith::ConstantOp::create(b, loc, vecTy, attr).getResult();
+}
+
+/// Build a Hillis-Steele in-vector inclusive prefix scan with combine
+/// op ``kind``: input ``v`` of width L, returns the prefix-combined vector
+/// of the same width.  Uses ``vector.shuffle`` + the combine op for
+/// log2(L) stages.  Shifted-in lanes are padded with the combine's
+/// identity element so the partial result matches the algebraic spec.
+static Value hillisSteele(OpBuilder &b, Location loc, ScanKind kind,
+                          Value v, int64_t L) {
+  auto vecTy = cast<VectorType>(v.getType());
+
+  // Identity-padding vector for the shifted-in lanes.
+  Value ident = emitIdentityVector(b, loc, kind, vecTy);
 
   // Need L to be a power of 2 so log2(L) is exact.
   assert(llvm::isPowerOf2_64(L) && "Hillis-Steele requires L a power of 2");
   int64_t stages = llvm::Log2_64(L);
   for (int64_t s = 0; s < stages; ++s) {
     int64_t shift = int64_t{1} << s;          // 1, 2, 4, ..., L/2
-    // Shuffle indices: result[j] = (j < shift) ? zero[j] : v[j - shift].
-    // Indices [0, L) refer to v; indices [L, 2L) refer to zero.
+    // Shuffle indices: result[j] = (j < shift) ? ident[j] : v[j - shift].
+    // Indices [0, L) refer to v; indices [L, 2L) refer to ident.
     SmallVector<int64_t> mask(L);
     for (int64_t j = 0; j < L; ++j) {
       if (j < shift)
-        mask[j] = L + j;       // pull from zero vector
+        mask[j] = L + j;       // pull from identity-pad vector
       else
         mask[j] = j - shift;   // pull from v at j-shift
     }
-    Value shifted = vector::ShuffleOp::create(b, loc, v, zero, mask);
-    v = arith::AddFOp::create(b, loc, v, shifted);
+    Value shifted = vector::ShuffleOp::create(b, loc, v, ident, mask);
+    v = emitCombine(b, loc, kind, v, shifted);
   }
-  (void)elemTy;
   return v;
 }
 
@@ -216,11 +279,14 @@ struct VectorizeScanPattern : public OpRewritePattern<scf::ForOp> {
     Value stripUb = arith::AddIOp::create(rewriter, loc, lb, stripBody);
 
     auto vecTy = VectorType::get({L}, fpTy);
+    // Pad value for transfer_read of A[i:i+L].  Strip-mined to a multiple
+    // of L so the read is always in-bounds — pad value is unused, just a
+    // syntactic requirement.
     Value pad = arith::ConstantOp::create(rewriter, loc, fpTy,
                                           rewriter.getZeroAttr(fpTy));
 
     // Broadcast initAcc into a vector — used as the iter_arg of the vec
-    // loop.  Carrying a vector (not a scalar f32) prevents the main
+    // loop.  Carrying a vector (not a scalar fp) prevents the main
     // ``lego-vectorize`` pass from re-strip-mining this loop and
     // mangling our hand-rolled Hillis-Steele body.
     Value vecInitAcc =
@@ -241,13 +307,12 @@ struct VectorizeScanPattern : public OpRewritePattern<scf::ForOp> {
                     ValueRange{iv}, pad,
                     /*inBounds=*/ArrayRef<bool>{true}).getResult();
 
-      // 2. In-vector inclusive prefix sum.
-      v = hillisSteele(rewriter, loc, v, L);
+      // 2. In-vector inclusive prefix combine.
+      v = hillisSteele(rewriter, loc, shape->kind, v, L);
 
-      // 3. Add the running carry.  Only the last lane of vAcc carries
-      //    real signal (all lanes hold the same broadcast value at this
-      //    point because vAcc is always produced by a broadcast).
-      Value vout = arith::AddFOp::create(rewriter, loc, v, vAcc);
+      // 3. Combine the running carry.  All lanes of vAcc hold the same
+      //    broadcast value (carried last lane from the previous chunk).
+      Value vout = emitCombine(rewriter, loc, shape->kind, v, vAcc);
 
       // 4. Store the chunk.
       vector::TransferWriteOp::create(
