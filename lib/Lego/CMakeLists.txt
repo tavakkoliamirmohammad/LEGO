@@ -113,6 +113,7 @@ add_mlir_dialect_library(MLIRLego
   LegoVectorizeAnalysis.cpp
   LegoVectorize.cpp
   LegoVectorizeCompact.cpp
+  LegoVectorizeScatterAdd.cpp
   Passes.cpp
   # Verification
   LegoGenerateBoundsChecks.cpp

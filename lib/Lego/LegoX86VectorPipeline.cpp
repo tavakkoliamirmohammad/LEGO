@@ -70,6 +70,14 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
 
+  // NOTE: lego-vectorize-scatter-add (count[bin[i]] += A[i]) is implemented
+  // (LegoVectorizeScatterAdd.cpp) but NOT wired by default because gather/
+  // scatter throughput is hardware-dependent: on AMD Zen 4 ``vpscatterdps``
+  // is microcoded at ~80 cycles per 16-lane scatter, so the vectorised path
+  // loses to clang's unrolled scalar.  On Intel Sapphire Rapids gather/
+  // scatter are competitive and the pass should help.  Run it explicitly
+  // via ``--lego-vectorize-scatter-add`` to opt in on Intel hardware.
+
   pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("avx512"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.

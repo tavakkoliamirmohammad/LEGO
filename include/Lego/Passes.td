@@ -156,6 +156,54 @@ def LegoVectorizeCompactPass
   ];
 }
 
+def LegoVectorizeScatterAddPass
+    : Pass<"lego-vectorize-scatter-add", "mlir::func::FuncOp"> {
+  let summary = "Recognize scatter-add / histogram loops and emit "
+                "vector.gather + vector.scatter with conflict serialization";
+  let description = [{
+    Recognizes the canonical scatter-add / histogram pattern that
+    ``clang -O3`` scalarises:
+
+        for i in 0..N:
+            b = bin[i]
+            count[b] = count[b] + delta(i)
+
+    where ``delta(i)`` may be a unit-stride load (``A[i]``) or a
+    loop-invariant scalar.  The data-dependent index ``b`` defeats
+    ``clang``'s auto-vec because it cannot prove conflict freedom.
+
+    Detected as ``scf.for`` (no iter_args, step=1) whose body is
+    ``load(bin[i]) + index_cast + load(count[b]) + addf + store(count[b])``.
+
+    Rewrites to a strip-mined vector loop emitting:
+
+      * ``vector.transfer_read``  (bin[i:i+L])
+      * ``L-1`` ``vector.shuffle`` + ``arith.cmpi`` + ``vector.reduction`` to
+        detect any pair of conflicting lanes (portable conflict detection)
+      * ``scf.if`` chooses between:
+          - scalar fallback (if any conflicts)
+          - ``vector.gather`` + ``arith.addf`` + ``vector.scatter`` (fast path)
+
+    Uses upstream MLIR vector ops only — no architecture-specific
+    intrinsics.  Falls back to the original scalar body for the
+    ``(N mod L)`` tail.
+
+    Runs *before* ``lego-vectorize`` so the main vectoriser never sees
+    the rewritten loop.
+  }];
+  let constructor = "mlir::lego::createLegoVectorizeScatterAddPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+  ];
+  let options = [
+    Option<"target", "target", "std::string", /*default=*/"\"avx512\"",
+           "Target backend (controls vector lane width)">,
+  ];
+}
+
 def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
   let summary = "Layout-agnostic vectorization for LEGO via symbolic stride solve";
   let description = [{
