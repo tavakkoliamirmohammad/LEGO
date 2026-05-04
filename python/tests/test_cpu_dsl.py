@@ -24,7 +24,7 @@ Run::
 import numpy as np
 import pytest
 
-from lego.backend.cpu_dsl import cpu_kernel, Buffer, tile_range  # noqa: F401
+from lego.backend.cpu_dsl import cpu_kernel, Buffer  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -34,31 +34,31 @@ from lego.backend.cpu_dsl import cpu_kernel, Buffer, tile_range  # noqa: F401
 
 _N_SAXPY = 1024
 
-@cpu_kernel(grid=(_N_SAXPY,), tile=(8,))
+@cpu_kernel
 def _saxpy(a: float, X: Buffer[_N_SAXPY], Y: Buffer[_N_SAXPY]):
-    for i in tile_range:
+    for i in range(_N_SAXPY):
         Y[i] = a * X[i] + Y[i]
 
 
 _N_VECADD = 512
 
-@cpu_kernel(grid=(_N_VECADD,), tile=(8,))
+@cpu_kernel
 def _vecadd(X: Buffer[_N_VECADD], Y: Buffer[_N_VECADD], Z: Buffer[_N_VECADD]):
-    for i in tile_range:
+    for i in range(_N_VECADD):
         Z[i] = X[i] + Y[i]
 
 
 _N_SCALE = 256
 
-@cpu_kernel(grid=(_N_SCALE,), tile=(8,))
+@cpu_kernel
 def _scale(a: float, Y: Buffer[_N_SCALE]):
-    for i in tile_range:
+    for i in range(_N_SCALE):
         Y[i] = a * Y[i]
 
 
 _N_FILL = 128
 
-@cpu_kernel(grid=(_N_FILL,))
+@cpu_kernel
 def _fill_zeros(X: Buffer[_N_FILL]):
     for i in range(_N_FILL):
         X[i] = 0.0
@@ -70,10 +70,9 @@ def _fill_zeros(X: Buffer[_N_FILL]):
 
 def test_module_imports():
     """Smoke test: cpu_dsl module imports without error."""
-    from lego.backend.cpu_dsl import cpu_kernel, Buffer, tile_range
+    from lego.backend.cpu_dsl import cpu_kernel, Buffer
     assert callable(cpu_kernel)
     assert Buffer is not None
-    assert tile_range is not None
 
 
 def test_cpu_builder_imports():
@@ -260,9 +259,9 @@ def test_range_loop_runs():
 
 _N_BITWISE = 256
 
-@cpu_kernel(grid=(_N_BITWISE,), tile=(16,))
+@cpu_kernel
 def _bitwise_gather(A: Buffer[_N_BITWISE], B: Buffer[_N_BITWISE]):
-    for i in tile_range:
+    for i in range(_N_BITWISE):
         # Simple bit-interleave: spread even/odd bits, reinterleave.
         ti = i & 0x5555
         tj = (i >> 1) & 0x5555
