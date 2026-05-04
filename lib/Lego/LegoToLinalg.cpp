@@ -104,17 +104,33 @@ collectAffineAccesses(scf::ForOp forOp) {
     if (!extracted)
       return std::nullopt;
 
-    // Conservative scope (this commit): only the pure-identity case where
-    // the address is exactly ``d0`` — i.e. unit-stride access starting at
-    // the IV with no offset. This covers saxpy-class kernels. Stencils
-    // (``A[i + 1]``), strided access, and brick layouts fall through to
-    // the existing custom lego-vectorize which handles them correctly.
+    // Allowed forms:
+    //   - identity:        d0
+    //   - non-neg offset:  d0 + c  (c >= 0)  — for inputs ONLY
     //
-    // Wider coverage (offsets, masked vectorization for non-divisible
-    // sizes, multi-dim nests) is staged in subsequent commits — each
-    // gated by dashboard A/B to ensure no regressions.
-    auto dim = dyn_cast<AffineDimExpr>(extracted->expr);
-    if (!dim || dim.getPosition() != 0)
+    // Writes are restricted to identity (``d0``) so that the output
+    // subview from linalg::tile doesn't go OOB at the last tile.
+    // Non-affine (floordiv/mod), negative constants, symbols all fall
+    // through to the custom lego-vectorize.
+    auto isAcceptable = [&](AffineExpr e, bool forWrite) -> bool {
+      if (!e) return false;
+      if (auto dim = dyn_cast<AffineDimExpr>(e)) return dim.getPosition() == 0;
+      if (forWrite) return false;  // writes must be identity
+      // Inputs may have form ``d0 + c`` with c >= 0.
+      auto bin = dyn_cast<AffineBinaryOpExpr>(e);
+      if (!bin || bin.getKind() != AffineExprKind::Add) return false;
+      auto dim = dyn_cast<AffineDimExpr>(bin.getLHS());
+      auto cst = dyn_cast<AffineConstantExpr>(bin.getRHS());
+      if (!dim) {
+        // Try the swapped order.
+        dim = dyn_cast<AffineDimExpr>(bin.getRHS());
+        cst = dyn_cast<AffineConstantExpr>(bin.getLHS());
+      }
+      if (!dim || !cst) return false;
+      if (dim.getPosition() != 0) return false;
+      return cst.getValue() >= 0;
+    };
+    if (!isAcceptable(extracted->expr, /*forWrite=*/isWrite))
       return std::nullopt;
 
     AccessInfo info;
