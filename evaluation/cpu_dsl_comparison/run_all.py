@@ -134,8 +134,8 @@ _C_BASELINE_MAP = {
 }
 
 
-def _run_c_binary(bin_path: Path, N) -> float:
-    """Run a C baseline binary, return ms_per_call or NaN."""
+def _run_c_binary_once(bin_path: Path, N) -> float:
+    """Run a C baseline binary once, return ms_per_call or NaN."""
     if not bin_path.exists():
         return float('nan')
     cmd = [str(bin_path)]
@@ -151,40 +151,56 @@ def _run_c_binary(bin_path: Path, N) -> float:
         return float('nan')
 
 
-def run_c_baseline(cand_name: str) -> float:
+def _run_c_binary(bin_path: Path, N, repeats: int = 1) -> float:
+    """Run a C baseline `repeats` times, return min ms_per_call.
+
+    Same min-of-N rationale as ``run_measure``: we want the steady-state
+    best-case the C compiler produces, free of preemption noise.
+    """
+    if repeats <= 1:
+        return _run_c_binary_once(bin_path, N)
+    vals = []
+    for _ in range(repeats):
+        v = _run_c_binary_once(bin_path, N)
+        if isinstance(v, float) and not math.isnan(v):
+            vals.append(v)
+    return min(vals) if vals else float('nan')
+
+
+def run_c_baseline(cand_name: str, repeats: int = 1) -> float:
     """Run legacy GCC aggressive binary (backward compat, candidates 01-08)."""
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
     bin_name, N = entry
-    return _run_c_binary(C_BASELINES_DIR / bin_name, N)
+    return _run_c_binary(C_BASELINES_DIR / bin_name, N, repeats)
 
 
-def run_c_O3_baseline(cand_name: str) -> float:
+def run_c_O3_baseline(cand_name: str, repeats: int = 1) -> float:
     """Run GCC -O3 only baseline (CASTLE-aligned, primary verdict basis)."""
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
     bin_name, N = entry
-    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_O3", N)
+    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_O3", N, repeats)
 
 
-def run_c_agg_baseline(cand_name: str) -> float:
+def run_c_agg_baseline(cand_name: str, repeats: int = 1) -> float:
     """Run GCC -O3 -march=native -mavx512f -ffast-math baseline (aggressive)."""
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
     bin_name, N = entry
-    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_agg", N)
+    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_agg", N, repeats)
 
 
-def run_clang_baseline(cand_name: str) -> float:
+def run_clang_baseline(cand_name: str, repeats: int = 1) -> float:
     """Run Clang aggressive baseline (candidates 01-08 only)."""
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
     bin_name, N = entry
-    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang", N)
+    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang", N, repeats)
 
 
 # ---------------------------------------------------------------------------
@@ -282,9 +298,16 @@ def run_measure(cand_dir: Path, sub_env: dict, repeats: int = 1) -> dict:
 
     The script's ``__main__`` block prints one JSON record per invocation
     with timings + a ``verified`` field. With ``repeats > 1`` the candidate
-    is run K times and the timing fields (``numpy_ms``, ``scalar_jit_ms``,
-    ``vec_jit_ms``) are medianed — defends against transient interference
-    on shared nodes where one bad sample can flip a WIN/LOSS verdict.
+    is run K times and the timing fields take the **min** across runs.
+
+    Why min, not median: on a shared node, every measurement is bounded
+    above by hardware speed and pushed up by random external interference
+    (CPU steal, interrupts, neighbor processes, page-placement luck).
+    The min is the closest sample to true hardware throughput; everything
+    above it is noise. With only N=5 samples the median can sit in the
+    middle of a noisy distribution and flip WIN/PARITY across runs even
+    on identical compiled code. This is standard practice for steady-state
+    CPU microbenchmarks (Google Benchmark, Criterion, hyperfine).
     """
     measure_py = _find_consolidated_kernel(cand_dir)
     if measure_py is None:
@@ -305,7 +328,7 @@ def run_measure(cand_dir: Path, sub_env: dict, repeats: int = 1) -> dict:
                 if isinstance(r.get(field), (int, float))
                 and not (isinstance(r.get(field), float) and math.isnan(r.get(field)))]
         if vals:
-            rec[field] = round(_median(vals), 6)
+            rec[field] = round(min(vals), 6)
 
     t_scalar = rec.get("scalar_jit_ms", float('nan'))
     t_vec    = rec.get("vec_jit_ms",    float('nan'))
@@ -363,10 +386,12 @@ def parse_args():
                    help="cpu_dsl compilation target: x86 (default), arm-neon, scalar")
     p.add_argument("--verbose", action="store_true",
                    help="Show C baseline build output")
-    p.add_argument("--measure-repeats", type=int, default=3,
+    p.add_argument("--measure-repeats", type=int, default=5,
                    help="Run each candidate's measure.py N times and median "
-                        "the timing fields. Stabilizes verdicts for tiny "
-                        "kernels with bimodal page-placement noise. Default: 3.")
+                        "the timing fields. Stabilizes verdicts at the "
+                        "WIN/PARITY boundary (1.05x) where one cold-process "
+                        "outlier in a 3-run median can flip classification. "
+                        "Default: 5 (median of 5 tolerates one outlier).")
     return p.parse_args()
 
 
@@ -400,10 +425,10 @@ def main():
     print(f"  [measure] Running {len(cand_dirs)} candidates ...")
     for cand_dir in cand_dirs:
         print(f"    → {cand_dir.name}", flush=True)
-        c_ms      = run_c_baseline(cand_dir.name)   # legacy (01-08 only)
-        c_O3_ms   = run_c_O3_baseline(cand_dir.name)
-        c_agg_ms  = run_c_agg_baseline(cand_dir.name)
-        clang_ms  = run_clang_baseline(cand_dir.name)
+        c_ms      = run_c_baseline(cand_dir.name, repeats=args.measure_repeats)   # legacy (01-08 only)
+        c_O3_ms   = run_c_O3_baseline(cand_dir.name, repeats=args.measure_repeats)
+        c_agg_ms  = run_c_agg_baseline(cand_dir.name, repeats=args.measure_repeats)
+        clang_ms  = run_clang_baseline(cand_dir.name, repeats=args.measure_repeats)
         rec = run_measure(cand_dir, sub_env, repeats=args.measure_repeats)
 
         # Attach C baseline timings
