@@ -157,18 +157,29 @@ static AffineExpr build(Value v, ExtractState &S) {
     return accept(a - b);
   }
 
-  // muli: at least one side must be invariant (constant or pure-symbol).
-  // AffineExpr's operator* with a non-constant non-symbolic side throws.
+  // muli: ``AffineExpr::operator*`` is only well-defined when at least one
+  // side is a compile-time constant. We split into three cases:
+  //   1. Both sides have no dim references AND neither is a constant
+  //      (e.g. ``s0 * s1``, ``s0 * (s1 + s2)``): the whole result is loop-
+  //      invariant w.r.t. every IV — bind it as a single fresh symbol.
+  //   2. At least one side is a compile-time constant: do the AffineExpr
+  //      multiply (this is the canonical ``dim * c`` and ``c * dim`` case).
+  //   3. Otherwise (dim * symbol, dim * dim): non-affine, reject.
   if (auto mul = dyn_cast<arith::MulIOp>(def)) {
     AffineExpr a = build(mul.getLhs(), S);
     AffineExpr b = build(mul.getRhs(), S);
     if (!a || !b) return reject();
-    // AffineExpr multiplication is only valid if at least one side is purely
-    // symbolic-or-constant (no dim references).
-    auto isSymOrConst = [](AffineExpr e) {
-      return e.isSymbolicOrConstant();
-    };
-    if (isSymOrConst(a) || isSymOrConst(b))
+    bool aSymOrConst = a.isSymbolicOrConstant();
+    bool bSymOrConst = b.isSymbolicOrConstant();
+    bool aConst = isa<AffineConstantExpr>(a);
+    bool bConst = isa<AffineConstantExpr>(b);
+    if (aSymOrConst && bSymOrConst && !aConst && !bConst) {
+      // Both sides are pure-symbolic non-constants. ``AffineExpr * AffineExpr``
+      // is only legal when at least one side is a constant, so bind the
+      // whole product as a fresh symbol.
+      return accept(S.getOrCreateSymbol(v));
+    }
+    if (aConst || bConst)
       return accept(a * b);
     return reject();
   }

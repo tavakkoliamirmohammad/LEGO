@@ -13,6 +13,7 @@
 #define GEN_PASS_DEF_LEGOVECTORIZEPASS
 #include "Lego/Passes.h"
 
+#include "LegoAffineExtract.h"
 #include "LegoVectorizeUtils.h"
 #include "Lego/SMTUtils.h"
 
@@ -260,13 +261,30 @@ static int64_t computeMinDepDistance(LoopAnalysis &a) {
     info.memBase = memrefRoot(info.memBase);
 
     if (addr) {
-      llvm::DenseMap<Value, lego::AffineVal> cache;
-      lego::AffineVal sym = lego::evalLinearInIV(addr, iv, cache);
-      if (sym.valid) {
-        info.affineValid = true;
-        info.coeff = sym.coeff;
-        info.constant = sym.constant;
-        info.invariant = sym.invariant;
+      // Build an AffineExpr for the address relative to the IV. The d0
+      // coefficient is the per-iteration index stride; the symbols are the
+      // loop-invariant Values; the constant offset is what remains after
+      // substituting d0 := 0 and all symbols := 0.
+      MLIRContext *mctx = op->getContext();
+      auto extracted = lego::tryBuildAffineExpr(addr, iv, mctx);
+      if (extracted) {
+        std::optional<int64_t> coef = lego::getDim0Coefficient(extracted->expr);
+        if (coef) {
+          mlir::AffineExpr zero = mlir::getAffineConstantExpr(0, mctx);
+          llvm::SmallVector<mlir::AffineExpr> dimSubs{zero};
+          llvm::SmallVector<mlir::AffineExpr> symSubs(
+              extracted->symbols.size(), zero);
+          mlir::AffineExpr substituted =
+              extracted->expr.replaceDimsAndSymbols(dimSubs, symSubs);
+          int64_t constantPart = 0;
+          if (auto cst = mlir::dyn_cast<mlir::AffineConstantExpr>(substituted))
+            constantPart = cst.getValue();
+          info.affineValid = true;
+          info.coeff = *coef;
+          info.constant = constantPart;
+          info.invariant.assign(extracted->symbols.begin(),
+                                extracted->symbols.end());
+        }
       }
     }
     infos.push_back(info);
