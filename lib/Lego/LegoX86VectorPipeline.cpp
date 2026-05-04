@@ -104,6 +104,14 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
 
+  // Recognise RLE / edge-detect compactions: predicate ``A[i] != prev``
+  // is loop-carried via the previous-element iter_arg.  LEGO emits
+  // vector.shuffle to thread the carry across chunks + vector.compressstore.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      createLegoVectorizeRLEPass("avx512"));
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+
   pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("avx512"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.

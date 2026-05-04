@@ -339,6 +339,44 @@ def LegoVectorizeFilteredReducePass
   ];
 }
 
+def LegoVectorizeRLEPass
+    : Pass<"lego-vectorize-rle", "mlir::func::FuncOp"> {
+  let summary = "Recognize RLE / edge-detect compaction loops and emit "
+                "vector.compressstore with a shuffled-in carry";
+  let description = [{
+    Recognises the canonical run-length-encoding / edge-detection
+    pattern that ``clang -O3`` scalarises:
+
+        k = 0; prev = sentinel
+        for i in 0..N: if A[i] != prev: out[k] = A[i]; prev = A[i]; k++
+
+    Detected as ``scf.for`` with two iter_args ``(index, T)`` and
+    body ``cmpf one (or une) + scf.if -> (index, T)``.
+
+    Rewrites to a strip-mined vector loop:
+      * vector.transfer_read of A[i:i+L]
+      * vector.shuffle (prev_vec, v) [L-1, L+0, ..., L+(L-2)] — pulls
+        prev_vec[L-1] into lane 0 and v[0..L-2] into lanes 1..L-1
+      * arith.cmpf one for the lane mask
+      * vector.compressstore out[k], mask, v
+      * math.ctpop on the bitcast mask to advance k
+      * yield (k_new, v) — v's last lane becomes next chunk's prev
+      * Tail loop: scalar body for (N mod L) iterations.
+  }];
+  let constructor = "mlir::lego::createLegoVectorizeRLEPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+    "mlir::math::MathDialect",
+  ];
+  let options = [
+    Option<"target", "target", "std::string", /*default=*/"\"avx512\"",
+           "Target backend (controls vector lane width)">,
+  ];
+}
+
 def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
   let summary = "Layout-agnostic vectorization for LEGO via symbolic stride solve";
   let description = [{
