@@ -11,7 +11,7 @@ Key: we lay out the buffer as 1D with stride-1 neighbors (+/-1, +/-NX, +/-NX*NY)
 This avoids integer division in the kernel body (all address arithmetic is
 add/sub of compile-time constants, which is unit-stride or strided gather).
 
-The vectorizable axis is the flat 1D tile_range over the interior.
+The vectorizable axis is the flat 1D range(_INNER) over the interior.
 Boundary effects: we skip the first and last NX*NY rows so indices are always
 within bounds for the +/-NX*NY neighbors.
 """
@@ -57,14 +57,14 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": _INNER, "layout_class": "Brick", "prior_verdict": "LOSS"},
 )
-@cpu_kernel(grid=(_INNER,), tile=(TILE,))
+@cpu_kernel(grid=(_INNER,))
 def bricklib_3d7pt(A: Buffer[N_FLAT], B: Buffer[N_FLAT]):
     """3D 7-point stencil -- flat 1D tiling over interior, offset-based addressing.
 
     All address arithmetic uses compile-time constants (unit-stride and strided
     gathers of +/-1, +/-NZ, +/-NX*NY). No integer division in the kernel body.
     """
-    for n in tile_range:
+    for n in range(_INNER):
         # n is the flat interior index; flat buffer address = n + _OFFSET.
         flat = n + _OFFSET
         B[flat] = (A[flat]

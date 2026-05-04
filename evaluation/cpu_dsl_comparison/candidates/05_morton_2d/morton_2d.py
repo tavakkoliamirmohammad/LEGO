@@ -31,9 +31,9 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": N},
 )
-@cpu_kernel(grid=(N,), tile=(TILE,))
+@cpu_kernel(grid=(N,))
 def morton_2d(A: Buffer[N], B: Buffer[N]):
-    for i in tile_range:
+    for i in range(N):
         # Real Morton decode using bitwise ops now supported in the DSL.
         ti = i & 0x5555
         tj = (i >> 1) & 0x5555

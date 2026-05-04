@@ -29,9 +29,9 @@ def _ref(A, B, C):
     n_iters=1000, warmup=100, rtol=1e-3,
     meta={"N": N, "layout_class": "Z-Morton", "prior_verdict": "LOSS"},
 )
-@cpu_kernel(grid=(N,), tile=(TILE,))
+@cpu_kernel(grid=(N,))
 def chol_zmorton(A: Buffer[N], B: Buffer[N], C: Buffer[N]):
-    for i in tile_range:
+    for i in range(N):
         ti = i & 0x5555
         tj = (i >> 1) & 0x5555
         morton = (ti | (tj << 1)) & (N - 1)

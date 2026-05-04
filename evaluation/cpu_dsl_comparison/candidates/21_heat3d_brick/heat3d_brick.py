@@ -43,10 +43,10 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": _INNER, "layout_class": "Brick", "prior_verdict": "LOSS"},
 )
-@cpu_kernel(grid=(_INNER,), tile=(TILE,))
+@cpu_kernel(grid=(_INNER,))
 def heat3d_brick(A: Buffer[N_FLAT], B: Buffer[N_FLAT]):
     """Heat-3d one step -- flat 1D tiling with compile-time neighbor offsets."""
-    for n in tile_range:
+    for n in range(_INNER):
         flat = n + _OFFSET
         B[flat] = (A[flat]
                    + A[flat - _NYNZ] + A[flat + _NYNZ]   # +/-x

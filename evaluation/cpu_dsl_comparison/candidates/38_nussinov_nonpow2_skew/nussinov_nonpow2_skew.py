@@ -32,9 +32,9 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": N, "layout_class": "Skew+non-pow2", "prior_verdict": "MIXED"},
 )
-@cpu_kernel(grid=(N,), tile=(TILE,))
+@cpu_kernel(grid=(N,))
 def nussinov_nonpow2_skew(A: Buffer[N_BUF], B: Buffer[N]):
-    for i in tile_range:
+    for i in range(N):
         B[i] = A[i * 2] * 2.0
 
 

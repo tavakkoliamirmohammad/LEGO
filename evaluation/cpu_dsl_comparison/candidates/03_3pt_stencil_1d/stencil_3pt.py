@@ -26,9 +26,9 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": N},
 )
-@cpu_kernel(grid=(N - 2,), tile=(TILE,))
+@cpu_kernel(grid=(N - 2,))
 def stencil_3pt(A: Buffer[N], B: Buffer[N]):
-    for i in tile_range:
+    for i in range(N - 2):
         B[i + 1] = A[i] + A[i + 1] + A[i + 2]
 
 

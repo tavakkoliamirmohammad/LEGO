@@ -30,9 +30,9 @@ def _ref(X, Y):
     n_iters=1000, warmup=100, rtol=1e-2,
     meta={"N": N},
 )
-@cpu_kernel(grid=(N,), tile=(TILE,))
+@cpu_kernel(grid=(N,))
 def mixed_precision(X: Buffer[N], Y: Buffer[N]):
-    for i in tile_range:
+    for i in range(N):
         Y[i] = 1.5 * X[i] + Y[i]
 
 

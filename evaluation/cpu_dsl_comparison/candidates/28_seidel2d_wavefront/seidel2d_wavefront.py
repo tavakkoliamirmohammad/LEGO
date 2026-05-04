@@ -27,9 +27,9 @@ def _ref(A, B, C):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": N, "layout_class": "Wavefront tile", "prior_verdict": "MIXED"},
 )
-@cpu_kernel(grid=(N,), tile=(TILE,))
+@cpu_kernel(grid=(N,))
 def seidel2d_wavefront(A: Buffer[N], B: Buffer[N], C: Buffer[N]):
-    for i in tile_range:
+    for i in range(N):
         C[i] = A[i] * B[i] + C[i]
 
 

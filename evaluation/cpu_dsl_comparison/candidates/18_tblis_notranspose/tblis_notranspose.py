@@ -12,7 +12,7 @@ captures the core layout pattern via ikj outer-product decomposition:
   are unit-stride in j.
 
 R20 enabling: outer-loop vectorization with inner reduction scf.for keeps the
-inner ik range() loop scalar while the outer j tile_range vectorizes.
+inner ik range() loop scalar while the outer j range(N) vectorizes.
 """
 import json
 import numpy as np
@@ -33,9 +33,9 @@ def _ref(A, B, C):
     n_iters=1000, warmup=100, rtol=1e-3,
     meta={"N": M, "layout_class": "TBLIS", "prior_verdict": "LOSS"},
 )
-@cpu_kernel(grid=(N,), tile=(16,))
+@cpu_kernel(grid=(N,))
 def tblis_notranspose(A: Buffer[_MK], B: Buffer[_KN], C: Buffer[_MN]):
-    for j in tile_range:
+    for j in range(N):
         for ik in range(_MK):
             C[(ik // K) * N + j] = C[(ik // K) * N + j] + A[ik] * B[(ik % K) * N + j]
 

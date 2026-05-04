@@ -33,9 +33,9 @@ def _ref(A, C):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": M},
 )
-@cpu_kernel(grid=(_MN,), tile=(TILE,))
+@cpu_kernel(grid=(_MN,))
 def col_major_inner(A: Buffer[_MN], C: Buffer[_MN]):
-    for j in tile_range:
+    for j in range(_MN):
         i = j // N
         col = j - i * N
         # Read-modify-write form: add C[j]*0.0 so C is both read and written.

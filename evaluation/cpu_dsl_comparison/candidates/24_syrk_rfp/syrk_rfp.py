@@ -26,9 +26,9 @@ def _ref(A, B):
     n_iters=1000, warmup=100, rtol=1e-4,
     meta={"N": N, "layout_class": "RFP", "prior_verdict": "WIN"},
 )
-@cpu_kernel(grid=(N,), tile=(TILE,))
+@cpu_kernel(grid=(N,))
 def syrk_rfp(A: Buffer[N_BUF], B: Buffer[N]):
-    for i in tile_range:
+    for i in range(N):
         B[i] = A[i * 2] * 2.0
 
 

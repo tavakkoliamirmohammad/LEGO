@@ -46,11 +46,11 @@ def _ref(A, B, C):
     n_iters=1000, warmup=100, rtol=5e-2,
     meta={"N": _NN, "layout_class": "Reg+L1+L2 tile", "prior_verdict": "WIN"},
 )
-@cpu_kernel(grid=(N,), tile=(TILE_L1,))
+@cpu_kernel(grid=(N,))
 def gemm_reg_L1_L2_tile(A: Buffer[_NN], B: Buffer[_NN], C: Buffer[_NN]):
-    # tile_range iterates i over [0, N) one element at a time.
+    # range(N) iterates i over [0, N) one element at a time.
     # lego-vectorize will strip-mine the inner j-loop by TILE_L1.
-    for i in tile_range:
+    for i in range(N):
         # L1-tiled k and j inner loops.
         for k0 in range(N // TILE_L1):
             for j0 in range(N // TILE_L1):

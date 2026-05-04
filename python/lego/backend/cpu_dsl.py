@@ -6,8 +6,7 @@ into MLIR CPU IR (scf + arith + memref + Lego ops) via the
 CPUKernelBuilder / CPUKernelContext infrastructure.
 
 Mirrors ``gpu_dsl.py`` exactly in architecture; drops GPU-specific
-primitives (block_id, thread_id, Shared, tensor_core, warp shuffles) and
-adds CPU-specific ``tile`` parameter.
+primitives (block_id, thread_id, Shared, tensor_core, warp shuffles).
 
 Usage::
 
@@ -15,9 +14,9 @@ Usage::
 
     N = 1024
 
-    @cpu_kernel(grid=(N,), tile=(8,))
+    @cpu_kernel(grid=(N,))
     def saxpy(a: float, X: Buffer[N], Y: Buffer[N]):
-        for i in tile_range:
+        for i in range(N):
             Y[i] = a * X[i] + Y[i]
 
     # Compile to x86 AVX-512 and run:
@@ -25,9 +24,7 @@ Usage::
     jit_fn(2.5, X_np, Y_np)   # modifies Y_np in-place
 
 Key differences from gpu_dsl:
-  - ``@cpu_kernel(grid=(N,), tile=(T,))`` — no ``block`` parameter.
-  - ``tile_range`` is a magic sentinel used inside kernel bodies for the
-    within-tile loop variable; the decorator rewrites it to ``range(tile)``.
+  - ``@cpu_kernel(grid=(N,))`` — no ``block`` parameter.
   - No ``Shared[...]``, no ``block_id``/``thread_id``/``block_dim``.
   - Scalar parameters are allowed (annotated with Python ``float`` or
     ``int``); they map to f32/index function arguments.
@@ -91,57 +88,35 @@ class _BufferType:
 # Decorator
 # ============================================================================
 
-# Sentinel object used as the iter in ``for i in tile_range:``
-class _TileRangeSentinel:
-    """Magic sentinel that ``for i in tile_range:`` is rewritten to range(tile)."""
-tile_range = _TileRangeSentinel()
-
-
-def cpu_kernel(grid: Tuple, tile: Optional[Tuple] = None):
+def cpu_kernel(grid: Tuple):
     """Decorator: transform a Python function into a :class:`CPUKernelBuilder`.
 
     Args:
         grid: Total iteration space shape, e.g. ``(N,)`` or ``(M, N)``.
-              The kernel body runs over the full grid extent.
-        tile: Cache-tiling hint, e.g. ``(16,)`` or ``(8, 8)``.
-              This is forwarded to the ``lego-vectorize`` pass as the
-              strip-mining factor; it controls *cache tiling*, not the
-              number of SIMD lanes (the vectorizer picks the SIMD width
-              automatically from the hardware).
-
-              When ``tile`` is provided, the kernel body must contain
-              ``for i in tile_range:`` — a sentinel loop that the compiler
-              rewrites to ``range(grid[0])``.  The pass strip-mines that
-              loop by ``tile[0]`` to produce cache-friendly tiles of
-              consecutive iterations, then vectorizes the inner strip.
-
-              If ``tile`` is ``None``, the kernel must use ``for i in
-              range(grid[0]):`` directly; no strip-mining is applied and the
-              vectorizer sees a single loop over the full grid.
-
-              Rule of thumb: set ``tile`` to the SIMD width (16 for AVX-512
-              float32, 8 for AVX2 float32) or a small multiple of it so that
-              each strip fits in L1.
+              The kernel body runs over the full grid extent. The body must
+              use explicit ``for i in range(N):`` (or nested ranges) to
+              describe its iteration; SIMD width is picked automatically
+              by the vectoriser from the target hardware.
 
     Example::
 
         N = 1 << 20
-        TILE = 16  # AVX-512 float32 lane count
 
-        @cpu_kernel(grid=(N,), tile=(TILE,))
+        @cpu_kernel(grid=(N,))
         def saxpy(a: float, X: Buffer[N], Y: Buffer[N]):
-            for i in tile_range:       # rewritten to range(N)
+            for i in range(N):
                 Y[i] = a * X[i] + Y[i]
 
         jit_fn = saxpy.compile()       # selects x86 / AVX-512 automatically
         jit_fn(2.5, X_np, Y_np)       # modifies Y_np in-place
     """
     def decorator(fn):
-        return _build(fn, grid, tile)
+        return _build(fn, grid)
     return decorator
 
 
-def _build(fn, grid, tile):
+def _build(fn, grid):
+    tile = None  # legacy parameter; kept as None for _Compiler API compat
     source = textwrap.dedent(inspect.getsource(fn))
     tree = ast.parse(source)
     func_def = tree.body[0]
@@ -248,31 +223,17 @@ class _Compiler(_BaseCompiler):
         var = node.target.id
         call = node.iter
 
-        # Detect ``for i in tile_range:`` — rewrite to range(grid[0]).
-        # With the flat-loop model (no outer tile_id loop), tile_range maps to
-        # the entire grid extent. lego-vectorize will strip-mine internally.
-        _is_tile_range = isinstance(call, ast.Name) and call.id == "tile_range"
-        if _is_tile_range:
-            if self.grid is None:
-                raise ValueError(
-                    "``tile_range`` used but @cpu_kernel was not given a ``grid`` arg"
-                )
-            grid_size = self.grid[0]
-            ub = _index_const(grid_size)
-            lb = _index_const(0)
-            step = _index_const(1)
+        # The body must use ``for i in range(...):``.
+        assert isinstance(call, ast.Call) and isinstance(call.func, ast.Name), \
+            f"For iter must be range(), got {ast.dump(call)}"
+        assert call.func.id == "range"
+        args = [self._expr(a) for a in call.args]
+        if len(args) == 1:
+            lb, ub, step = (_index_const(0), self._idx(args[0]), _index_const(1))
+        elif len(args) == 2:
+            lb, ub, step = (self._idx(args[0]), self._idx(args[1]), _index_const(1))
         else:
-            # Regular range(…) call
-            assert isinstance(call, ast.Call) and isinstance(call.func, ast.Name), \
-                f"For iter must be range() or tile_range, got {ast.dump(call)}"
-            assert call.func.id == "range"
-            args = [self._expr(a) for a in call.args]
-            if len(args) == 1:
-                lb, ub, step = (_index_const(0), self._idx(args[0]), _index_const(1))
-            elif len(args) == 2:
-                lb, ub, step = (self._idx(args[0]), self._idx(args[1]), _index_const(1))
-            else:
-                lb, ub, step = (self._idx(args[0]), self._idx(args[1]), self._idx(args[2]))
+            lb, ub, step = (self._idx(args[0]), self._idx(args[1]), self._idx(args[2]))
 
         # Detect iter-args: outer vars modified in the body
         env_before = set(self.env)
