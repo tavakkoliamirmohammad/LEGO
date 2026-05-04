@@ -258,4 +258,62 @@ tryBuildAffineExpr(Value v, Value iv, MLIRContext *ctx) {
   return AffineExtractResult{e, std::move(S.symbols)};
 }
 
+std::optional<int64_t> getDim0Coefficient(AffineExpr e) {
+  if (!e) return std::nullopt;
+
+  if (auto c = dyn_cast<AffineConstantExpr>(e))
+    return 0;
+  if (auto d = dyn_cast<AffineDimExpr>(e))
+    return d.getPosition() == 0 ? 1 : 0;
+  if (isa<AffineSymbolExpr>(e))
+    return 0;
+
+  auto bin = dyn_cast<AffineBinaryOpExpr>(e);
+  if (!bin) return std::nullopt;
+
+  auto lhs = getDim0Coefficient(bin.getLHS());
+  auto rhs = getDim0Coefficient(bin.getRHS());
+  if (!lhs || !rhs) return std::nullopt;
+
+  switch (bin.getKind()) {
+  case AffineExprKind::Add:
+    return *lhs + *rhs;
+  case AffineExprKind::Mul: {
+    // A * B has a constant d0-coefficient only if exactly one side carries d0
+    // and the other is a compile-time constant. ``e * symbol`` produces a
+    // runtime-valued stride; we reject those.
+    bool lhsHasD0 = (*lhs != 0);
+    bool rhsHasD0 = (*rhs != 0);
+    if (lhsHasD0 && rhsHasD0)
+      return std::nullopt;  // d0 * d0 — quadratic
+    if (lhsHasD0) {
+      auto rConst = dyn_cast<AffineConstantExpr>(bin.getRHS());
+      if (!rConst) return std::nullopt;
+      return *lhs * rConst.getValue();
+    }
+    if (rhsHasD0) {
+      auto lConst = dyn_cast<AffineConstantExpr>(bin.getLHS());
+      if (!lConst) return std::nullopt;
+      return *rhs * lConst.getValue();
+    }
+    // Neither side carries d0 → stride contribution is 0.
+    return 0;
+  }
+  case AffineExprKind::FloorDiv:
+  case AffineExprKind::CeilDiv:
+  case AffineExprKind::Mod:
+    // If the LHS doesn't carry d0, the operation is constant w.r.t. d0.
+    // Otherwise the result is non-linear in d0; reject so the access falls
+    // through to NonAffine handling (Tier-B unroll).
+    if (*lhs == 0) return 0;
+    return std::nullopt;
+  case AffineExprKind::Constant:
+  case AffineExprKind::DimId:
+  case AffineExprKind::SymbolId:
+    // Already handled above; reaching here means we mis-cast to BinaryOp.
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
 }  // namespace mlir::lego

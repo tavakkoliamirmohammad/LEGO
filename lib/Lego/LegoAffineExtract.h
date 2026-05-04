@@ -44,6 +44,18 @@ struct AffineExtractResult {
   llvm::SmallVector<Value, 4> symbols;
 };
 
+/// Returns the coefficient of dim 0 (the IV) in ``e`` as a compile-time
+/// constant, if and only if the dependence on dim 0 is purely linear with a
+/// constant scaling factor. Returns ``std::nullopt`` for:
+///   - ``d0 * symbol`` (stride is runtime-valued)
+///   - ``d0 floordiv c`` / ``d0 mod c`` / ``d0 ceildiv c`` (non-linear in d0)
+///   - ``d0 * d0`` (quadratic)
+///
+/// Useful for stride classification: if ``getDim0Coefficient(e) == 0`` the
+/// access is a Broadcast; ``== 1`` is Unit-stride; otherwise Strided with
+/// the returned int as the element-stride.
+std::optional<int64_t> getDim0Coefficient(AffineExpr e);
+
 /// Attempt to express ``v`` as an ``AffineExpr`` over the IV ``iv`` plus
 /// loop-invariant symbols.
 ///

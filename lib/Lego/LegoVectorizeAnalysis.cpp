@@ -20,6 +20,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "LegoAffineExtract.h"
 #include "LegoVectorizeUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -302,29 +303,34 @@ AccessClassification solveAccessTierA(Operation *memrefOp, Value iv,
     return cls;
   }
 
-  // Evaluate S(iv) symbolically.
-  llvm::DenseMap<Value, AffineVal> cache;
-  AffineVal sym = evalLinearInIV(addr, iv, cache);
-
-  if (!sym.valid) {
+  // Build an MLIR AffineExpr for the address relative to the IV. This walks
+  // the SSA cone and returns nullopt for any op that isn't representable in
+  // affine form (e.g. bitwise interleave for Z-Morton, ``i * j`` of two IVs,
+  // data-dependent gather). The non-affine path falls through to Tier-B.
+  auto extracted = tryBuildAffineExpr(addr, iv, memrefOp->getContext());
+  if (!extracted) {
     cls.kind = AccessKind::NonAffine;
     return cls;
   }
 
-  // The per-step difference is S(iv+1) - S(iv) = coeff (the coefficient of iv).
-  // (S(iv+1) = coeff*(iv+1) + constant = coeff*iv + coeff + constant)
-  // diff = S(iv+1) - S(iv) = coeff.
-  //
-  // The physical byte-stride for a flat-buffer access is coeff * elementBytes
-  // (memref indices are in elements, not bytes).
-  // We classify based on coeff * elementBytes:
-  int64_t byteStride = sym.coeff * elementBytes;
+  // Read off the coefficient of d0 (the IV). For pure-linear addresses this
+  // is a compile-time integer; for ``d0 * symbol`` (runtime-valued stride) or
+  // ``d0 floordiv c`` (non-linear in d0), getDim0Coefficient returns nullopt
+  // and we fall back to NonAffine so Tier-B can probe the address sequence
+  // concretely.
+  std::optional<int64_t> coef = getDim0Coefficient(extracted->expr);
+  if (!coef) {
+    cls.kind = AccessKind::NonAffine;
+    return cls;
+  }
 
-  if (sym.coeff == 0) {
-    // Address is loop-invariant.
+  // The per-step difference (S(iv+1) - S(iv)) is exactly the d0 coefficient
+  // in element units. Multiply by elementBytes to get the byte-stride.
+  int64_t byteStride = (*coef) * elementBytes;
+
+  if (*coef == 0) {
     cls.kind = AccessKind::Broadcast;
   } else if (byteStride == elementBytes) {
-    // Unit stride: advancing by one element per iteration.
     cls.kind = AccessKind::Unit;
     cls.stride = elementBytes;
   } else {
