@@ -60,6 +60,15 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   // The x86 pipeline uses "avx512" by default (64-byte ZMM registers).
   // LLVM splits <16xf32>/<8xf64> ops to 256-bit pairs automatically on
   // AVX2-only hosts — so this is correct-by-splitting even on AVX2 CPUs.
+  // Recognise compaction (stream-filter) loops first.  These have a shape
+  // (single index iter_arg + scf.if + counter increment) that the main
+  // lego-vectorize can't easily handle but is a textbook clang-miss:
+  // clang scalarises entirely; LEGO emits ``vector.compressstore``.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      createLegoVectorizeCompactPass("avx512"));
+  pm.addPass(createCanonicalizerPass());
+  pm.addPass(createCSEPass());
+
   pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("avx512"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.

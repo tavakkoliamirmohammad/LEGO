@@ -112,6 +112,50 @@ def LegoStrengthReductionPass : Pass<"lego-strength-reduction", "mlir::ModuleOp"
   let dependentDialects = ["mlir::arith::ArithDialect"];
 }
 
+def LegoVectorizeCompactPass
+    : Pass<"lego-vectorize-compact", "mlir::func::FuncOp"> {
+  let summary = "Recognize compaction loops and emit vector.compressstore";
+  let description = [{
+    Recognizes the canonical stream-filter / compaction pattern that
+    ``clang -O3`` scalarises:
+
+        k = 0
+        for i in 0..N:
+            if cond[i] > threshold:
+                B[k] = A[i]
+                k = k + 1
+
+    Detected as ``scf.for`` with one ``index``-typed iter_arg whose body is
+    ``load + cmp + scf.if(p) { store + add 1 + yield } else { yield }``.
+    Rewrites to a strip-mined vector loop emitting:
+
+      * ``vector.transfer_read``  (data + condition)
+      * ``arith.cmpf`` to build the lane mask
+      * ``vector.compressstore`` (the lane-selecting write — what clang
+        misses; lowers to AVX-512 ``vpcompressps`` or ARM SVE compact+st1)
+      * ``math.ctpop`` of the bitcast mask to advance the iter_arg
+
+    Uses upstream MLIR vector ops only — no architecture-specific
+    intrinsics.  Falls back to the original scalar body for the
+    ``(N mod L)`` tail.
+
+    Runs *before* ``lego-vectorize`` so the main vectoriser never sees
+    the rewritten loop.
+  }];
+  let constructor = "mlir::lego::createLegoVectorizeCompactPass()";
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::vector::VectorDialect",
+    "mlir::math::MathDialect",
+  ];
+  let options = [
+    Option<"target", "target", "std::string", /*default=*/"\"avx512\"",
+           "Target backend (controls vector lane width)">,
+  ];
+}
+
 def LegoVectorizePass : Pass<"lego-vectorize", "mlir::func::FuncOp"> {
   let summary = "Layout-agnostic vectorization for LEGO via symbolic stride solve";
   let description = [{
