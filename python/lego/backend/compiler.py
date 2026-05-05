@@ -336,7 +336,7 @@ class LayoutCompiler:
             self._mlir_text = str(module)
         return self._mlir_text
 
-    def compile(self):
+    def compile(self, pipeline_name='lego-to-llvm'):
         if self._engine is None:
             # Build module once (reuses cached mlir_text if already built)
             builder = self._get_ir_builder()
@@ -362,7 +362,7 @@ class LayoutCompiler:
                     print("=== MLIR after canonicalize + CSE ===", file=sys.stderr)
                     print(module_copy, file=sys.stderr)
                     print(file=sys.stderr)
-                pm = PassManager.parse("builtin.module(lego-to-llvm)")
+                pm = PassManager.parse(f"builtin.module({pipeline_name})")
                 pm.run(module.operation)
                 if _LEGO_DEBUG:
                     print("=== MLIR after lego-to-llvm ===", file=sys.stderr)

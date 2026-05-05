@@ -254,11 +254,19 @@ def emit_layout_from_python(layout, sym_to_val):
         rank = len(layout._dims)
         apply_block = gen_p_op.body.blocks.append(*([idx_ty] * rank))
         with InsertionPoint(apply_block):
-            temp_syms = [sp.Symbol(f"_genp_arg_{k}", integer=True) for k in range(rank)]
-            local_map = dict(sym_to_val)
-            for s, arg in zip(temp_syms, apply_block.arguments):
-                local_map[s] = arg
-            YieldOp(values=[_lower_sympy_to_index(layout.f_apply(tuple(temp_syms)), local_map)])
+            # Fast path: a custom GenP can attach an ``mlir_apply`` callable
+            # that emits the apply region body directly via MLIR ops, bypassing
+            # SymPy lowering. Used for layouts (e.g. fast bit-magic Morton)
+            # whose forward function is awkward to express in SymPy primitives.
+            if hasattr(layout, "mlir_apply") and callable(layout.mlir_apply):
+                result = layout.mlir_apply(list(apply_block.arguments))
+                YieldOp(values=[result] if not isinstance(result, (list, tuple)) else list(result))
+            else:
+                temp_syms = [sp.Symbol(f"_genp_arg_{k}", integer=True) for k in range(rank)]
+                local_map = dict(sym_to_val)
+                for s, arg in zip(temp_syms, apply_block.arguments):
+                    local_map[s] = arg
+                YieldOp(values=[_lower_sympy_to_index(layout.f_apply(tuple(temp_syms)), local_map)])
 
         if layout.f_inv is not None:
             inv_block = gen_p_op.inv_body.blocks.append(idx_ty)

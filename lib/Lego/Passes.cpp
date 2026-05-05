@@ -248,6 +248,26 @@ void registerLegoPipelines() {
     buildLegoToXeVMPipeline);
 #endif
 
+  PassPipelineRegistration<LegoToX86VectorPipelineOptions>("lego-to-x86-vector",
+    "Lower LEGO dialect to LLVM IR with x86 vector intrinsics (AVX-512/AVX2) "
+    "(LEGO -> Arith -> lego-vectorize -> vector dialect -> LLVM)",
+    buildLegoToX86VectorPipeline);
+
+  PassPipelineRegistration<LegoToArmNeonPipelineOptions>(
+    "lego-to-arm-neon",
+    "Lower LEGO dialect to LLVM IR for ARM NEON. "
+    "For ARM execution: mlir-translate --mlir-to-llvmir | llc -mtriple=aarch64-linux-gnu -mattr=+neon",
+    buildLegoToArmNeonPipeline);
+
+  PassPipelineRegistration<LegoToArmSvePipelineOptions>(
+    "lego-to-arm-sve",
+    "Lower LEGO dialect to LLVM IR for ARM SVE. "
+    "The LLVM AArch64 backend selects SVE instructions when +sve is set. "
+    "IR shape is host-verifiable; runtime validation requires ARM SVE hardware. "
+    "For SVE execution: mlir-translate --mlir-to-llvmir | "
+    "llc -mtriple=aarch64-linux-gnu -mattr=+sve -O3",
+    buildLegoToArmSvePipeline);
+
 }
 
 } // namespace lego

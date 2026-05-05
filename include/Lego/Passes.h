@@ -5,9 +5,11 @@
 #include "mlir/Pass/PassOptions.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "Lego/LegoOps.h"
 #include <memory>
 
@@ -23,6 +25,8 @@ std::unique_ptr<Pass> createLegoExternalSMTVerifierPass();
 std::unique_ptr<Pass> createLegoVerifyBijectivityPass();
 std::unique_ptr<Pass> createLegoVerifyPass();
 std::unique_ptr<Pass> createLegoStrengthReductionPass();
+std::unique_ptr<Pass> createConvertLegoToLinalgPass();
+std::unique_ptr<Pass> createConvertLegoToLinalgPass(bool vectorize);
 
 /// Options for the lego-to-spirv pipeline.
 struct LegoToSPIRVPipelineOptions
@@ -117,9 +121,95 @@ struct LegoToXeVMPipelineOptions
 #endif
 
 
+/// Options for the lego-to-x86-vector pipeline.
+struct LegoToX86VectorPipelineOptions
+    : public PassPipelineOptions<LegoToX86VectorPipelineOptions> {
+  PassOptions::Option<std::string> cpu{
+      *this, "cpu",
+      llvm::cl::desc("Target CPU: skx|znver3|... (sets LLVM target features)"),
+      llvm::cl::init("skx")};
+
+  // reassociate-fp-reductions (default: true)
+  //
+  // Allows LLVM to reorder floating-point reductions across SIMD lanes, which
+  // is semantically equivalent to GCC's -ffast-math reassoc flag.  This is
+  // SAFE for kernels whose correctness checks use rtol/atol tolerance (the
+  // typical case for numerical benchmarks).  Disable if the kernel requires
+  // strict IEEE-754 reproducible reductions (e.g., compensated summation).
+  //
+  // Set to false via:  cpu_kernel(grid=..., fast_math=False)  (Python side)
+  // or via the pipeline option:  lego-to-x86-vector{reassoc-fp=false}
+  //
+  // Reference: LLVM ConvertVectorToLLVMPass docs; GCC manual -ffast-math §3.10.
+  PassOptions::Option<bool> reassocFP{
+      *this, "reassoc-fp",
+      llvm::cl::desc("Allow FP reduction reordering (fast-math reassoc); "
+                     "default true; set false for strict IEEE-754 reproducibility"),
+      llvm::cl::init(true)};
+
+  // use-vector-alignment (default: false)
+  //
+  // When true, emit aligned load/store hints (64-byte for AVX-512).  This can
+  // give ~30% additional speed-up when ALL input buffers are 64-byte aligned.
+  // NumPy/ctypes allocations are only 16-byte aligned; enabling this for
+  // unaligned buffers causes SIGSEGV on the first misaligned transfer.
+  //
+  // Safe default: false.  Users with aligned buffers (e.g., posix_memalign
+  // at 64 bytes, or __attribute__((aligned(64))) C arrays) may set this true.
+  PassOptions::Option<bool> useVecAlignment{
+      *this, "use-vec-alignment",
+      llvm::cl::desc("Emit aligned load/store hints (64-byte for AVX-512); "
+                     "default false; only safe when ALL buffers are 64-byte aligned"),
+      llvm::cl::init(false)};
+
+  // use-linalg-vectorize (default: true)
+  //
+  // When true, run ``convert-lego-to-linalg`` + upstream ``linalg::vectorize``.
+  // The convert pass raises every affine scf.for to linalg.generic;
+  // linalg::vectorize then turns those into vector dialect ops.  Loops that
+  // fail the affine check pass through as scf.for and reach the LLVM tail
+  // unchanged, where LLVM's auto-vectoriser handles them.
+  PassOptions::Option<bool> useLinalgVectorize{
+      *this, "use-linalg-vectorize",
+      llvm::cl::desc("Run convert-lego-to-linalg + upstream linalg::vectorize "
+                     "on affine loops.  Non-affine loops fall through to "
+                     "LLVM's auto-vectoriser unchanged."),
+      llvm::cl::init(true)};
+};
+
+/// Options for the lego-to-arm-neon pipeline.
+struct LegoToArmNeonPipelineOptions
+    : public PassPipelineOptions<LegoToArmNeonPipelineOptions> {
+  PassOptions::Option<std::string> cpu{
+      *this, "cpu",
+      llvm::cl::desc("ARM CPU: cortex-a76|... (sets LLVM target features)"),
+      llvm::cl::init("cortex-a76")};
+};
+
+/// Options for the lego-to-arm-sve pipeline.
+/// Emits fixed-width SVE-shaped vectors (vscale=1, 128-bit minimum).
+/// On SVE hardware, the LLVM AArch64 backend promotes these to the full
+/// runtime SVE vector length (+sve target feature).
+/// For runtime execution: mlir-translate --mlir-to-llvmir |
+///   llc -mtriple=aarch64-linux-gnu -mattr=+sve
+struct LegoToArmSvePipelineOptions
+    : public PassPipelineOptions<LegoToArmSvePipelineOptions> {
+  PassOptions::Option<std::string> cpu{
+      *this, "cpu",
+      llvm::cl::desc("ARM CPU with SVE: neoverse-v1|neoverse-v2|... "
+                     "(sets LLVM target features)"),
+      llvm::cl::init("neoverse-v1")};
+};
+
 void registerLegoPipelines();
 void buildLegoLowerPipeline(OpPassManager &pm);
 void buildLegoToLLVMPipeline(OpPassManager &pm);
+void buildLegoToX86VectorPipeline(OpPassManager &pm,
+                                  const LegoToX86VectorPipelineOptions &opts);
+void buildLegoToArmNeonPipeline(OpPassManager &pm,
+                                const LegoToArmNeonPipelineOptions &opts);
+void buildLegoToArmSvePipeline(OpPassManager &pm,
+                               const LegoToArmSvePipelineOptions &opts);
 void buildLegoToSPIRVPipeline(OpPassManager &pm,
                                const LegoToSPIRVPipelineOptions &options);
 #ifdef LEGO_HAS_SPIRV
@@ -179,6 +269,7 @@ void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format);
 #define GEN_PASS_DECL_LEGOVERIFYBIJECTIVITYPASS
 #define GEN_PASS_DECL_LEGOVERIFYPASS
 #define GEN_PASS_DECL_LEGOSTRENGTHREDUCTIONPASS
+#define GEN_PASS_DECL_CONVERTLEGOTOLINALGPASS
 #define GEN_PASS_REGISTRATION
 #include "Lego/Passes.h.inc"
 

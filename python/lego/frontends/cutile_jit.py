@@ -38,35 +38,30 @@ class CutileAdapter(DSLAdapter):
     ))
 
     def unwrap(self, fn):
+        from lego.frontends._adapter import (
+            try_fn_chain_unwrap,
+            try_py_func_unwrap,
+            try_wrapped_unwrap,
+            walk_to_source_fn,
+        )
+
         original_fn = fn
         wrappers = []
 
-        # Strategy 1: _pyfunc (cuda.tile.kernel stores the raw function here)
+        # Strategy 1: _pyfunc (cuda.tile.kernel-specific)
         if hasattr(original_fn, '_pyfunc'):
             wrappers.append(original_fn)
             original_fn = original_fn._pyfunc
 
-        # Strategy 2: walk .fn chain (Triton-style)
+        # Strategies 2-4: generic decorator-chain helpers
         if not wrappers:
-            while hasattr(original_fn, 'fn'):
-                wrappers.append(original_fn)
-                original_fn = original_fn.fn
+            original_fn, wrappers = try_fn_chain_unwrap(original_fn)
+        if not wrappers:
+            original_fn, wrappers = try_py_func_unwrap(original_fn)
+        if not wrappers:
+            original_fn, wrappers = try_wrapped_unwrap(original_fn)
 
-        # Strategy 3: py_func (Numba-style)
-        if not wrappers and hasattr(original_fn, 'py_func'):
-            wrappers.append(original_fn)
-            original_fn = original_fn.py_func
-
-        # Strategy 4: __wrapped__ (functools-style)
-        if not wrappers and hasattr(original_fn, '__wrapped__'):
-            wrappers.append(original_fn)
-            original_fn = original_fn.__wrapped__
-
-        source_fn = original_fn
-        while hasattr(source_fn, 'src_fn'):
-            source_fn = source_fn.src_fn
-
-        return source_fn, original_fn, wrappers
+        return walk_to_source_fn(original_fn), original_fn, wrappers
 
     def find_runtime_vars(self, func_def):
         tensors = set()
