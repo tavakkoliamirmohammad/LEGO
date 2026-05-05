@@ -1,10 +1,10 @@
 """Compile-only smoke tests for the cpu_dsl example kernels.
 
-Each ``evaluation/cpu_dsl_examples/candidates/<name>/*.py`` file defines
-a single ``@cpu_kernel``-decorated function (wrapped by ``@benchmark``).
-For every candidate × every CPU target (``x86``, ``arm-neon``, ``arm-sve``)
-this test runs the LEGO MLIR pass pipeline on the candidate and asserts
-that lowering completes without error.
+Each ``evaluation/cpu_dsl_examples/<NN>_<name>.py`` file defines a single
+``@cpu_kernel``-decorated function (wrapped by ``@benchmark``).  For
+every kernel × every CPU target (``x86``, ``arm-neon``, ``arm-sve``)
+this test runs the LEGO MLIR pass pipeline and asserts lowering
+completes without error.
 
 Compile-only: the pipeline runs to LLVM dialect but the result is *not*
 JIT-compiled or executed.  ARM targets work on an x86 host because we
@@ -23,10 +23,9 @@ from pathlib import Path
 
 import pytest
 
-# Resolve the candidates directory relative to the repo root (3 levels up
-# from this file: python/tests/ → python/ → repo).
+# Resolve the kernels directory relative to the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_CANDIDATES_DIR = _REPO_ROOT / "evaluation" / "cpu_dsl_examples" / "candidates"
+_KERNELS_DIR = _REPO_ROOT / "evaluation" / "cpu_dsl_examples"
 
 _TARGETS = ("x86", "arm-neon", "arm-sve")
 
@@ -53,17 +52,11 @@ def _pipeline_available(target: str) -> bool:
 
 
 def _discover_candidates():
-    """Yield (candidate_name, .py_path) for every candidate dir."""
-    if not _CANDIDATES_DIR.is_dir():
+    """Yield (candidate_name, .py_path) for every cpu_dsl_examples/<NN>_<name>.py."""
+    if not _KERNELS_DIR.is_dir():
         return
-    for cand_dir in sorted(_CANDIDATES_DIR.iterdir()):
-        if not cand_dir.is_dir():
-            continue
-        for py in sorted(cand_dir.glob("*.py")):
-            if py.name == "__init__.py":
-                continue
-            yield (cand_dir.name, py)
-            break
+    for py in sorted(_KERNELS_DIR.glob("[0-9][0-9]_*.py")):
+        yield (py.stem, py)
 
 
 def _import_candidate(name: str, py_path: Path):
@@ -118,7 +111,7 @@ _params = [(c[0], c[1], t) for c in _CANDIDATES for t in _TARGETS]
 
 
 @pytest.mark.skipif(not _CANDIDATES,
-                    reason="cpu_dsl_examples candidates dir is missing")
+                    reason="evaluation/cpu_dsl_examples directory is missing")
 @pytest.mark.parametrize("name,py_path,target", _params, ids=_param_ids)
 def test_candidate_pipeline_lowers(name: str, py_path: Path, target: str):
     """Pipeline lowers each candidate to LLVM dialect on each target.

@@ -28,7 +28,6 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-CANDIDATES_DIR = ROOT / "candidates"
 
 # ---------------------------------------------------------------------------
 # Python executable (prefer venv)
@@ -52,13 +51,11 @@ def _sub_env_for_target(target: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Candidate discovery + execution
+# Kernel discovery + execution
 # ---------------------------------------------------------------------------
-def _find_consolidated_kernel(cand_dir: Path):
-    for py in sorted(cand_dir.glob("*.py")):
-        if py.name != "__init__.py":
-            return py
-    return None
+def _discover_kernels():
+    """Yield each numbered kernel .py directly under cpu_dsl_examples/."""
+    return sorted(ROOT.glob("[0-9][0-9]_*.py"))
 
 
 _TIMING_FIELDS = ("numpy_ms", "scalar_jit_ms", "vec_jit_ms")
@@ -89,18 +86,15 @@ def _run_measure_once(measure_py: Path, sub_env: dict, cand_name: str) -> dict:
         return {"name": cand_name, "verdict": "ERROR", "notes": str(exc)}
 
 
-def run_measure(cand_dir: Path, sub_env: dict, repeats: int = 1) -> dict:
-    """Run the candidate K times and take the min of the timing fields.
+def run_measure(measure_py: Path, sub_env: dict, repeats: int = 1) -> dict:
+    """Run the kernel K times and take the min of the timing fields.
 
     Min beats median on a shared node: every measurement is bounded above
     by hardware speed and pushed up by random preemption / cache eviction
     noise.  The min is the closest sample to true steady-state throughput.
     """
-    measure_py = _find_consolidated_kernel(cand_dir)
-    if measure_py is None:
-        return {"name": cand_dir.name, "verdict": "ERROR", "notes": "no candidate .py file"}
-
-    runs = [_run_measure_once(measure_py, sub_env, cand_dir.name)
+    cand_name = measure_py.stem
+    runs = [_run_measure_once(measure_py, sub_env, cand_name)
             for _ in range(max(1, repeats))]
     base = runs[-1]
     if repeats <= 1 or len(runs) == 1:
@@ -168,16 +162,13 @@ def main():
     print("=" * 100)
     print()
 
-    cand_dirs = sorted(
-        d for d in CANDIDATES_DIR.iterdir()
-        if d.is_dir() and _find_consolidated_kernel(d) is not None
-    )
+    kernels = _discover_kernels()
 
     results = []
-    print(f"  Running {len(cand_dirs)} candidates ...")
-    for cand_dir in cand_dirs:
-        print(f"    → {cand_dir.name}", flush=True)
-        rec = run_measure(cand_dir, sub_env, repeats=args.measure_repeats)
+    print(f"  Running {len(kernels)} kernels ...")
+    for measure_py in kernels:
+        print(f"    → {measure_py.stem}", flush=True)
+        rec = run_measure(measure_py, sub_env, repeats=args.measure_repeats)
         rec["verify_status"] = "VERIFIED" if rec.get("verified") is True else "FAIL"
         results.append(rec)
     print()
