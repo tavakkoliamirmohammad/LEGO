@@ -174,19 +174,31 @@ class _BaseCompiler:
         result_types = [v.type for v in init_vals]
         if_op = scf_dialect.IfOp(cv, result_types, has_else=True)
 
+        def _yield_runtime(names, tags):
+            # If a branch reassigned an iter-arg to a compile-time
+            # constant, promote it back to runtime using the iter-arg's
+            # tag so scf.yield receives MLIR Values, not Python ints.
+            out = []
+            for n, t in zip(names, tags):
+                v, et = self.env[n]
+                if _is_ct(et):
+                    v, et = _to_runtime(self.ctx, v, et, t)
+                out.append(v)
+            return out
+
         with InsertionPoint(if_op.then_block):
             for n, v, t in zip(yield_names, init_vals, init_tags):
                 self.env[n] = (v, t)
             for s in node.body:
                 self._stmt(s)
-            scf_dialect.YieldOp([self.env[n][0] for n in yield_names])
+            scf_dialect.YieldOp(_yield_runtime(yield_names, init_tags))
 
         with InsertionPoint(if_op.else_block):
             for n, v, t in zip(yield_names, init_vals, init_tags):
                 self.env[n] = (v, t)
             for s in node.orelse:
                 self._stmt(s)
-            scf_dialect.YieldOp([self.env[n][0] for n in yield_names])
+            scf_dialect.YieldOp(_yield_runtime(yield_names, init_tags))
 
         for i, n in enumerate(yield_names):
             self.env[n] = (if_op.results[i], init_tags[i])
