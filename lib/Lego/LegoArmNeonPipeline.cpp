@@ -45,11 +45,8 @@ void buildLegoToArmNeonPipeline(OpPassManager &pm,
   // Phase 1: shared front-end (LEGO → Arith + strength reduction).
   buildLegoLowerPipeline(pm);
 
-  // Phase 2: clean up, then vectorize with NEON lane widths.
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
-  // Pass target="neon" to emit NEON-width vectors (2xf64, 4xf32).
-  pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("neon"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
   pm.addPass(createConvertVectorToLLVMPass());

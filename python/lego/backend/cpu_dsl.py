@@ -155,7 +155,7 @@ def _build(fn):
     def kernel_body(ctx):
         # The body's ``for i in range(...):`` describes the iteration
         # space directly; the compiler walks the AST and emits scf.for ops
-        # one-to-one. lego-vectorize then strip-mines the inner loop.
+        # one-to-one.
         _Compiler(
             ctx=ctx,
             func_def=func_def,

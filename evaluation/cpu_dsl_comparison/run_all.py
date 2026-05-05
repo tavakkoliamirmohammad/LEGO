@@ -406,10 +406,9 @@ def main():
     _has_layout      = any("layout_class" in r for r in results)
     _has_verify      = True
 
-    print("=" * 220)
-    print("  LEGO cpu_dsl_comparison — engineering correctness + perf reference")
-    print("  Verdict reference (against gcc -O3): WIN >1.05×  |  PARITY 0.95-1.05×  |  LOSS <0.95×")
-    print("  Apples-to-apples comparison: vs_c_const (clang -O3 -march=native + __builtin_assume(N==DEFAULT_N))")
+    print("=" * 180)
+    print("  LEGO cpu_dsl_comparison")
+    print("  Verdict (vs gcc -O3): WIN >1.05x  |  PARITY 0.95-1.05x  |  LOSS <0.95x")
     print("=" * 180)
 
     # Header
@@ -603,13 +602,6 @@ def _write_markdown(results, out_path: Path, target: str,
         f"",
         f"**Target:** `{target}` | **Date:** {time.strftime('%Y-%m-%d %H:%M')}",
         f"",
-        f"This is a *correctness + reference-perf* harness for the LEGO CPU pipeline.",
-        f"It is NOT a research evidence artefact for any LEGO contribution; it is here",
-        f"to verify that cpu_dsl kernels produce the same numerical answer as numpy",
-        f"and that LLVM's auto-vectoriser produces reasonable code through the",
-        f"pipeline's flag plumbing.  Compare-against-clang numbers are reported for",
-        f"engineering reference only.",
-        f"",
         f"## Summary",
         f"",
         f"| Metric | Value |",
@@ -619,17 +611,12 @@ def _write_markdown(results, out_path: Path, target: str,
         f"| VERIFIED (correctness) | {n_verified} / {len(results)} |",
         f"| WIN / PARITY / LOSS vs gcc -O3 | {wins} / {parities} / {losses} |",
         f"| WIN / PARITY / LOSS vs clang aggressive (-ffast-math) | {wins_vs_clang} / {parities_vs_clang} / {losses_vs_clang} |",
-        f"| WIN / PARITY / LOSS vs clang CONST (apples-to-apples) | {wins_vs_const} / {parities_vs_const} / {losses_vs_const} |",
-        f"| vec_iso > 1.5× | {vec_iso_gt15} |",
+        f"| WIN / PARITY / LOSS vs clang CONST | {wins_vs_const} / {parities_vs_const} / {losses_vs_const} |",
+        f"| vec_iso > 1.5x | {vec_iso_gt15} |",
         f"",
-        f"**Note on the 'apples-to-apples' baseline:** LEGO's frontend bakes each",
-        f"kernel's N as a Python compile-time literal; the C kernels by default take",
-        f"N as a runtime parameter.  This caused earlier dashboard runs to show",
-        f"misleading 3–8× wins on Morton-style kernels — the wins came from clang",
-        f"not folding the trip count, not from any LEGO codegen advantage.  The",
-        f"`*_clang_const` build adds `__builtin_assume(N == DEFAULT_N)` so clang has",
-        f"the same compile-time-N visibility; this is the column to read for any",
-        f"honest comparison.",
+        f"`clang_const` adds `__builtin_assume(N == DEFAULT_N)` so clang sees N as a",
+        f"compile-time constant — matches LEGO's frontend, which bakes N as a Python",
+        f"literal.",
         f"",
         f"## Per-Candidate Results",
         f"",

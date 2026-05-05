@@ -63,13 +63,8 @@ void buildLegoToArmSvePipeline(OpPassManager &pm,
   // Phase 1: shared front-end (LEGO → Arith + strength reduction).
   buildLegoLowerPipeline(pm);
 
-  // Phase 2: clean up, then vectorize with SVE-shaped lane widths.
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
-  // Pass target="sve" to emit SVE-shaped vectors (same as NEON: 2xf64, 4xf32
-  // at vscale=1).  The LLVM AArch64 backend promotes to full SVE width when
-  // the target has +sve.
-  pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("sve"));
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
   pm.addPass(createConvertVectorToLLVMPass());

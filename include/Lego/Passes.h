@@ -25,20 +25,6 @@ std::unique_ptr<Pass> createLegoExternalSMTVerifierPass();
 std::unique_ptr<Pass> createLegoVerifyBijectivityPass();
 std::unique_ptr<Pass> createLegoVerifyPass();
 std::unique_ptr<Pass> createLegoStrengthReductionPass();
-std::unique_ptr<Pass> createLegoVectorizePass();
-std::unique_ptr<Pass> createLegoVectorizePass(llvm::StringRef target);
-std::unique_ptr<Pass> createLegoVectorizeCompactPass();
-std::unique_ptr<Pass> createLegoVectorizeCompactPass(llvm::StringRef target);
-std::unique_ptr<Pass> createLegoVectorizeScatterAddPass();
-std::unique_ptr<Pass> createLegoVectorizeScatterAddPass(llvm::StringRef target);
-std::unique_ptr<Pass> createLegoVectorizeArgminPass();
-std::unique_ptr<Pass> createLegoVectorizeArgminPass(llvm::StringRef target);
-std::unique_ptr<Pass> createLegoVectorizeScanPass();
-std::unique_ptr<Pass> createLegoVectorizeScanPass(llvm::StringRef target);
-std::unique_ptr<Pass> createLegoVectorizeFilteredReducePass();
-std::unique_ptr<Pass> createLegoVectorizeFilteredReducePass(llvm::StringRef target);
-std::unique_ptr<Pass> createLegoVectorizeRLEPass();
-std::unique_ptr<Pass> createLegoVectorizeRLEPass(llvm::StringRef target);
 std::unique_ptr<Pass> createConvertLegoToLinalgPass();
 std::unique_ptr<Pass> createConvertLegoToLinalgPass(bool vectorize);
 
@@ -192,23 +178,9 @@ struct LegoToX86VectorPipelineOptions
   PassOptions::Option<bool> useLinalgVectorize{
       *this, "use-linalg-vectorize",
       llvm::cl::desc("Use convert-lego-to-linalg + upstream linalg::vectorize "
-                     "for affine loops; falls through to custom lego-vectorize "
-                     "for non-affine loops (Z-Morton et al). Default: true."),
+                     "for affine loops.  Non-affine loops (Z-Morton et al) "
+                     "pass through to LLVM's auto-vectoriser unchanged."),
       llvm::cl::init(true)};
-
-  // bypass-lego-vectorize (default: false)
-  //
-  // When true, *every* LegoVectorize* pass is skipped — the pipeline emits no
-  // vector dialect ops at all, and hands LLVM scf.for + arith + memref IR to
-  // auto-vectorize via opt_level=3 (LoopVectorize / SLP).  This is the
-  // experimental control for measuring how much of LEGO's CPU win is genuine
-  // pattern-recognition value vs how much LLVM would have produced anyway.
-  PassOptions::Option<bool> bypassLegoVectorize{
-      *this, "bypass-lego-vectorize",
-      llvm::cl::desc("Skip every LegoVectorize* pass — let LLVM auto-vectorize "
-                     "the lowered scf.for IR.  Used to measure the value of "
-                     "the LEGO pattern recognizers vs LLVM's own auto-vec."),
-      llvm::cl::init(false)};
 };
 
 /// Options for the lego-to-arm-neon pipeline.

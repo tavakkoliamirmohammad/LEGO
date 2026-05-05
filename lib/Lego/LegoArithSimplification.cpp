@@ -6,7 +6,6 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include <cstdlib>
 
 using namespace mlir;
 
@@ -829,20 +828,7 @@ struct LegoStrengthReductionPass
     RewritePatternSet patterns(&getContext());
     patterns.add<StrengthReduceDiv, StrengthReduceRem,
                  StrengthReduceDivSI, StrengthReduceRemSI,
-                 StrengthReduceMul>(&getContext());
-    // Optional: skip the per-bit → portable-bit-magic Morton recognizer.
-    // Used to A/B-test how much of LEGO's CPU win on Morton/Z-order kernels
-    // comes from the layout-driven arith rewrite vs LLVM's auto-vec on the
-    // unrewritten per-bit form.  Other strength reductions (div/rem/mul →
-    // shift) stay enabled because they're not the layout-driven contribution
-    // and disabling them would just slow everything down without isolating
-    // anything.
-    const char *bypassBitSpread = std::getenv("LEGO_BYPASS_BIT_SPREAD");
-    if (!(bypassBitSpread && (llvm::StringRef(bypassBitSpread) == "1" ||
-                              llvm::StringRef(bypassBitSpread) == "true" ||
-                              llvm::StringRef(bypassBitSpread) == "yes"))) {
-      patterns.add<RecognizeBitSpread>(&getContext());
-    }
+                 StrengthReduceMul, RecognizeBitSpread>(&getContext());
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
     }
