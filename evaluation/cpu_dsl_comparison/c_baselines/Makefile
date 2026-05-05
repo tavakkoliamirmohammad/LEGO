@@ -40,6 +40,15 @@ CFLAGS_CLANG_STRICT = -O3 -march=native -mavx512f -fassociative-math \
                       -fno-signed-zeros -fno-trapping-math \
                       -Wall -Wno-unused-result
 
+# Clang BASIC — strict IEEE-754, no fast-math at all.  Matches LEGO when
+# the JIT is configured with reassocFP=false AND bypass-lego-vectorize=true:
+# both sides do plain -O3 -march=native -mavx512f with full IEEE-754
+# semantics.  AVX-512F is included explicitly so LLVM's vector lowering
+# definitely has the same target features as LEGO's host-detected JIT
+# (on Zen 4, ``-march=native`` enables AVX-512F anyway, but the explicit
+# flag documents the parity).
+CFLAGS_CLANG_BASIC = -O3 -march=native -mavx512f -Wall -Wno-unused-result
+
 # Original 8 candidates that existed before
 SRCS_ORIG = saxpy.c vecadd.c gemm.c stencil_3pt.c brick_within_cell.c \
             mixed_precision.c col_major.c self_update.c morton.c
@@ -60,12 +69,13 @@ O3_BINS              = $(ALL_SRCS:.c=_O3)
 AGG_BINS             = $(ALL_SRCS:.c=_agg)
 CLANG_BINS           = $(ALL_SRCS:.c=_clang)
 CLANG_STRICT_BINS    = $(ALL_SRCS:.c=_clang_strict)
+CLANG_BASIC_BINS     = $(ALL_SRCS:.c=_clang_basic)
 
 # Legacy GCC bins (original aggressive flags, no suffix — keep for backward compat)
 GCC_BINS   = $(SRCS_ORIG:.c=)
 CLANG_BINS_ORIG = $(SRCS_ORIG:.c=_clang)
 
-all: $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS) $(CLANG_STRICT_BINS)
+all: $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS) $(CLANG_STRICT_BINS) $(CLANG_BASIC_BINS)
 
 O3: $(O3_BINS)
 
@@ -74,6 +84,8 @@ aggressive: $(AGG_BINS)
 clang_all: $(CLANG_BINS)
 
 clang_strict_all: $(CLANG_STRICT_BINS)
+
+clang_basic_all: $(CLANG_BASIC_BINS)
 
 # Legacy GCC binaries (aggressive flags, original names — backward compat)
 %: %.c
@@ -95,6 +107,10 @@ clang_strict_all: $(CLANG_STRICT_BINS)
 %_clang_strict: %.c
 	$(CC_CLANG) $(CFLAGS_CLANG_STRICT) -o $@ $<
 
+# Clang BASIC — plain -O3 -march=native, fully IEEE-754 strict
+%_clang_basic: %.c
+	$(CC_CLANG) $(CFLAGS_CLANG_BASIC) -o $@ $<
+
 # Run all O3 baselines with default sizes
 run_O3: $(O3_BINS)
 	@for b in $(O3_BINS); do ./$$b; done
@@ -108,6 +124,6 @@ run: $(GCC_BINS)
 	@for b in $(GCC_BINS); do ./$$b; done
 
 clean:
-	rm -f $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS) $(CLANG_STRICT_BINS)
+	rm -f $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS) $(CLANG_STRICT_BINS) $(CLANG_BASIC_BINS)
 
 .PHONY: all O3 aggressive clang_all run_O3 run_agg run clean

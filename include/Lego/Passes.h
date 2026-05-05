@@ -195,6 +195,20 @@ struct LegoToX86VectorPipelineOptions
                      "for affine loops; falls through to custom lego-vectorize "
                      "for non-affine loops (Z-Morton et al). Default: true."),
       llvm::cl::init(true)};
+
+  // bypass-lego-vectorize (default: false)
+  //
+  // When true, *every* LegoVectorize* pass is skipped — the pipeline emits no
+  // vector dialect ops at all, and hands LLVM scf.for + arith + memref IR to
+  // auto-vectorize via opt_level=3 (LoopVectorize / SLP).  This is the
+  // experimental control for measuring how much of LEGO's CPU win is genuine
+  // pattern-recognition value vs how much LLVM would have produced anyway.
+  PassOptions::Option<bool> bypassLegoVectorize{
+      *this, "bypass-lego-vectorize",
+      llvm::cl::desc("Skip every LegoVectorize* pass — let LLVM auto-vectorize "
+                     "the lowered scf.for IR.  Used to measure the value of "
+                     "the LEGO pattern recognizers vs LLVM's own auto-vec."),
+      llvm::cl::init(false)};
 };
 
 /// Options for the lego-to-arm-neon pipeline.

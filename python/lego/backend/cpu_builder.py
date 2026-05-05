@@ -95,6 +95,19 @@ class CPUTarget:
         if flag in ("0", "false", "no"):
             if self.name in ("x86", "cpu"):
                 opts.append("use-linalg-vectorize=false")
+        # ``LEGO_BYPASS_LEGO_VECTORIZE`` env var skips every LegoVectorize* pass
+        # (and convert-lego-to-linalg) so the IR going to the LLVM tail is plain
+        # scf.for + arith + memref.  LLVM's own LoopVectorize / SLP at
+        # opt_level=3 then handles auto-vectorisation.  Used to A/B-test how
+        # much of LEGO's CPU win is genuine pattern-recognition value vs how
+        # much LLVM would have produced anyway.
+        bypass_flag = os.environ.get("LEGO_BYPASS_LEGO_VECTORIZE", "").lower()
+        if bypass_flag in ("1", "true", "yes"):
+            if self.name in ("x86", "cpu"):
+                opts.append("bypass-lego-vectorize=true")
+                # When bypassing, also disable the linalg path — both should
+                # be off so LLVM gets unmodified scf IR.
+                opts.append("use-linalg-vectorize=false")
         if opts:
             return f"builtin.module({self.pipeline}{{{' '.join(opts)}}})"
         return f"builtin.module({self.pipeline})"

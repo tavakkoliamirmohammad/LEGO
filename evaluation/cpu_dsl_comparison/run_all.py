@@ -246,6 +246,25 @@ def run_clang_strict_baseline(cand_name: str, repeats: int = 1) -> float:
     return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang_strict", N, repeats)
 
 
+def run_clang_basic_baseline(cand_name: str, repeats: int = 1) -> float:
+    """Run Clang BASIC baseline — plain ``clang-20 -O3 -march=native``.
+
+    No fast-math at all (no ``-fassociative-math``, no ``-fno-signed-zeros``,
+    no ``-mavx512f`` explicitly — though ``-march=native`` enables AVX-512
+    on Zen 4 anyway).  This is the truly apples-to-apples comparison for
+    LEGO when the JIT is also fully strict (bypass + reassocFP=false): both
+    sides do plain ``-O3 -march=native`` with full IEEE-754 semantics.
+
+    Wins / losses vs this column reflect what LEGO's pattern recognizers
+    add over what LLVM's auto-vec produces on its own with the same flags.
+    """
+    entry = _C_BASELINE_MAP.get(cand_name)
+    if entry is None:
+        return float('nan')
+    bin_name, N = entry
+    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang_basic", N, repeats)
+
+
 # ---------------------------------------------------------------------------
 # Python executable (prefer venv)
 # ---------------------------------------------------------------------------
@@ -473,6 +492,7 @@ def main():
         c_agg_ms  = run_c_agg_baseline(cand_dir.name, repeats=args.measure_repeats)
         clang_ms  = run_clang_baseline(cand_dir.name, repeats=args.measure_repeats)
         clang_strict_ms = run_clang_strict_baseline(cand_dir.name, repeats=args.measure_repeats)
+        clang_basic_ms  = run_clang_basic_baseline(cand_dir.name, repeats=args.measure_repeats)
         rec = run_measure(cand_dir, sub_env, repeats=args.measure_repeats)
 
         # Attach C baseline timings
@@ -486,6 +506,8 @@ def main():
             rec["c_clang_ms"] = round(clang_ms, 6)
         if not math.isnan(clang_strict_ms):
             rec["c_clang_strict_ms"] = round(clang_strict_ms, 6)
+        if not math.isnan(clang_basic_ms):
+            rec["c_clang_basic_ms"] = round(clang_basic_ms, 6)
 
         rec["verify_status"] = "VERIFIED" if rec.get("verified") is True else "FAIL"
 
@@ -498,6 +520,7 @@ def main():
     _has_c_agg  = any("c_agg_ms" in r for r in results)
     _has_clang  = any("c_clang_ms" in r for r in results)
     _has_clang_strict = any("c_clang_strict_ms" in r for r in results)
+    _has_clang_basic = any("c_clang_basic_ms" in r for r in results)
     _has_prior  = any("prior_verdict" in r for r in results)
     _has_layout = any("layout_class" in r for r in results)
     _has_verify = True
@@ -526,6 +549,8 @@ def main():
         hdr_parts += [f"{'c_clang_ms':>11}", f"{'vs_clang':>9}"]
     if _has_clang_strict:
         hdr_parts += [f"{'clng_str_ms':>12}", f"{'vs_str':>8}"]
+    if _has_clang_basic:
+        hdr_parts += [f"{'clng_bsc_ms':>12}", f"{'vs_bsc':>8}"]
     if _has_verify:
         hdr_parts.append(f"{'Verify':>10}")
     hdr_parts.append(f"{'Verdict':>8}")
@@ -537,6 +562,7 @@ def main():
     wins_vs_agg = losses_vs_agg = parities_vs_agg = 0
     wins_vs_clang = losses_vs_clang = parities_vs_clang = 0
     wins_vs_strict = losses_vs_strict = parities_vs_strict = 0
+    wins_vs_basic = losses_vs_basic = parities_vs_basic = 0
     improved = maintained = regressed = 0
     vec_iso_gt15 = 0
     n_verified = n_pending = n_fail_v = 0
@@ -553,6 +579,7 @@ def main():
         c_agg_ms_r = float(r.get("c_agg_ms",      float('nan')))
         clang_ms_r = float(r.get("c_clang_ms",    float('nan')))
         clang_str_ms_r = float(r.get("c_clang_strict_ms", float('nan')))
+        clang_bsc_ms_r = float(r.get("c_clang_basic_ms", float('nan')))
 
         t_numpy  = r.get("numpy_ms",  float('nan'))
         t_scalar = r.get("scalar_jit_ms", float('nan'))
@@ -564,6 +591,7 @@ def main():
         vs_c_agg = _safe_ratio(c_agg_ms_r, t_vec)
         vs_clang = _safe_ratio(clang_ms_r, t_vec)
         vs_clang_strict = _safe_ratio(clang_str_ms_r, t_vec)
+        vs_clang_basic  = _safe_ratio(clang_bsc_ms_r, t_vec)
 
         # Primary verdict: based on vs_c_O3 (CASTLE-aligned).
         # Fall back to measure.py's own verdict if c_O3_ms is unavailable.
@@ -616,6 +644,12 @@ def main():
             elif vs_clang_strict >= 0.95: parities_vs_strict += 1
             else:                          losses_vs_strict += 1
 
+        # Tally vs clang BASIC (plain -O3 -march=native, fully strict IEEE-754)
+        if not math.isnan(vs_clang_basic):
+            if vs_clang_basic > 1.05:    wins_vs_basic += 1
+            elif vs_clang_basic >= 0.95: parities_vs_basic += 1
+            else:                         losses_vs_basic += 1
+
         if isinstance(sp_iso, float) and not math.isnan(sp_iso) and sp_iso > 1.5:
             vec_iso_gt15 += 1
 
@@ -649,6 +683,8 @@ def main():
             row_parts += [_fv(clang_ms_r, 11, '.4f'), _fx(vs_clang, 9)]
         if _has_clang_strict:
             row_parts += [_fv(clang_str_ms_r, 12, '.4f'), _fx(vs_clang_strict, 8)]
+        if _has_clang_basic:
+            row_parts += [_fv(clang_bsc_ms_r, 12, '.4f'), _fx(vs_clang_basic, 8)]
         if _has_verify:
             row_parts.append(f"{verify_short:>10}")
         row_parts.append(f"{verdict:>8}")
@@ -689,6 +725,11 @@ def main():
     print(f"  WIN:     {wins_vs_strict:3d} / {measured}")
     print(f"  PARITY:  {parities_vs_strict:3d} / {measured}")
     print(f"  LOSS:    {losses_vs_strict:3d} / {measured}")
+    print()
+    print(f"  --- Verdicts vs clang BASIC (plain -O3 -march=native; fully strict IEEE-754) ---")
+    print(f"  WIN:     {wins_vs_basic:3d} / {measured}")
+    print(f"  PARITY:  {parities_vs_basic:3d} / {measured}")
+    print(f"  LOSS:    {losses_vs_basic:3d} / {measured}")
     print()
     print(f"  --- vec_iso speedup distribution ---")
     print(f"  vec_iso > 1.5× (real wins vs scalar_jit): {vec_iso_gt15:3d} / {measured}")

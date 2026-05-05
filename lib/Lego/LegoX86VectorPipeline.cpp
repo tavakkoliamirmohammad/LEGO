@@ -61,58 +61,63 @@ void buildLegoToX86VectorPipeline(OpPassManager &pm,
   // The x86 pipeline uses "avx512" by default (64-byte ZMM registers).
   // LLVM splits <16xf32>/<8xf64> ops to 256-bit pairs automatically on
   // AVX2-only hosts — so this is correct-by-splitting even on AVX2 CPUs.
-  // Recognise compaction (stream-filter) loops first.  These have a shape
-  // (single index iter_arg + scf.if + counter increment) that the main
-  // lego-vectorize can't easily handle but is a textbook clang-miss:
-  // clang scalarises entirely; LEGO emits ``vector.compressstore``.
-  pm.addNestedPass<mlir::func::FuncOp>(
-      createLegoVectorizeCompactPass("avx512"));
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+  if (!opts.bypassLegoVectorize) {
+    // Recognise compaction (stream-filter) loops first.  These have a shape
+    // (single index iter_arg + scf.if + counter increment) that the main
+    // lego-vectorize can't easily handle but is a textbook clang-miss:
+    // clang scalarises entirely; LEGO emits ``vector.compressstore``.
+    pm.addNestedPass<mlir::func::FuncOp>(
+        createLegoVectorizeCompactPass("avx512"));
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
 
-  // NOTE: lego-vectorize-scatter-add (count[bin[i]] += A[i]) is implemented
-  // (LegoVectorizeScatterAdd.cpp) but NOT wired by default because gather/
-  // scatter throughput is hardware-dependent: on AMD Zen 4 ``vpscatterdps``
-  // is microcoded at ~80 cycles per 16-lane scatter, so the vectorised path
-  // loses to clang's unrolled scalar.  On Intel Sapphire Rapids gather/
-  // scatter are competitive and the pass should help.  Run it explicitly
-  // via ``--lego-vectorize-scatter-add`` to opt in on Intel hardware.
+    // NOTE: lego-vectorize-scatter-add (count[bin[i]] += A[i]) is implemented
+    // (LegoVectorizeScatterAdd.cpp) but NOT wired by default because gather/
+    // scatter throughput is hardware-dependent: on AMD Zen 4 ``vpscatterdps``
+    // is microcoded at ~80 cycles per 16-lane scatter, so the vectorised path
+    // loses to clang's unrolled scalar.  On Intel Sapphire Rapids gather/
+    // scatter are competitive and the pass should help.  Run it explicitly
+    // via ``--lego-vectorize-scatter-add`` to opt in on Intel hardware.
 
-  // Recognise argmin / argmax loops: paired (val, idx) reduction with
-  // data-dependent updates that clang scalarises.  Emits vector
-  // accumulators + arith.minimumf + arith.select inside the loop, and a
-  // single vector.reduction pair after.
-  pm.addNestedPass<mlir::func::FuncOp>(
-      createLegoVectorizeArgminPass("avx512"));
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+    // Recognise argmin / argmax loops: paired (val, idx) reduction with
+    // data-dependent updates that clang scalarises.  Emits vector
+    // accumulators + arith.minimumf + arith.select inside the loop, and a
+    // single vector.reduction pair after.
+    pm.addNestedPass<mlir::func::FuncOp>(
+        createLegoVectorizeArgminPass("avx512"));
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
 
-  // Recognise inclusive prefix-scan loops (cumulative sum).  Loop-carried
-  // dependency defeats clang's auto-vec; LEGO emits a Hillis-Steele
-  // in-vector prefix sum + scalar carry.
-  pm.addNestedPass<mlir::func::FuncOp>(
-      createLegoVectorizeScanPass("avx512"));
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+    // Recognise inclusive prefix-scan loops (cumulative sum).  Loop-carried
+    // dependency defeats clang's auto-vec; LEGO emits a Hillis-Steele
+    // in-vector prefix sum + scalar carry.
+    pm.addNestedPass<mlir::func::FuncOp>(
+        createLegoVectorizeScanPass("avx512"));
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
 
-  // Recognise filtered (predicated) reductions: clang scalarises the
-  // data-dependent branch.  LEGO emits a vector accumulator + per-chunk
-  // arith.cmpf + arith.select(mask, v, identity) + combine; one
-  // vector.reduction at the end.
-  pm.addNestedPass<mlir::func::FuncOp>(
-      createLegoVectorizeFilteredReducePass("avx512"));
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+    // Recognise filtered (predicated) reductions: clang scalarises the
+    // data-dependent branch.  LEGO emits a vector accumulator + per-chunk
+    // arith.cmpf + arith.select(mask, v, identity) + combine; one
+    // vector.reduction at the end.
+    pm.addNestedPass<mlir::func::FuncOp>(
+        createLegoVectorizeFilteredReducePass("avx512"));
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
 
-  // Recognise RLE / edge-detect compactions: predicate ``A[i] != prev``
-  // is loop-carried via the previous-element iter_arg.  LEGO emits
-  // vector.shuffle to thread the carry across chunks + vector.compressstore.
-  pm.addNestedPass<mlir::func::FuncOp>(
-      createLegoVectorizeRLEPass("avx512"));
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+    // Recognise RLE / edge-detect compactions: predicate ``A[i] != prev``
+    // is loop-carried via the previous-element iter_arg.  LEGO emits
+    // vector.shuffle to thread the carry across chunks + vector.compressstore.
+    pm.addNestedPass<mlir::func::FuncOp>(
+        createLegoVectorizeRLEPass("avx512"));
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
 
-  pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("avx512"));
+    pm.addNestedPass<mlir::func::FuncOp>(createLegoVectorizePass("avx512"));
+  }
+  // When bypassed, scf.for + arith + memref pass through untouched.  Vector
+  // dialect ops are absent, so convert-vector-to-llvm below is a no-op and
+  // LLVM's own LoopVectorize / SLP at opt_level=3 handles the loops.
 
   // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
   // convert-vector-to-llvm must precede SCF→CF so that the vector loop body
