@@ -13,13 +13,13 @@ The candidates cover distinct vectorization-shape paths:
 | `01_saxpy`             | unit-stride pointwise          |
 | `02_gemm_row_major`    | reduction loop                 |
 | `03_3pt_stencil_1d`    | constant-offset gather         |
-| `05_morton_2d`         | bit-permuted index             |
-| `07_mixed_precision`   | mixed dtypes                   |
-| `08_brick_within_cell` | 3D brick                       |
-| `43_spmv_indirect`     | data-dependent index (gather)  |
-| `44_predicated_fma`    | predicated update              |
-| `46_scatter_compute`   | scatter                        |
-| `47_multi_reduce`      | multi-output reduction         |
+| `04_morton_2d`         | bit-permuted index             |
+| `05_mixed_precision`   | mixed dtypes                   |
+| `06_brick_within_cell` | 3D brick                       |
+| `07_spmv_indirect`     | data-dependent index (gather)  |
+| `08_predicated_fma`    | predicated update              |
+| `09_scatter_compute`   | scatter                        |
+| `10_multi_reduce`      | multi-output reduction         |
 
 ## Run
 

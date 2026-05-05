@@ -1,4 +1,4 @@
-"""08_brick_within_cell: within-brick vectorisation.
+"""06_brick_within_cell: within-brick vectorisation.
 
 Run at N=1M to amortize JIT startup overhead.
 """

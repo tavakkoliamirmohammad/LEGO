@@ -1,4 +1,4 @@
-"""47_multi_reduce: sum + max + min computed in a single pass over A[].
+"""10_multi_reduce: sum + max + min computed in a single pass over A[].
 
 Multi-output reduction with three iter_args (s, mx, mn).  clang -O3 -march=native
 can vectorise *one* reduction (e.g. sum) cleanly, but stacking max+min on top

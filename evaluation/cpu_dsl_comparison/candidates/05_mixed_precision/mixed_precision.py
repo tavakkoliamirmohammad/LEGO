@@ -1,4 +1,4 @@
-"""07_mixed_precision: scalar-argument f32 promotion path.
+"""05_mixed_precision: scalar-argument f32 promotion path.
 
 Exercises the scalar ``scale`` parameter path (CT_FLOAT promoted to a
 runtime f32 constant) + a fused multiply-add into Y.  ``mixed precision``

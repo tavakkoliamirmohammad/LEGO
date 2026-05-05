@@ -1,4 +1,4 @@
-"""44_predicated_fma: predicated FMA — apply C[i] = A[i]*B[i] + C[i]
+"""08_predicated_fma: predicated FMA — apply C[i] = A[i]*B[i] + C[i]
 only where ``mask[i] > threshold``.
 
 Exercises predicated computation: an inner update conditional on a

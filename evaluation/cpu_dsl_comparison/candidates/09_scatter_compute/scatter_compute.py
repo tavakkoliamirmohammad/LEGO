@@ -1,4 +1,4 @@
-"""46_scatter_compute: per-element polynomial evaluation followed by an
+"""09_scatter_compute: per-element polynomial evaluation followed by an
 indirect scatter store.
 
 This kernel is the genuine clang-miss: the scatter store at the end

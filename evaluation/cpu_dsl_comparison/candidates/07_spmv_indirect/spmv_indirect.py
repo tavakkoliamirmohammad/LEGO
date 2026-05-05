@@ -1,4 +1,4 @@
-"""43_scatter_perm: B[idx[i]] = A[i] * 2.0 — indirect-store (scatter).
+"""07_spmv_indirect: B[idx[i]] = A[i] * 2.0 — indirect-store (scatter).
 
 Targets clang's *real* blind spot: indirect stores. clang's
 auto-vectoriser emits vector.gather for indirect *reads* but routinely

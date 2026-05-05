@@ -1,4 +1,4 @@
-"""05_morton_2d: read from a Z-Morton encoded 1-D buffer using inline bit ops.
+"""04_morton_2d: read from a Z-Morton encoded 1-D buffer using inline bit ops.
 
 Expected verdict: PARITY or WIN vs gcc on the gather path, since both must
 perform irregular gather reads. GCC can't auto-vectorize Morton decode; LEGO
