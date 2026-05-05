@@ -367,10 +367,13 @@ class _Compiler(_BaseCompiler):
             val, _ = self._expr(node.args[0])
             return (self.ctx.rsqrt(val), F32)
         if name in ("max", "min"):
-            a, _ = self._expr(node.args[0])
-            b, _ = self._expr(node.args[1])
+            av, at = self._expr(node.args[0])
+            bv, bt = self._expr(node.args[1])
+            # Promote compile-time floats/ints to runtime so arith
+            # max/minimumf get SSA values on both sides.
+            av, at, bv, bt = _promote(self.ctx, av, at, bv, bt)
             op = self.ctx.maximumf if name == "max" else self.ctx.minimumf
-            return (op(a, b), F32)
+            return (op(av, bv), F32)
 
         # GPU-only constructs — raise with a helpful message
         _gpu_only = {
