@@ -30,6 +30,16 @@ CFLAGS_AGGRESSIVE = -O3 -march=native -mavx512f -ffast-math -Wall -Wno-unused-re
 # Clang aggressive (for three-way comparison)
 CFLAGS_CLANG = -O3 -march=native -mavx512f -ffast-math -Wall -Wno-unused-result
 
+# Clang STRICT — apples-to-apples vs LEGO's JIT defaults.  LEGO does
+# enable FP reduction reassoc end-to-end (matches gcc -fassociative-math)
+# but does NOT enable -ffinite-math / -fno-signed-zeros / reciprocal
+# approximation / fast-math algebraic identities.  This variant drops
+# -ffast-math so the C side gets exactly the same FP semantics window
+# as LEGO's vector.reduction lowering.
+CFLAGS_CLANG_STRICT = -O3 -march=native -mavx512f -fassociative-math \
+                      -fno-signed-zeros -fno-trapping-math \
+                      -Wall -Wno-unused-result
+
 # Original 8 candidates that existed before
 SRCS_ORIG = saxpy.c vecadd.c gemm.c stencil_3pt.c brick_within_cell.c \
             mixed_precision.c col_major.c self_update.c morton.c
@@ -46,21 +56,24 @@ SRCS_NEW = fma_1M.c fma_64k.c stride2_16k.c stride4_16k.c \
 ALL_SRCS = $(SRCS_ORIG) $(SRCS_NEW)
 
 # Derived binary names
-O3_BINS        = $(ALL_SRCS:.c=_O3)
-AGG_BINS       = $(ALL_SRCS:.c=_agg)
-CLANG_BINS     = $(ALL_SRCS:.c=_clang)
+O3_BINS              = $(ALL_SRCS:.c=_O3)
+AGG_BINS             = $(ALL_SRCS:.c=_agg)
+CLANG_BINS           = $(ALL_SRCS:.c=_clang)
+CLANG_STRICT_BINS    = $(ALL_SRCS:.c=_clang_strict)
 
 # Legacy GCC bins (original aggressive flags, no suffix — keep for backward compat)
 GCC_BINS   = $(SRCS_ORIG:.c=)
 CLANG_BINS_ORIG = $(SRCS_ORIG:.c=_clang)
 
-all: $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS)
+all: $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS) $(CLANG_STRICT_BINS)
 
 O3: $(O3_BINS)
 
 aggressive: $(AGG_BINS)
 
 clang_all: $(CLANG_BINS)
+
+clang_strict_all: $(CLANG_STRICT_BINS)
 
 # Legacy GCC binaries (aggressive flags, original names — backward compat)
 %: %.c
@@ -78,6 +91,10 @@ clang_all: $(CLANG_BINS)
 %_agg: %.c
 	$(CC_GCC) $(CFLAGS_AGGRESSIVE) -o $@ $<
 
+# Clang STRICT — apples-to-apples with LEGO's JIT FP semantics
+%_clang_strict: %.c
+	$(CC_CLANG) $(CFLAGS_CLANG_STRICT) -o $@ $<
+
 # Run all O3 baselines with default sizes
 run_O3: $(O3_BINS)
 	@for b in $(O3_BINS); do ./$$b; done
@@ -91,6 +108,6 @@ run: $(GCC_BINS)
 	@for b in $(GCC_BINS); do ./$$b; done
 
 clean:
-	rm -f $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS)
+	rm -f $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS) $(CLANG_STRICT_BINS)
 
 .PHONY: all O3 aggressive clang_all run_O3 run_agg run clean
