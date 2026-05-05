@@ -64,22 +64,20 @@ C_BASELINES_DIR = ROOT / "c_baselines"
 # ---------------------------------------------------------------------------
 _C_BASELINE_MAP = {
     # Curated 10-kernel set, one representative per distinct lowering path.
-    # Earlier iterations of this branch had 54 candidates exploring various
-    # tile / Morton-pad / AoSoA / brick / wavefront variants, but they all
-    # exercised the same C baseline source per shape and reported numbers
-    # that depended on whether N was a runtime parameter on the C side
-    # vs a compile-time constant on the LEGO side (see _bench_assume.h).
-    # The reduced set below covers each distinct pattern once.
-    "01_saxpy":               ("saxpy",              1 << 20),  # unit-stride pointwise
-    "02_gemm_row_major":      ("gemm",               64),       # reduction loop
-    "03_3pt_stencil_1d":      ("stencil_3pt",        1024),     # constant-offset gather
-    "05_morton_2d":           ("morton",             1 << 16),  # bit-permuted index
-    "07_mixed_precision":     ("mixed_precision",    1 << 20),  # mixed dtypes
-    "08_brick_within_cell":   ("brick_within_cell",  1 << 20),  # 3D brick
-    "43_spmv_indirect":       ("spmv_indirect",      None),     # data-dependent index
-    "44_predicated_fma":      ("predicated_fma",     None),     # predicated update
-    "46_scatter_compute":     ("scatter_compute",    None),     # scatter
-    "47_multi_reduce":        ("multi_reduce",       None),     # multi-output reduction
+    # Each candidate's N matches its C source's DEFAULT_N, so the binaries
+    # are invoked without an argv N (None) and pick up DEFAULT_N internally.
+    # That keeps the _clang_const variant valid (BENCH_ASSUME_N(N) holds
+    # because N == DEFAULT_N at runtime).
+    "01_saxpy":               ("saxpy",              None),  # unit-stride pointwise
+    "02_gemm_row_major":      ("gemm",               None),  # reduction loop
+    "03_3pt_stencil_1d":      ("stencil_3pt",        None),  # constant-offset gather
+    "05_morton_2d":           ("morton",             None),  # bit-permuted index
+    "07_mixed_precision":     ("mixed_precision",    None),  # mixed dtypes
+    "08_brick_within_cell":   ("brick_within_cell",  None),  # 3D brick
+    "43_spmv_indirect":       ("spmv_indirect",      None),  # data-dependent index
+    "44_predicated_fma":      ("predicated_fma",     None),  # predicated update
+    "46_scatter_compute":     ("scatter_compute",    None),  # scatter
+    "47_multi_reduce":        ("multi_reduce",       None),  # multi-output reduction
 }
 
 
@@ -135,26 +133,18 @@ def run_clang_baseline(cand_name: str, repeats: int = 1) -> float:
 
 
 def run_clang_const_baseline(cand_name: str, repeats: int = 1) -> float:
-    """Run clang aggressive + BENCH_ASSUME_N(N == DEFAULT_N).
+    """Run clang -O3 -march=native -mavx512f + ``__builtin_assume(N == DEFAULT_N)``.
 
-    This is the apples-to-apples baseline against LEGO's JIT.  LEGO bakes
-    each candidate's N as a Python compile-time literal; the C kernels by
-    default take N as a runtime argv parameter so clang can't fold the
-    trip count into algebraic identities (e.g. that the Morton bit-spread
-    is the identity permutation for N <= 65536).  The const variant calls
-    ``__builtin_assume(N == DEFAULT_N)`` at the top of the kernel to give
-    clang the same compile-time-N visibility LEGO has.
-
-    Returns NaN when the candidate passes a non-default N at runtime
-    (``__builtin_assume`` mismatch is UB; we skip rather than mislead).
+    Apples-to-apples baseline against LEGO's JIT.  LEGO bakes each
+    candidate's N as a Python compile-time literal, so clang needs the
+    same compile-time-N visibility to do the same algebraic folds.  Each
+    .c source defines a DEFAULT_N matching its candidate's N; the binary
+    is invoked with no argv and the assume holds.
     """
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
     bin_name, N = entry
-    if N is not None:
-        # Candidate uses a non-default size; const-N build doesn't apply.
-        return float('nan')
     return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang_const", N, repeats)
 
 
@@ -297,15 +287,6 @@ def run_measure(cand_dir: Path, sub_env: dict, repeats: int = 1) -> dict:
     return rec
 
 
-def _median(xs):
-    s = sorted(xs)
-    n = len(s)
-    if n == 0:
-        return float('nan')
-    mid = n // 2
-    if n % 2:
-        return s[mid]
-    return (s[mid - 1] + s[mid]) / 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +520,7 @@ def main():
     print()
     print(f"  --- Correctness (verify.py) ---")
     print(f"  VERIFIED:   {n_verified:3d} / {total}")
-    print(f"  PENDING:    {n_pending:3d} / {total}  (known infra gaps, see R19)")
+    print(f"  PENDING:    {n_pending:3d} / {total}")
     print(f"  FAIL/MISS:  {n_fail_v:3d} / {total}")
     print()
     print(f"  --- Verdicts vs gcc -O3 (conservative reference) ---")

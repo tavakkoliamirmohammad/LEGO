@@ -1,11 +1,7 @@
 """03_3pt_stencil_1d: B[i] = A[i-1] + A[i] + A[i+1], interior only.
 
-Expected verdict: WIN (unit-stride loads; overlapping windows vectorise well).
-
-Note: v1 of the cpu_dsl pipeline has an open issue (R12) where ``B[i + k]``
-stores with a constant offset trigger a memref.store type mismatch during
-vector lowering. If that error fires, the result is captured as ERROR/LOSS
-and the candidate records the error message, so the harness still runs clean.
+Unit-stride loads with overlapping windows; LLVM's auto-vectoriser
+handles this through the cpu_dsl pipeline.
 """
 import json
 import numpy as np

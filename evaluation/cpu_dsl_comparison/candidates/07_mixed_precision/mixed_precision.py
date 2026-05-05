@@ -1,12 +1,9 @@
 """07_mixed_precision: scalar-argument f32 promotion path.
 
-Expected verdict: PARITY or WIN. This kernel exercises the scalar 'scale'
-parameter path (CT_FLOAT promoted to a runtime f32 constant) + a fused
-multiply-add into Y. It deliberately uses only 2 buffers (X, Y) to avoid
-the v1 R12 store-to-3rd-buffer bug.
-
-'mixed precision' here means: Python float -> f32 constant in the IR (the
-compiler must emit arith.constant f32 instead of silently truncating).
+Exercises the scalar ``scale`` parameter path (CT_FLOAT promoted to a
+runtime f32 constant) + a fused multiply-add into Y.  ``mixed precision``
+here means: Python float -> f32 constant in the IR (the compiler must
+emit ``arith.constant f32`` rather than silently truncating).
 
 Run at N=1M to amortize JIT startup overhead.
 """

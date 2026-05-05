@@ -1,18 +1,16 @@
 //===- LegoArmNeonPipeline.cpp --------------------------------------------===//
 //
-// End-to-end MLIR pipeline that lowers Lego dialect → vector dialect (via
-// lego-vectorize) → LLVM IR targeting ARM NEON.
-//
-// V1: lego-vectorize accepts `target=neon` and emits 16-byte (128-bit)
-// NEON-width vectors directly: vector<2xf64> for f64, vector<4xf32> for f32.
-// Width-aware SVE emission (scalable vectors) is deferred to R15.
+// End-to-end MLIR pipeline that lowers Lego dialect → LLVM IR targeting
+// ARM NEON.
 //
 // Pipeline:
 //   1. buildLegoLowerPipeline   — shared front-end (LEGO → Arith)
-//   2. canonicalize + CSE       — clean up before vectorization
-//   3. lego-vectorize           — emit vector.transfer_read/write etc.
-//   4. convert-vector-to-llvm   — lower vector dialect to LLVM IR
-//   5. SCF → CF → Arith/MemRef/Func/CF → LLVM tail
+//   2. canonicalize + CSE
+//   3. convert-vector-to-llvm   — lower any vector dialect ops produced
+//                                  upstream (linalg::vectorize is not run
+//                                  on the ARM pipeline; non-affine loops
+//                                  fall through to LLVM as scalar scf.for)
+//   4. SCF → CF → Arith/MemRef/Func/CF → LLVM tail
 //
 //===----------------------------------------------------------------------===//
 
@@ -34,13 +32,8 @@ namespace lego {
 
 void buildLegoToArmNeonPipeline(OpPassManager &pm,
                                 const LegoToArmNeonPipelineOptions &opts) {
-  // R15: lego-vectorize now accepts a `target` option; this pipeline passes
-  // "neon" to emit 16-byte (128-bit) NEON-width vectors:
-  //   f64: 16/8 = 2 lanes → vector<2xf64>
-  //   f32: 16/4 = 4 lanes → vector<4xf32>
-  // On an x86 host, these NEON-width vectors are correct MLIR and can be
-  // FileCheck-verified. For actual ARM execution, add mlir-translate → llc
-  // with -mtriple=aarch64-linux-gnu -mattr=+neon.
+  // For actual ARM execution, run mlir-translate → llc with
+  //   -mtriple=aarch64-linux-gnu -mattr=+neon
 
   // Phase 1: shared front-end (LEGO → Arith + strength reduction).
   buildLegoLowerPipeline(pm);
@@ -48,7 +41,7 @@ void buildLegoToArmNeonPipeline(OpPassManager &pm,
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
 
-  // Phase 3: LLVM tail — lower vector dialect, then the rest of the dialects.
+  // LLVM tail.
   pm.addPass(createConvertVectorToLLVMPass());
   pm.addPass(createSCFToControlFlowPass());
   pm.addPass(createArithToLLVMConversionPass());

@@ -11,7 +11,7 @@
 #include <time.h>
 
 #include "_bench_assume.h"
-#define DEFAULT_N 8192
+#define DEFAULT_N 1024
 #define WARMUP    100
 #define TIMED     1000
 

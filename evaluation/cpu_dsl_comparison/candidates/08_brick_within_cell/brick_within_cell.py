@@ -1,12 +1,4 @@
-"""08_brick_within_cell: within-brick vectorisation proof-point.
-
-Copied from evaluation/cpu_vector_proof/brick_within_cell/kernel.py.
-Expected verdict: PARITY or slight LOSS vs NumPy (NumPy BLAS loop is
-already heavily optimised; beating it requires FMA intrinsic quality
-per roadmap R12 + better cost model).
-
-This is the only candidate already proven to compile and run correctly
-end-to-end in v1 (see roadmap.md R1 proof-point results).
+"""08_brick_within_cell: within-brick vectorisation.
 
 Run at N=1M to amortize JIT startup overhead.
 """

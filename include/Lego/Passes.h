@@ -162,24 +162,18 @@ struct LegoToX86VectorPipelineOptions
                      "default false; only safe when ALL buffers are 64-byte aligned"),
       llvm::cl::init(false)};
 
-  // use-linalg-vectorize (default: false; opt-in during the lego→linalg
-  // refactor)
+  // use-linalg-vectorize (default: true)
   //
-  // When true, run convert-lego-to-linalg + upstream linalg::vectorize
-  // BEFORE the custom lego-vectorize pass. The convert pass raises every
-  // affine scf.for to linalg.generic; linalg::vectorize then turns those
-  // into vector dialect ops directly. Any loop that wasn't affine
-  // (Z-Morton et al) stays as scf.for and the custom lego-vectorize
-  // handles it as before.
-  //
-  // Default false until the dashboard A/B confirms the linalg path
-  // matches or beats the custom path on every affine candidate. Will
-  // become the only path once the custom code is deleted.
+  // When true, run ``convert-lego-to-linalg`` + upstream ``linalg::vectorize``.
+  // The convert pass raises every affine scf.for to linalg.generic;
+  // linalg::vectorize then turns those into vector dialect ops.  Loops that
+  // fail the affine check pass through as scf.for and reach the LLVM tail
+  // unchanged, where LLVM's auto-vectoriser handles them.
   PassOptions::Option<bool> useLinalgVectorize{
       *this, "use-linalg-vectorize",
-      llvm::cl::desc("Use convert-lego-to-linalg + upstream linalg::vectorize "
-                     "for affine loops.  Non-affine loops (Z-Morton et al) "
-                     "pass through to LLVM's auto-vectoriser unchanged."),
+      llvm::cl::desc("Run convert-lego-to-linalg + upstream linalg::vectorize "
+                     "on affine loops.  Non-affine loops fall through to "
+                     "LLVM's auto-vectoriser unchanged."),
       llvm::cl::init(true)};
 };
 
@@ -192,7 +186,7 @@ struct LegoToArmNeonPipelineOptions
       llvm::cl::init("cortex-a76")};
 };
 
-/// Options for the lego-to-arm-sve pipeline (R15).
+/// Options for the lego-to-arm-sve pipeline.
 /// Emits fixed-width SVE-shaped vectors (vscale=1, 128-bit minimum).
 /// On SVE hardware, the LLVM AArch64 backend promotes these to the full
 /// runtime SVE vector length (+sve target feature).
@@ -275,13 +269,6 @@ void buildGPUToLLVMAndBinaryPipeline(OpPassManager &pm, StringRef format);
 #define GEN_PASS_DECL_LEGOVERIFYBIJECTIVITYPASS
 #define GEN_PASS_DECL_LEGOVERIFYPASS
 #define GEN_PASS_DECL_LEGOSTRENGTHREDUCTIONPASS
-#define GEN_PASS_DECL_LEGOVECTORIZEPASS
-#define GEN_PASS_DECL_LEGOVECTORIZECOMPACTPASS
-#define GEN_PASS_DECL_LEGOVECTORIZESCATTERADDPASS
-#define GEN_PASS_DECL_LEGOVECTORIZEARGMINPASS
-#define GEN_PASS_DECL_LEGOVECTORIZESCANPASS
-#define GEN_PASS_DECL_LEGOVECTORIZEFILTEREDREDUCEPASS
-#define GEN_PASS_DECL_LEGOVECTORIZERLEPASS
 #define GEN_PASS_DECL_CONVERTLEGOTOLINALGPASS
 #define GEN_PASS_REGISTRATION
 #include "Lego/Passes.h.inc"

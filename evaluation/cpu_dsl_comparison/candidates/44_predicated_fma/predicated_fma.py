@@ -1,18 +1,10 @@
 """44_predicated_fma: predicated FMA — apply C[i] = A[i]*B[i] + C[i]
 only where ``mask[i] > threshold``.
 
-Targets clang's blind spot on predicated computation: when an inner
-update is conditional on a runtime value, clang's auto-vectoriser
-falls back to a scalar loop (or, if it does vectorise, emits a
-masked-store sequence with poor lane-utilisation).
-
-LEGO's R17 path recognises ``scf.if`` with a comparison condition
-inside a vector-loop body and lowers to ``vector.maskedstore`` —
-single masked write per vector chunk.
-
-Expected verdict: WIN vs both gcc and clang on this kind of
-data-dependent control-flow (image filters with thresholds, branchy
-graph traversals, conditional sparse updates).
+Exercises predicated computation: an inner update conditional on a
+runtime value.  Verifies LLVM's auto-vectoriser produces a masked
+sequence through the cpu_dsl pipeline with the same FP semantics
+LEGO's lowering sets at vector→llvm.
 """
 import json
 import numpy as np

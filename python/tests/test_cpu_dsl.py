@@ -305,13 +305,13 @@ def test_bitwise_gather_runs():
 
 
 # ---------------------------------------------------------------------------
-# Tier 10 — AOT object-file path (R13)
+# Tier 10 — AOT object-file path
 # Validates that compile_aot() produces a .o file containing vector FMA ops.
 # ---------------------------------------------------------------------------
 
 @_skip_no_x86_pipeline
 def test_aot_object_file():
-    """R13: compile_aot() emits a relocatable .o with vector instructions.
+    """compile_aot() emits a relocatable .o with vector instructions.
 
     Compiles SAXPY to a .o via ExecutionEngine.dump_to_object_file, then
     runs objdump -d to confirm the file contains vector FMA or multiply

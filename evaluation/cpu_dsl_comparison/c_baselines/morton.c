@@ -21,7 +21,7 @@
 #include <time.h>
 #include "_bench_assume.h"
 
-#define DEFAULT_N (1 << 20)   /* 1M elements */
+#define DEFAULT_N (1 << 16)   /* 64K elements (256x256 flat — matches candidate 05) */
 #define WARMUP    50
 #define TIMED     200
 

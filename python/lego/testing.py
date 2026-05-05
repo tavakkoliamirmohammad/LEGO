@@ -17,23 +17,22 @@ Example
 
     N = 1 << 20
 
-    def saxpy_ref(X, Y):
-        a = 2.5
+    def saxpy_ref(a, X, Y):
         Y[:] = a * X + Y
 
     @benchmark(reference=saxpy_ref, n_iters=1000, warmup=100)
     @cpu_kernel
-    def saxpy(X: Buffer[N], Y: Buffer[N]):
-        a = 2.5
+    def saxpy(a: float, X: Buffer[N], Y: Buffer[N]):
         for i in range(N):
             Y[i] = a * X[i] + Y[i]
 
     if __name__ == "__main__":
         rng = np.random.default_rng(0)
+        a = np.float32(2.5)
         X = rng.standard_normal(N).astype(np.float32)
         Y = rng.standard_normal(N).astype(np.float32)
-        print(saxpy.measure(X, Y))
-        print("verified:", saxpy.verify(X, Y))
+        print(saxpy.measure(a, X, Y))
+        print("verified:", saxpy.verify(a, X, Y))
 """
 
 import json
