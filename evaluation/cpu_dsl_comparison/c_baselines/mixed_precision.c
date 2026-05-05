@@ -12,12 +12,14 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "_bench_assume.h"
 #define DEFAULT_N (1 << 20)
 #define WARMUP    100
 #define TIMED     1000
 
 static void __attribute__((noinline))
 mixed_kernel(const float *X, double *Y, int N) {
+    BENCH_ASSUME_N(N);
     for (int i = 0; i < N; i++)
         Y[i] += (double)X[i];
 }

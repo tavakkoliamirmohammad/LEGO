@@ -11,12 +11,14 @@
 #include <string.h>
 #include <time.h>
 
+#include "_bench_assume.h"
 #define DEFAULT_N 64
 #define WARMUP    100
 #define TIMED     1000
 
 static void __attribute__((noinline))
 gemm_kernel(const float *A, const float *B, float *C, int N) {
+    BENCH_ASSUME_N(N);
     for (int i = 0; i < N; i++)
         for (int k = 0; k < N; k++) {
             float aik = A[i * N + k];

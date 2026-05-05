@@ -63,92 +63,23 @@ C_BASELINES_DIR = ROOT / "c_baselines"
 #   stencil_2d5pt_30x30 : 2D 5-point jacobi stencil, 30x30 flat, N_INNER=840 (candidate 37)
 # ---------------------------------------------------------------------------
 _C_BASELINE_MAP = {
-    # ---- Original 8 candidates (have all three C variants) ----
-    "01_saxpy":               ("saxpy",              1 << 20),
-    "02_gemm_row_major":      ("gemm",               64),
-    "03_3pt_stencil_1d":      ("stencil_3pt",        1024),
-    "04_col_major_inner":     ("col_major",           256),
-    "05_morton_2d":           ("morton",              1 << 16),
-    "06_self_update":         ("self_update",         4096),
-    "07_mixed_precision":     ("mixed_precision",     1 << 20),
-    "08_brick_within_cell":   ("brick_within_cell",   1 << 20),
-    # ---- Z-Morton gather FMA, N=64K ----
-    "09_gemm_zmorton":           ("morton_fma_64k",    None),
-    "10_lu_zmorton":             ("morton_fma_64k",    None),
-    "11_chol_zmorton":           ("morton_fma_64k",    None),
-    # ---- Tiled 2D GEMM (N=512×512) — compare against naive 3-loop gemm.c ----
-    "12_gemm_reg_L1_L2_tile":    ("gemm",              512),
-    "13_3mm_reg_L1_L2_tile":     ("fma_1M",            None),
-    "14_2mm_reg_L1_tile":        ("fma_1M",            None),
-    "15_trmm_L1_L2_tile":        ("fma_1M",            None),
-    "16_doitgen_reg_L1_tile":    ("fma_1M",            None),
-    "17_tensor_contraction_gett":("fma_1M",            None),
-    "18_tblis_notranspose":      ("gemm",               64),
-    # ---- 3D stencil, 32x32x32 interior ----
-    "19_bricklib_3d7pt":         ("stencil_3d7pt",     None),
-    # 20 is a 3D 13-point stencil — use the correct 13pt C baseline, not the 7pt one.
-    # gcc -O3 cannot auto-vectorize the 13pt stencil (too many strided gathers),
-    # so LEGO's vectorized output wins significantly vs the scalar C reference.
-    "20_bricklib_3d13pt":        ("stencil_3d13pt",    None),
-    "21_heat3d_brick":           ("stencil_3d7pt",     None),
-    # 22 is a 2D jacobi stencil (256x256 flat), not 3D — use the correct
-    # stencil_2d5pt baseline that matches the kernel's flat-loop structure.
-    "22_jacobi2d_brick":         ("stencil_2d5pt",     None),
-    # ---- Stride-2 deinterleave, N=16K ----
-    "23_symm_rfp":               ("stride2_16k",       None),
-    "24_syrk_rfp":               ("stride2_16k",       None),
-    "25_nw_antidiag":            ("stride2_16k",       None),
-    # ---- Skew tile, stride-2 gather at N=4096 ----
-    # kernel.py and measure.py both use stride-2 at N=4096; pass N=4096 to C baseline.
-    "26_nussinov_skew":          ("stride2_16k",        4096),
-    "27_zuker_skew":             ("stride2_16k",        4096),
-    "28_seidel2d_wavefront":     ("fma_1M",            None),
-    # ---- AoSoA stride-4, N=16K ----
-    "29_particlefilter_aosoA":   ("stride4_16k",       None),
-    "30_lulesh_aosoA":           ("stride4_16k",       None),
-    "31_hpccg_aosoA":            ("stride4_16k",       None),
-    # ---- Block-cyclic / tiled, unit-stride N=1M ----
-    "32_fdtd2d_block_cyclic":    ("fma_1M",            None),
-    "33_adi_block_cyclic":       ("fma_1M",            None),
-    # ---- Pow2-padded Morton gather, N=64K ----
-    # These kernels apply the same Z-Morton bit-interleaving index as candidates
-    # 09-11 and 36 (ti = i & 0x5555; tj = (i>>1) & 0x5555; morton = ti|(tj<<1)).
-    # Although that particular bitmask produces the identity permutation for
-    # N=65536, gcc -O3 cannot prove this and emits scalar code (same as
-    # morton_fma_64k.c).  The fair baseline is morton_fma_64k, not fma_64k
-    # (which is unit-stride and auto-vectorized by gcc to ~4× faster).
-    "34_gemm_pow2_pad":          ("morton_fma_64k",    None),
-    "35_heat3d_pow2_pad":        ("morton_fma_64k",    None),
-    # ---- Non-pow2 Morton gather, N=64K ----
-    "36_gemm_nonpow2_morton":    ("morton_fma_64k",    None),
-    # ---- Non-pow2 2D stencil (28x30=840 interior) ----
-    # Use the matching 30x30 baseline (N_INNER=840), not the 32x32x32 3D baseline (N_INNER=30720).
-    "37_stencil_nonpow2_brick":  ("stencil_2d5pt_30x30", None),
-    # ---- Non-pow2 skew, stride-2, N=16K ----
-    "38_nussinov_nonpow2_skew":  ("stride2_16k",       None),
-    # ---- Tiled, unit-stride N=1M ----
-    "39_hotspot_tile":           ("fma_1M",            None),
-    "40_mvt_L1_tile":            ("fma_1M",            None),
-    "41_bicg_L1_tile":           ("fma_1M",            None),
-    "42_dgemm_reg_L1_L2_tile":   ("fma_1M",            None),
-    # ---- New clang-blind-spot candidates (43-45) ----
-    "43_spmv_indirect":          ("spmv_indirect",     None),
-    "44_predicated_fma":         ("predicated_fma",    None),
-    "45_stride_runtime":         ("stride7",           None),
-    # ---- Scatter-with-compute (46) ----
-    "46_scatter_compute":        ("scatter_compute",   None),
-    # ---- Tier 1/2/3 non-affine coverage (47-54) ----
-    # Each candidate has a dedicated C reference (.c file in c_baselines/)
-    # built in three flavours: _O3 (gcc -O3), _agg (gcc + AVX-512 + ffast-math),
-    # _clang (clang-20 + AVX-512 + ffast-math).
-    "47_multi_reduce":           ("multi_reduce",      None),
-    "48_count_if":               ("count_if",          None),
-    "49_saturating_add":         ("saturating_add",    None),
-    "50_all_positive":           ("all_positive",      None),
-    "51_find_first":             ("find_first",        None),
-    "52_bit_reverse":            ("bit_reverse",       None),
-    "53_expand":                 ("expand",            None),
-    "54_find_byte":              ("find_byte",         None),
+    # Curated 10-kernel set, one representative per distinct lowering path.
+    # Earlier iterations of this branch had 54 candidates exploring various
+    # tile / Morton-pad / AoSoA / brick / wavefront variants, but they all
+    # exercised the same C baseline source per shape and reported numbers
+    # that depended on whether N was a runtime parameter on the C side
+    # vs a compile-time constant on the LEGO side (see _bench_assume.h).
+    # The reduced set below covers each distinct pattern once.
+    "01_saxpy":               ("saxpy",              1 << 20),  # unit-stride pointwise
+    "02_gemm_row_major":      ("gemm",               64),       # reduction loop
+    "03_3pt_stencil_1d":      ("stencil_3pt",        1024),     # constant-offset gather
+    "05_morton_2d":           ("morton",             1 << 16),  # bit-permuted index
+    "07_mixed_precision":     ("mixed_precision",    1 << 20),  # mixed dtypes
+    "08_brick_within_cell":   ("brick_within_cell",  1 << 20),  # 3D brick
+    "43_spmv_indirect":       ("spmv_indirect",      None),     # data-dependent index
+    "44_predicated_fma":      ("predicated_fma",     None),     # predicated update
+    "46_scatter_compute":     ("scatter_compute",    None),     # scatter
+    "47_multi_reduce":        ("multi_reduce",       None),     # multi-output reduction
 }
 
 
@@ -185,17 +116,8 @@ def _run_c_binary(bin_path: Path, N, repeats: int = 1) -> float:
     return min(vals) if vals else float('nan')
 
 
-def run_c_baseline(cand_name: str, repeats: int = 1) -> float:
-    """Run legacy GCC aggressive binary (backward compat, candidates 01-08)."""
-    entry = _C_BASELINE_MAP.get(cand_name)
-    if entry is None:
-        return float('nan')
-    bin_name, N = entry
-    return _run_c_binary(C_BASELINES_DIR / bin_name, N, repeats)
-
-
 def run_c_O3_baseline(cand_name: str, repeats: int = 1) -> float:
-    """Run GCC -O3 only baseline (CASTLE-aligned, primary verdict basis)."""
+    """Run GCC ``-O3`` baseline — conservative reference."""
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
@@ -203,23 +125,8 @@ def run_c_O3_baseline(cand_name: str, repeats: int = 1) -> float:
     return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_O3", N, repeats)
 
 
-def run_c_agg_baseline(cand_name: str, repeats: int = 1) -> float:
-    """Run GCC -O3 -march=native -mavx512f -ffast-math baseline (aggressive)."""
-    entry = _C_BASELINE_MAP.get(cand_name)
-    if entry is None:
-        return float('nan')
-    bin_name, N = entry
-    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_agg", N, repeats)
-
-
 def run_clang_baseline(cand_name: str, repeats: int = 1) -> float:
-    """Run Clang aggressive baseline.
-
-    Available for every candidate that has a matching C reference in
-    ``c_baselines/`` — that's all 54 candidates as of the Tier 1/2/3
-    coverage rollout.  Compiled with clang-20 + ``-O3 -march=native
-    -mavx512f -ffast-math`` to match the GCC aggressive flags.
-    """
+    """Run clang aggressive baseline (-O3 -march=native -mavx512f -ffast-math)."""
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
@@ -227,42 +134,28 @@ def run_clang_baseline(cand_name: str, repeats: int = 1) -> float:
     return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang", N, repeats)
 
 
-def run_clang_strict_baseline(cand_name: str, repeats: int = 1) -> float:
-    """Run Clang STRICT baseline — apples-to-apples with LEGO's JIT FP semantics.
+def run_clang_const_baseline(cand_name: str, repeats: int = 1) -> float:
+    """Run clang aggressive + BENCH_ASSUME_N(N == DEFAULT_N).
 
-    Compiled with clang-20 + ``-O3 -march=native -mavx512f
-    -fassociative-math -fno-signed-zeros -fno-trapping-math``.
-    Drops ``-ffast-math``'s nnan / ninf / reciprocal / algebraic-identity
-    relaxations, keeping only the FP reduction reassoc that LEGO's
-    vector→llvm lowering already applies (``reassociateFPReductions=true``
-    in ``LegoX86VectorPipeline``).  This is the *fair* clang baseline for
-    judging LEGO's vectorizer — wins/losses against this column reflect
-    pattern recognition, not fast-math algebra clang has and LEGO doesn't.
+    This is the apples-to-apples baseline against LEGO's JIT.  LEGO bakes
+    each candidate's N as a Python compile-time literal; the C kernels by
+    default take N as a runtime argv parameter so clang can't fold the
+    trip count into algebraic identities (e.g. that the Morton bit-spread
+    is the identity permutation for N <= 65536).  The const variant calls
+    ``__builtin_assume(N == DEFAULT_N)`` at the top of the kernel to give
+    clang the same compile-time-N visibility LEGO has.
+
+    Returns NaN when the candidate passes a non-default N at runtime
+    (``__builtin_assume`` mismatch is UB; we skip rather than mislead).
     """
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
     bin_name, N = entry
-    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang_strict", N, repeats)
-
-
-def run_clang_basic_baseline(cand_name: str, repeats: int = 1) -> float:
-    """Run Clang BASIC baseline — plain ``clang-20 -O3 -march=native``.
-
-    No fast-math at all (no ``-fassociative-math``, no ``-fno-signed-zeros``,
-    no ``-mavx512f`` explicitly — though ``-march=native`` enables AVX-512
-    on Zen 4 anyway).  This is the truly apples-to-apples comparison for
-    LEGO when the JIT is also fully strict (bypass + reassocFP=false): both
-    sides do plain ``-O3 -march=native`` with full IEEE-754 semantics.
-
-    Wins / losses vs this column reflect what LEGO's pattern recognizers
-    add over what LLVM's auto-vec produces on its own with the same flags.
-    """
-    entry = _C_BASELINE_MAP.get(cand_name)
-    if entry is None:
+    if N is not None:
+        # Candidate uses a non-default size; const-N build doesn't apply.
         return float('nan')
-    bin_name, N = entry
-    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang_basic", N, repeats)
+    return _run_c_binary(C_BASELINES_DIR / f"{bin_name}_clang_const", N, repeats)
 
 
 # ---------------------------------------------------------------------------
@@ -487,27 +380,18 @@ def main():
     print(f"  [measure] Running {len(cand_dirs)} candidates ...")
     for cand_dir in cand_dirs:
         print(f"    → {cand_dir.name}", flush=True)
-        c_ms      = run_c_baseline(cand_dir.name, repeats=args.measure_repeats)   # legacy (01-08 only)
-        c_O3_ms   = run_c_O3_baseline(cand_dir.name, repeats=args.measure_repeats)
-        c_agg_ms  = run_c_agg_baseline(cand_dir.name, repeats=args.measure_repeats)
-        clang_ms  = run_clang_baseline(cand_dir.name, repeats=args.measure_repeats)
-        clang_strict_ms = run_clang_strict_baseline(cand_dir.name, repeats=args.measure_repeats)
-        clang_basic_ms  = run_clang_basic_baseline(cand_dir.name, repeats=args.measure_repeats)
+        c_O3_ms        = run_c_O3_baseline(cand_dir.name, repeats=args.measure_repeats)
+        clang_ms       = run_clang_baseline(cand_dir.name, repeats=args.measure_repeats)
+        clang_const_ms = run_clang_const_baseline(cand_dir.name, repeats=args.measure_repeats)
         rec = run_measure(cand_dir, sub_env, repeats=args.measure_repeats)
 
         # Attach C baseline timings
-        if not math.isnan(c_ms):
-            rec["c_baseline_ms"] = round(c_ms, 6)
         if not math.isnan(c_O3_ms):
             rec["c_O3_ms"] = round(c_O3_ms, 6)
-        if not math.isnan(c_agg_ms):
-            rec["c_agg_ms"] = round(c_agg_ms, 6)
         if not math.isnan(clang_ms):
             rec["c_clang_ms"] = round(clang_ms, 6)
-        if not math.isnan(clang_strict_ms):
-            rec["c_clang_strict_ms"] = round(clang_strict_ms, 6)
-        if not math.isnan(clang_basic_ms):
-            rec["c_clang_basic_ms"] = round(clang_basic_ms, 6)
+        if not math.isnan(clang_const_ms):
+            rec["c_clang_const_ms"] = round(clang_const_ms, 6)
 
         rec["verify_status"] = "VERIFIED" if rec.get("verified") is True else "FAIL"
 
@@ -515,42 +399,33 @@ def main():
     print()
 
     # Step 4: Print dashboard
-    _has_c = any("c_baseline_ms" in r for r in results)
-    _has_c_O3   = any("c_O3_ms"  in r for r in results)
-    _has_c_agg  = any("c_agg_ms" in r for r in results)
-    _has_clang  = any("c_clang_ms" in r for r in results)
-    _has_clang_strict = any("c_clang_strict_ms" in r for r in results)
-    _has_clang_basic = any("c_clang_basic_ms" in r for r in results)
-    _has_prior  = any("prior_verdict" in r for r in results)
-    _has_layout = any("layout_class" in r for r in results)
-    _has_verify = True
+    _has_c_O3        = any("c_O3_ms"  in r for r in results)
+    _has_clang       = any("c_clang_ms" in r for r in results)
+    _has_clang_const = any("c_clang_const_ms" in r for r in results)
+    _has_prior       = any("prior_verdict" in r for r in results)
+    _has_layout      = any("layout_class" in r for r in results)
+    _has_verify      = True
 
     print("=" * 220)
-    print("  LEGO cpu_dsl_comparison — Full Coverage Dashboard (dual C baselines)")
-    print("  Verdict basis: vs_c_O3 = c_O3_ms / vec_jit_ms")
-    print("    WIN    if vs_c_O3 > 1.05×  |  PARITY if >= 0.95×  |  LOSS otherwise")
-    print("=" * 220)
+    print("  LEGO cpu_dsl_comparison — engineering correctness + perf reference")
+    print("  Verdict reference (against gcc -O3): WIN >1.05×  |  PARITY 0.95-1.05×  |  LOSS <0.95×")
+    print("  Apples-to-apples comparison: vs_c_const (clang -O3 -march=native + __builtin_assume(N==DEFAULT_N))")
+    print("=" * 180)
 
     # Header
     hdr_parts = [f"{'Candidate':<34}"]
     if _has_layout:
         hdr_parts.append(f"{'LayoutClass':<18}")
-    if _has_prior:
-        hdr_parts.append(f"{'PriorVerd':>9}")
     hdr_parts += [
         f"{'N':>8}", f"{'numpy_ms':>10}", f"{'scalar_ms':>10}",
         f"{'vec_ms':>10}", f"{'vec_iso':>8}", f"{'vs_numpy':>8}",
     ]
     if _has_c_O3:
         hdr_parts += [f"{'c_O3_ms':>9}", f"{'vs_c_O3':>8}"]
-    if _has_c_agg:
-        hdr_parts += [f"{'c_agg_ms':>9}", f"{'vs_c_agg':>9}"]
     if _has_clang:
         hdr_parts += [f"{'c_clang_ms':>11}", f"{'vs_clang':>9}"]
-    if _has_clang_strict:
-        hdr_parts += [f"{'clng_str_ms':>12}", f"{'vs_str':>8}"]
-    if _has_clang_basic:
-        hdr_parts += [f"{'clng_bsc_ms':>12}", f"{'vs_bsc':>8}"]
+    if _has_clang_const:
+        hdr_parts += [f"{'c_const_ms':>11}", f"{'vs_const':>9}"]
     if _has_verify:
         hdr_parts.append(f"{'Verify':>10}")
     hdr_parts.append(f"{'Verdict':>8}")
@@ -559,27 +434,20 @@ def main():
     print("-" * len(hdr))
 
     wins = losses = parities = skips = errors = 0
-    wins_vs_agg = losses_vs_agg = parities_vs_agg = 0
     wins_vs_clang = losses_vs_clang = parities_vs_clang = 0
-    wins_vs_strict = losses_vs_strict = parities_vs_strict = 0
-    wins_vs_basic = losses_vs_basic = parities_vs_basic = 0
-    improved = maintained = regressed = 0
+    wins_vs_const = losses_vs_const = parities_vs_const = 0
     vec_iso_gt15 = 0
     n_verified = n_pending = n_fail_v = 0
 
     for r in results:
         name    = r.get("name", "?")[:34]
         layout  = r.get("layout_class", "")[:18]
-        prior   = r.get("prior_verdict", "")
         n_val   = r.get("N", "")
         n_str   = f"{n_val:>8}" if isinstance(n_val, int) else f"{'?':>8}"
 
-        c_ms_r     = float(r.get("c_baseline_ms", float('nan')))
-        c_O3_ms_r  = float(r.get("c_O3_ms",       float('nan')))
-        c_agg_ms_r = float(r.get("c_agg_ms",      float('nan')))
-        clang_ms_r = float(r.get("c_clang_ms",    float('nan')))
-        clang_str_ms_r = float(r.get("c_clang_strict_ms", float('nan')))
-        clang_bsc_ms_r = float(r.get("c_clang_basic_ms", float('nan')))
+        c_O3_ms_r      = float(r.get("c_O3_ms",         float('nan')))
+        clang_ms_r     = float(r.get("c_clang_ms",      float('nan')))
+        clang_cst_ms_r = float(r.get("c_clang_const_ms", float('nan')))
 
         t_numpy  = r.get("numpy_ms",  float('nan'))
         t_scalar = r.get("scalar_jit_ms", float('nan'))
@@ -587,11 +455,9 @@ def main():
         sp_iso   = r.get("speedup_isolated_jit", float('nan'))
         sp_np    = r.get("speedup_vs_numpy", float('nan'))
 
-        vs_c_O3  = _safe_ratio(c_O3_ms_r,  t_vec)
-        vs_c_agg = _safe_ratio(c_agg_ms_r, t_vec)
-        vs_clang = _safe_ratio(clang_ms_r, t_vec)
-        vs_clang_strict = _safe_ratio(clang_str_ms_r, t_vec)
-        vs_clang_basic  = _safe_ratio(clang_bsc_ms_r, t_vec)
+        vs_c_O3        = _safe_ratio(c_O3_ms_r,      t_vec)
+        vs_clang       = _safe_ratio(clang_ms_r,     t_vec)
+        vs_clang_const = _safe_ratio(clang_cst_ms_r, t_vec)
 
         # Primary verdict: based on vs_c_O3 (CASTLE-aligned).
         # Fall back to measure.py's own verdict if c_O3_ms is unavailable.
@@ -626,47 +492,22 @@ def main():
         elif verdict == "SKIP":   skips += 1
         else:                     errors += 1
 
-        # Tally vs_c_agg (secondary, optional)
-        if not math.isnan(vs_c_agg):
-            if vs_c_agg > 1.05:   wins_vs_agg += 1
-            elif vs_c_agg >= 0.95: parities_vs_agg += 1
-            else:                   losses_vs_agg += 1
-
-        # Tally vs clang aggressive (-ffast-math)
         if not math.isnan(vs_clang):
             if vs_clang > 1.05:   wins_vs_clang += 1
             elif vs_clang >= 0.95: parities_vs_clang += 1
             else:                  losses_vs_clang += 1
 
-        # Tally vs clang STRICT (apples-to-apples, no -ffast-math)
-        if not math.isnan(vs_clang_strict):
-            if vs_clang_strict > 1.05:   wins_vs_strict += 1
-            elif vs_clang_strict >= 0.95: parities_vs_strict += 1
-            else:                          losses_vs_strict += 1
-
-        # Tally vs clang BASIC (plain -O3 -march=native, fully strict IEEE-754)
-        if not math.isnan(vs_clang_basic):
-            if vs_clang_basic > 1.05:    wins_vs_basic += 1
-            elif vs_clang_basic >= 0.95: parities_vs_basic += 1
-            else:                         losses_vs_basic += 1
+        if not math.isnan(vs_clang_const):
+            if vs_clang_const > 1.05:    wins_vs_const += 1
+            elif vs_clang_const >= 0.95: parities_vs_const += 1
+            else:                         losses_vs_const += 1
 
         if isinstance(sp_iso, float) and not math.isnan(sp_iso) and sp_iso > 1.5:
             vec_iso_gt15 += 1
 
-        if prior in ("WIN", "PARITY", "LOSS", "MIXED"):
-            new_win  = verdict in ("WIN",)
-            new_skip = verdict in ("SKIP",)
-            if not new_skip:
-                if prior == "WIN" and new_win:           maintained += 1
-                elif prior != "WIN" and new_win:         improved += 1
-                elif prior == "WIN" and not new_win:     regressed += 1
-                else:                                    maintained += 1
-
         row_parts = [f"{name:<34}"]
         if _has_layout:
             row_parts.append(f"{layout:<18}")
-        if _has_prior:
-            row_parts.append(f"{prior:>9}")
         row_parts += [
             n_str,
             _fv(t_numpy,  10, '.4f'),
@@ -677,14 +518,10 @@ def main():
         ]
         if _has_c_O3:
             row_parts += [_fv(c_O3_ms_r, 9, '.4f'), _fx(vs_c_O3, 8)]
-        if _has_c_agg:
-            row_parts += [_fv(c_agg_ms_r, 9, '.4f'), _fx(vs_c_agg, 9)]
         if _has_clang:
             row_parts += [_fv(clang_ms_r, 11, '.4f'), _fx(vs_clang, 9)]
-        if _has_clang_strict:
-            row_parts += [_fv(clang_str_ms_r, 12, '.4f'), _fx(vs_clang_strict, 8)]
-        if _has_clang_basic:
-            row_parts += [_fv(clang_bsc_ms_r, 12, '.4f'), _fx(vs_clang_basic, 8)]
+        if _has_clang_const:
+            row_parts += [_fv(clang_cst_ms_r, 11, '.4f'), _fx(vs_clang_const, 9)]
         if _has_verify:
             row_parts.append(f"{verify_short:>10}")
         row_parts.append(f"{verdict:>8}")
@@ -706,46 +543,24 @@ def main():
     print(f"  PENDING:    {n_pending:3d} / {total}  (known infra gaps, see R19)")
     print(f"  FAIL/MISS:  {n_fail_v:3d} / {total}")
     print()
-    print(f"  --- Verdicts vs C O3 only (CASTLE-aligned, primary) ---")
+    print(f"  --- Verdicts vs gcc -O3 (conservative reference) ---")
     print(f"  WIN:     {wins:3d} / {measured}")
     print(f"  PARITY:  {parities:3d} / {measured}")
     print(f"  LOSS:    {losses:3d} / {measured}")
-    print()
-    print(f"  --- Verdicts vs C aggressive (-O3 -march=native -mavx512f -ffast-math) ---")
-    print(f"  WIN:     {wins_vs_agg:3d} / {measured}")
-    print(f"  PARITY:  {parities_vs_agg:3d} / {measured}")
-    print(f"  LOSS:    {losses_vs_agg:3d} / {measured}")
     print()
     print(f"  --- Verdicts vs clang aggressive (clang-20 -O3 -march=native -mavx512f -ffast-math) ---")
     print(f"  WIN:     {wins_vs_clang:3d} / {measured}")
     print(f"  PARITY:  {parities_vs_clang:3d} / {measured}")
     print(f"  LOSS:    {losses_vs_clang:3d} / {measured}")
     print()
-    print(f"  --- Verdicts vs clang STRICT (apples-to-apples; no -ffast-math, only reassoc-fp) ---")
-    print(f"  WIN:     {wins_vs_strict:3d} / {measured}")
-    print(f"  PARITY:  {parities_vs_strict:3d} / {measured}")
-    print(f"  LOSS:    {losses_vs_strict:3d} / {measured}")
+    n_const = wins_vs_const + parities_vs_const + losses_vs_const
+    print(f"  --- Verdicts vs clang CONST  (apples-to-apples: same flags + __builtin_assume(N == DEFAULT_N)) ---")
+    print(f"  WIN:     {wins_vs_const:3d} / {n_const}")
+    print(f"  PARITY:  {parities_vs_const:3d} / {n_const}")
+    print(f"  LOSS:    {losses_vs_const:3d} / {n_const}")
+    print(f"  (Note: only candidates whose N matches each source's DEFAULT_N have a const baseline.)")
     print()
-    print(f"  --- Verdicts vs clang BASIC (plain -O3 -march=native; fully strict IEEE-754) ---")
-    print(f"  WIN:     {wins_vs_basic:3d} / {measured}")
-    print(f"  PARITY:  {parities_vs_basic:3d} / {measured}")
-    print(f"  LOSS:    {losses_vs_basic:3d} / {measured}")
-    print()
-    print(f"  --- vec_iso speedup distribution ---")
-    print(f"  vec_iso > 1.5× (real wins vs scalar_jit): {vec_iso_gt15:3d} / {measured}")
-    print()
-    print(f"  --- Prior verdict comparison (vs CASTLE Intel audit) ---")
-    print(f"  Maintained: {maintained}")
-    print(f"  Improved:   {improved}")
-    print(f"  Regressed:  {regressed}")
-    if measured > 0:
-        win_rate = (wins + parities) / measured * 100
-        print()
-        print(f"  WIN+PARITY rate vs C O3: {win_rate:.1f}% of measured candidates")
-        if wins > 0:
-            print(f"  {wins} candidate(s) WIN vs C O3 (vs_c_O3 > 1.05×).")
-        if regressed > 0:
-            print(f"  WARNING: {regressed} candidate(s) regressed vs prior CASTLE verdict.")
+    print(f"  vec_iso > 1.5× (vs scalar_jit): {vec_iso_gt15:3d} / {measured}")
     print()
 
     # Step 5: Save JSON + Markdown
@@ -759,7 +574,8 @@ def main():
                     wins, parities, losses, skips, errors,
                     n_verified, n_pending, n_fail_v,
                     measured, vec_iso_gt15,
-                    wins_vs_agg, parities_vs_agg, losses_vs_agg)
+                    wins_vs_clang, parities_vs_clang, losses_vs_clang,
+                    wins_vs_const, parities_vs_const, losses_vs_const)
     print(f"  Dashboard Markdown saved to: {out_md}")
     print()
 
@@ -768,7 +584,8 @@ def _write_markdown(results, out_path: Path, target: str,
                     wins, parities, losses, skips, errors,
                     n_verified, n_pending, n_fail_v,
                     measured, vec_iso_gt15,
-                    wins_vs_agg=0, parities_vs_agg=0, losses_vs_agg=0):
+                    wins_vs_clang=0, parities_vs_clang=0, losses_vs_clang=0,
+                    wins_vs_const=0, parities_vs_const=0, losses_vs_const=0):
     """Write a compact Markdown dashboard."""
 
     def _fmt(v):
@@ -786,49 +603,56 @@ def _write_markdown(results, out_path: Path, target: str,
         f"",
         f"**Target:** `{target}` | **Date:** {time.strftime('%Y-%m-%d %H:%M')}",
         f"",
+        f"This is a *correctness + reference-perf* harness for the LEGO CPU pipeline.",
+        f"It is NOT a research evidence artefact for any LEGO contribution; it is here",
+        f"to verify that cpu_dsl kernels produce the same numerical answer as numpy",
+        f"and that LLVM's auto-vectoriser produces reasonable code through the",
+        f"pipeline's flag plumbing.  Compare-against-clang numbers are reported for",
+        f"engineering reference only.",
+        f"",
         f"## Summary",
         f"",
         f"| Metric | Value |",
         f"|--------|-------|",
         f"| Total candidates | {len(results)} |",
         f"| Measured | {measured} |",
-        f"| SKIP | {skips} |",
-        f"| **WIN (vs C O3)** | **{wins}** |",
-        f"| **PARITY (vs C O3)** | **{parities}** |",
-        f"| **LOSS (vs C O3)** | **{losses}** |",
-        f"| WIN (vs C agg) | {wins_vs_agg} |",
-        f"| PARITY (vs C agg) | {parities_vs_agg} |",
-        f"| LOSS (vs C agg) | {losses_vs_agg} |",
-        f"| ERROR | {errors} |",
-        f"| VERIFIED (correctness) | {n_verified} |",
-        f"| PENDING (correctness) | {n_pending} |",
+        f"| VERIFIED (correctness) | {n_verified} / {len(results)} |",
+        f"| WIN / PARITY / LOSS vs gcc -O3 | {wins} / {parities} / {losses} |",
+        f"| WIN / PARITY / LOSS vs clang aggressive (-ffast-math) | {wins_vs_clang} / {parities_vs_clang} / {losses_vs_clang} |",
+        f"| WIN / PARITY / LOSS vs clang CONST (apples-to-apples) | {wins_vs_const} / {parities_vs_const} / {losses_vs_const} |",
         f"| vec_iso > 1.5× | {vec_iso_gt15} |",
         f"",
-        f"**Verdict basis:** `vs_c_O3 = c_O3_ms / vec_jit_ms`",
-        f"WIN if > 1.05×, PARITY if >= 0.95×, LOSS otherwise.",
+        f"**Note on the 'apples-to-apples' baseline:** LEGO's frontend bakes each",
+        f"kernel's N as a Python compile-time literal; the C kernels by default take",
+        f"N as a runtime parameter.  This caused earlier dashboard runs to show",
+        f"misleading 3–8× wins on Morton-style kernels — the wins came from clang",
+        f"not folding the trip count, not from any LEGO codegen advantage.  The",
+        f"`*_clang_const` build adds `__builtin_assume(N == DEFAULT_N)` so clang has",
+        f"the same compile-time-N visibility; this is the column to read for any",
+        f"honest comparison.",
         f"",
         f"## Per-Candidate Results",
         f"",
-        f"| Candidate | Layout | Prior | N | numpy_ms | scalar_ms | vec_ms | vec_iso | c_O3_ms | vs_c_O3 | c_agg_ms | vs_c_agg | Verify | Verdict |",
-        f"|-----------|--------|-------|---|----------|-----------|--------|---------|---------|---------|----------|----------|--------|---------|",
+        f"| Candidate | Layout | N | numpy_ms | scalar_ms | vec_ms | vec_iso | c_O3_ms | vs_c_O3 | c_clang_ms | vs_clang | c_const_ms | vs_const | Verify | Verdict |",
+        f"|-----------|--------|---|----------|-----------|--------|---------|---------|---------|------------|----------|------------|----------|--------|---------|",
     ]
     for r in results:
         name   = r.get("name", "?")[:32]
         layout = r.get("layout_class", "")[:15]
-        prior  = r.get("prior_verdict", "")
         n_val  = r.get("N", "?")
         t_np   = r.get("numpy_ms",      float('nan'))
         t_sc   = r.get("scalar_jit_ms", float('nan'))
         t_vec  = r.get("vec_jit_ms",    float('nan'))
         sp_iso = r.get("speedup_isolated_jit", float('nan'))
-        c_O3   = float(r.get("c_O3_ms",  float('nan')))
-        c_agg  = float(r.get("c_agg_ms", float('nan')))
+        c_O3   = float(r.get("c_O3_ms",         float('nan')))
+        c_cl   = float(r.get("c_clang_ms",      float('nan')))
+        c_cst  = float(r.get("c_clang_const_ms", float('nan')))
         vs_O3  = c_O3  / t_vec if (not math.isnan(c_O3)  and not math.isnan(t_vec) and t_vec > 0) else float('nan')
-        vs_agg = c_agg / t_vec if (not math.isnan(c_agg) and not math.isnan(t_vec) and t_vec > 0) else float('nan')
+        vs_cl  = c_cl  / t_vec if (not math.isnan(c_cl)  and not math.isnan(t_vec) and t_vec > 0) else float('nan')
+        vs_cst = c_cst / t_vec if (not math.isnan(c_cst) and not math.isnan(t_vec) and t_vec > 0) else float('nan')
         verify = r.get("verify_status", "-")
         verify_short = "OK" if verify == "VERIFIED" else ("?" if "PENDING" in verify else ("–" if verify == "NOT_RUN" else "FAIL"))
 
-        # Recompute verdict from vs_O3 for markdown
         if not math.isnan(vs_O3):
             if vs_O3 > 1.05:   md_verdict = "**WIN**"
             elif vs_O3 >= 0.95: md_verdict = "PARITY"
@@ -837,32 +661,12 @@ def _write_markdown(results, out_path: Path, target: str,
             md_verdict = r.get("verdict", "?")
 
         lines.append(
-            f"| {name} | {layout} | {prior} | {n_val} | {_fmt(t_np)} | {_fmt(t_sc)} | {_fmt(t_vec)} | {_fmtx(sp_iso)} | {_fmt(c_O3)} | {_fmtx(vs_O3)} | {_fmt(c_agg)} | {_fmtx(vs_agg)} | {verify_short} | {md_verdict} |"
+            f"| {name} | {layout} | {n_val} | {_fmt(t_np)} | {_fmt(t_sc)} | {_fmt(t_vec)} | {_fmtx(sp_iso)} | "
+            f"{_fmt(c_O3)} | {_fmtx(vs_O3)} | {_fmt(c_cl)} | {_fmtx(vs_cl)} | {_fmt(c_cst)} | {_fmtx(vs_cst)} | "
+            f"{verify_short} | {md_verdict} |"
         )
 
-    lines += [
-        f"",
-        f"## Known Gaps",
-        f"",
-        f"- **R20 (deinterleave)**: Implemented for stride 2/4/8. Generates ShuffleOp chains",
-        f"  instead of vector.gather for constant-stride accesses. Correctness verified.",
-        f"",
-        f"- **R19 (strided gather indices)**: Strided-gather index vector mismatch in",
-        f"  `LegoVectorize::emitVectorBody`. The catch-all arith path vectorizes `MulIOp(iv, stride)`",
-        f"  before the Strided path reads it, producing incorrect gather indices.",
-        f"  Affects candidates 23-27, 29-31, 38. Fix: use pre-vectorization scalar index.",
-        f"",
-        f"- **R18 (reduction guard)**: k-reduction loops correctly skip vectorization.",
-        f"  This is correct behavior but contributes to PARITY (not WIN) for GEMM variants.",
-        f"",
-        f"- **invoke() overhead**: For small-N kernels (N=16K), the MLIR ExecutionEngine",
-        f"  invoke() call costs ~4-5ms, dominating the actual kernel time (~0.002ms).",
-        f"  The vec_jit_ms measurement includes this overhead; only the net kernel time",
-        f"  (vec_jit_ms - invoke_overhead) is comparable to C baselines.",
-        f"",
-    ]
-
-    out_path.write_text("\n".join(lines))
+    out_path.write_text("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

@@ -1,103 +1,92 @@
-# cpu_dsl_comparison — Baseline vs cpu_dsl Benchmark Harness
+# cpu_dsl_comparison — correctness + reference-perf harness
 
-## Purpose
+This is an engineering harness, not a research evidence artefact.
 
-This folder holds a representative set of micro-benchmarks that cover the
-full spectrum of verdict outcomes observed in the prior CASTLE CPU evaluation
-rounds (AMD Round 1 and Intel audit).  For each candidate there is:
+## What it does
 
-- `kernel.py` — a scalar/NumPy reference function (`kernel_scalar`) and a
-  `@cpu_kernel`-decorated DSL version (`kernel_cpu_dsl`).
-- `measure.py` — measures both versions with identical input data, checks
-  correctness, and prints a single JSON record to stdout.
+A small set of `@cpu_kernel`-decorated Python kernels that compile through
+LEGO's MLIR pipeline to native x86 code via the `lego-to-x86-vector`
+pipeline → MLIR `ExecutionEngine` (LLVM `opt_level=3` with host-CPU
+detection — equivalent to `-O3 -march=native`).
 
-The top-level `run_all.py` script runs every candidate, collects results,
-and prints a side-by-side table.
+Each candidate has a `<name>.py` with a numpy reference, runs the JIT'd
+version, and emits a JSON line with timing + a `verified: bool` field.
+
+The 10 candidates cover distinct vectorization-shape paths:
+
+| Candidate              | Shape                          |
+|------------------------|--------------------------------|
+| `01_saxpy`             | unit-stride pointwise          |
+| `02_gemm_row_major`    | reduction loop                 |
+| `03_3pt_stencil_1d`    | constant-offset gather         |
+| `05_morton_2d`         | bit-permuted index             |
+| `07_mixed_precision`   | mixed dtypes                   |
+| `08_brick_within_cell` | 3D brick                       |
+| `43_spmv_indirect`     | data-dependent index (gather)  |
+| `44_predicated_fma`    | predicated update              |
+| `46_scatter_compute`   | scatter                        |
+| `47_multi_reduce`      | multi-output reduction         |
+
+## What it is NOT
+
+This dashboard does **not** support a "LEGO beats clang" claim.  Earlier
+iterations of this harness reported 3–8× wins on Morton-style kernels;
+those numbers came from a benchmarking artefact, not a codegen advantage:
+
+- LEGO's `cpu_dsl` frontend bakes each candidate's `N` as a Python
+  compile-time literal, so the loop trip count reaches LLVM as a constant.
+- The C baselines by default take `N` as a runtime `argc/argv` parameter,
+  so clang cannot fold the trip count into algebraic identities (e.g.
+  proving the Morton bit-spread is the identity permutation for N <= 65536).
+
+Once both sides see N as a compile-time constant (the `*_clang_const`
+build, which adds `__builtin_assume(N == DEFAULT_N)`), the comparison
+flattens to within ±10% and clang is occasionally faster.
+
+The `vs_clang_const` column is the only one to read for an apples-to-apples
+performance comparison.  `vs_c_O3` and `vs_clang` are kept as engineering
+references for "how much room there is" against weak / aggressive C builds.
 
 ## How to run
 
 ```bash
 source /scratch/general/vast/u1419116/LEGO/venv/bin/activate
 cd /scratch/general/vast/u1419116/LEGO/evaluation/cpu_dsl_comparison
-python run_all.py
+python run_all.py --quick --measure-repeats 5
 ```
 
-`run_all.py` automatically sets `PYTHONPATH` to
-`/scratch/general/vast/u1419116/LEGO/build/python_packages/lego` in the
-subprocess environment, so the MLIR compiled pass pipelines (`lego-to-x86-vector`
-etc.) are found correctly.  Do **not** export `PYTHONPATH=/scratch/.../LEGO/python`
-in the shell — that directory lacks the compiled `.so` files and shadows the
-installed package from the venv.
+`--quick` skips re-building the C baselines.  Run `make all` in
+`c_baselines/` once after a change to the .c sources.
 
-Full results (one JSON record per candidate) are written to `results.json`.
+Outputs:
+- `results.json` — one record per candidate
+- `dashboard.md` — human-readable summary
 
-## Methodology caveat
+## Vectorization mode
 
-The current comparison is **NumPy BLAS scalar reference vs cpu_dsl JIT**. This
-is NOT apples-to-apples for the v1 prototype because:
+The cpu_dsl pipeline has a few `LegoVectorize*` matchers that try to
+recognise patterns clang's auto-vectoriser doesn't (filtered reduce,
+prefix scan, RLE, etc.).  Empirically these matchers are deadweight on
+most kernels — LLVM's auto-vectoriser at `opt_level=3` produces equivalent
+output.  The exceptions are `47_multi_reduce` and predicated-count shapes,
+where the matcher emits ~10× faster code than LLVM's loop vectoriser.
 
-1. **NumPy is BLAS-accelerated** for SAXPY/GEMM patterns (uses MKL/OpenBLAS).
-   On AVX-512 hardware, this is already heavily vectorized.
-2. **cpu_dsl JIT has ~100µs per-call overhead** (memref descriptor build +
-   ctypes marshalling + JIT entry trampoline). At small N (≤8K elements), this
-   dominates timing.
+For the LLVM-auto-vec path (clang-equivalent output for kernels without
+fancy patterns):
 
-The result: at N=8192, cpu_dsl shows LOSS even though the inner-loop body is
-correctly vectorized. The numbers measure call-overhead, not vectorization.
-
-For a true apples-to-apples speedup measurement, see the **scalar-JIT vs
-vectorized-JIT** harness invoked via `python run_all.py --isolate-vectorization`.
-That harness compiles each kernel twice — once via `--lego-to-llvm` (scalar)
-and once via `--lego-to-x86-vector` (vectorized) — and compares JIT-vs-JIT,
-isolating the vectorization effect from JIT startup costs.
-
-## Candidates
-
-| Dir | Layout class | Prior verdict | Expected cpu_dsl verdict |
-|-----|-------------|---------------|--------------------------|
-| `01_saxpy` | Unit-stride FMA | WIN (trivial SIMD) | WIN |
-| `02_gemm_row_major` | Row-major tiled GEMM | WIN (reg+L1 tile class) | WIN |
-| `03_3pt_stencil_1d` | 1D 3-point stencil | WIN / R12 blocked | WIN once R12 lands |
-| `04_col_major_inner` | Column-major inner loop | PARITY / LOSS | PARITY |
-| `05_morton_2d` | Z-Morton encoded 2D | WIN (gemm), LOSS (chol) | LOSS / ERROR (bitwise ops needed) |
-| `06_self_update` | In-place prefix-sum | LOSS (loop-carried dep) | LOSS |
-| `07_mixed_precision` | Scalar f32 arg path | UNCERTAIN | PARITY / WIN |
-| `08_brick_within_cell` | Within-brick vectorisation | PARITY vs NumPy (R1 proof-point) | PARITY |
-
-## JSON schema
-
-Each `measure.py` emits one JSON line:
-
-```json
-{
-  "name":        "01_saxpy",
-  "baseline_ms": 0.4,
-  "cpu_dsl_ms":  0.18,
-  "speedup":     2.22,
-  "verdict":     "WIN",
-  "notes":       ""
-}
+```bash
+LEGO_BYPASS_LEGO_VECTORIZE=1 python run_all.py --quick --measure-repeats 5
 ```
 
-- `verdict = "WIN"` when `speedup > 1.05`.
-- `verdict = "PARITY"` when `0.95 <= speedup <= 1.05`.
-- `verdict = "LOSS"` when `speedup < 0.95`.
-- `verdict = "ERROR"` when the DSL compilation or execution failed; the
-  `notes` field contains the exception message.
+This bypasses every `LegoVectorize*` pass and lets LLVM's `LoopVectorize`
++ `SLP` handle the lowered scf.for + arith + memref directly.
 
-## Limitations
+## C baseline variants
 
-Not all 34 prior eval candidates are reproduced here.  This is a
-representative subset chosen to cover each verdict bucket and the main
-layout classes.  As the cpu_dsl matures (R12 cross-brick shuffle, bitwise
-ops, 2-D tiling support), new candidates can be added by creating a new
-subdirectory under `candidates/` following the same `kernel.py` /
-`measure.py` schema.
+Three flavours, built per source via `c_baselines/Makefile`:
 
-## Context
-
-- Prior eval audit report: `evaluation/audit_report_intel.md`
-- Infrastructure roadmap: `evaluation/roadmap.md`
-- Prior proof-point benchmarks: `evaluation/cpu_vector_proof/`
-- DSL implementation: `python/lego/backend/cpu_dsl.py`
-- Pipeline builder: `python/lego/backend/cpu_builder.py`
+- `*_O3` — `gcc -O3` (conservative reference)
+- `*_clang` — `clang-20 -O3 -march=native -mavx512f -ffast-math` (max clang)
+- `*_clang_const` — `clang-20 -O3 -march=native -mavx512f` + `BENCH_USE_DEFAULT_N`
+   so the kernel calls `__builtin_assume(N == DEFAULT_N)` (apples-to-apples
+   with LEGO's compile-time-N visibility — **the column to read**)

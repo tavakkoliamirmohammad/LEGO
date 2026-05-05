@@ -1,6 +1,9 @@
 venv
 __pycache__
 .pytest_cache
+.claude/
+.CLAUDE.md
+CASTLE-tex/
 *.o
 **/.DS_Store
 *.gif
@@ -34,8 +37,7 @@ viz/wasm/lego_driver.wasm
 evaluation/cpu_dsl_comparison/c_baselines/*_O3
 evaluation/cpu_dsl_comparison/c_baselines/*_agg
 evaluation/cpu_dsl_comparison/c_baselines/*_clang
-evaluation/cpu_dsl_comparison/c_baselines/*_clang_strict
-evaluation/cpu_dsl_comparison/c_baselines/*_clang_basic
+evaluation/cpu_dsl_comparison/c_baselines/*_clang_const
 evaluation/cpu_dsl_comparison/c_baselines/*.s
 evaluation/cpu_dsl_comparison/c_baselines/*_O3_asm
 

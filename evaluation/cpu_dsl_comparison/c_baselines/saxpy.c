@@ -11,6 +11,7 @@
 #include <time.h>
 #include <string.h>
 
+#include "_bench_assume.h"
 #define DEFAULT_N (1 << 20)   /* 1M elements */
 #define WARMUP    100
 #define TIMED     1000
@@ -21,6 +22,7 @@
  * per-call time for a baseline that is supposed to represent ONE kernel pass. */
 static void __attribute__((noinline))
 saxpy_kernel(float a, const float * __restrict__ X, float * __restrict__ Y, int N) {
+    BENCH_ASSUME_N(N);
     for (int i = 0; i < N; i++)
         Y[i] = a * X[i] + Y[i];
 }

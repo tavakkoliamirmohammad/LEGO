@@ -1,129 +1,53 @@
-# c_baselines/Makefile — build C reference kernels in two flavors.
+# c_baselines/Makefile — build C reference kernels in three flavours.
 #
-# Two baseline variants:
-#   _O3      : gcc -O3 only (CASTLE-aligned: matches PolyBench reference build)
-#   _agg     : gcc -O3 -march=native -mavx512f -ffast-math (aggressive: state-of-the-art)
+#   _O3         : gcc -O3 (CASTLE-aligned, conservative reference)
+#   _clang      : clang-20 -O3 -march=native -mavx512f -ffast-math
+#                 (max-aggressive clang)
+#   _clang_const: same as _clang but no -ffast-math, plus -DBENCH_USE_DEFAULT_N
+#                 so the kernel calls __builtin_assume(N == DEFAULT_N).  This
+#                 is the apples-to-apples baseline against LEGO's JIT — LEGO
+#                 bakes N as a Python compile-time literal, so for a fair
+#                 comparison clang needs the same compile-time-N visibility.
 #
 # Each binary accepts an optional N argument and prints:
 #   {"kernel":"<name>","N":<N>,"c_baseline_ms_per_call":<ms>}
-#
-# Usage:
-#   make all          # build both O3 and aggressive GCC variants + Clang
-#   make O3           # build only O3-only variants
-#   make aggressive   # build only O3+march=native variants
-#   make clang        # build Clang aggressive variants
-#   make clean        # remove all binaries
 
 CC_GCC   = gcc
 # Pin clang to the latest stable on CHPC (clang-20.1.8) so dashboard
-# numbers are reproducible across runs even if /usr/bin/clang's symlink
-# changes underneath us.
+# numbers stay reproducible across runs.
 CC_CLANG = clang-20
 
-# CASTLE-aligned baseline: -O3 only (no march, no fast-math)
-# This matches how PolyBench reference baselines are built.
-CFLAGS_O3        = -O3 -Wall -Wno-unused-result
+CFLAGS_O3          = -O3 -Wall -Wno-unused-result
+CFLAGS_CLANG       = -O3 -march=native -mavx512f -ffast-math \
+                     -Wall -Wno-unused-result
+CFLAGS_CLANG_CONST = -O3 -march=native -mavx512f -DBENCH_USE_DEFAULT_N \
+                     -Wall -Wno-unused-result
 
-# Aggressive baseline: -O3 + AVX-512 + ffast-math (best possible compiler output)
-CFLAGS_AGGRESSIVE = -O3 -march=native -mavx512f -ffast-math -Wall -Wno-unused-result
+# Curated source set — one .c per kept candidate (see ../run_all.py).
+ALL_SRCS = saxpy.c gemm.c stencil_3pt.c morton.c mixed_precision.c \
+           brick_within_cell.c spmv_indirect.c predicated_fma.c \
+           scatter_compute.c multi_reduce.c
 
-# Clang aggressive (for three-way comparison)
-CFLAGS_CLANG = -O3 -march=native -mavx512f -ffast-math -Wall -Wno-unused-result
+O3_BINS          = $(ALL_SRCS:.c=_O3)
+CLANG_BINS       = $(ALL_SRCS:.c=_clang)
+CLANG_CONST_BINS = $(ALL_SRCS:.c=_clang_const)
 
-# Clang STRICT — apples-to-apples vs LEGO's JIT defaults.  LEGO does
-# enable FP reduction reassoc end-to-end (matches gcc -fassociative-math)
-# but does NOT enable -ffinite-math / -fno-signed-zeros / reciprocal
-# approximation / fast-math algebraic identities.  This variant drops
-# -ffast-math so the C side gets exactly the same FP semantics window
-# as LEGO's vector.reduction lowering.
-CFLAGS_CLANG_STRICT = -O3 -march=native -mavx512f -fassociative-math \
-                      -fno-signed-zeros -fno-trapping-math \
-                      -Wall -Wno-unused-result
+all: $(O3_BINS) $(CLANG_BINS) $(CLANG_CONST_BINS)
 
-# Clang BASIC — strict IEEE-754, no fast-math at all.  Matches LEGO when
-# the JIT is configured with reassocFP=false AND bypass-lego-vectorize=true:
-# both sides do plain -O3 -march=native -mavx512f with full IEEE-754
-# semantics.  AVX-512F is included explicitly so LLVM's vector lowering
-# definitely has the same target features as LEGO's host-detected JIT
-# (on Zen 4, ``-march=native`` enables AVX-512F anyway, but the explicit
-# flag documents the parity).
-CFLAGS_CLANG_BASIC = -O3 -march=native -mavx512f -Wall -Wno-unused-result
+O3:          $(O3_BINS)
+clang_all:   $(CLANG_BINS)
+clang_const_all: $(CLANG_CONST_BINS)
 
-# Original 8 candidates that existed before
-SRCS_ORIG = saxpy.c vecadd.c gemm.c stencil_3pt.c brick_within_cell.c \
-            mixed_precision.c col_major.c self_update.c morton.c
-
-# New candidates for the remaining 34:
-SRCS_NEW = fma_1M.c fma_64k.c stride2_16k.c stride4_16k.c \
-           stencil_3d7pt.c stencil_3d13pt.c stencil_2d5pt.c stencil_2d5pt_30x30.c \
-           morton_fma_64k.c dgemm.c \
-           spmv_indirect.c predicated_fma.c stride7.c \
-           scatter_compute.c scatter_perm.c \
-           multi_reduce.c count_if.c saturating_add.c all_positive.c \
-           find_first.c bit_reverse.c expand.c find_byte.c
-
-ALL_SRCS = $(SRCS_ORIG) $(SRCS_NEW)
-
-# Derived binary names
-O3_BINS              = $(ALL_SRCS:.c=_O3)
-AGG_BINS             = $(ALL_SRCS:.c=_agg)
-CLANG_BINS           = $(ALL_SRCS:.c=_clang)
-CLANG_STRICT_BINS    = $(ALL_SRCS:.c=_clang_strict)
-CLANG_BASIC_BINS     = $(ALL_SRCS:.c=_clang_basic)
-
-# Legacy GCC bins (original aggressive flags, no suffix — keep for backward compat)
-GCC_BINS   = $(SRCS_ORIG:.c=)
-CLANG_BINS_ORIG = $(SRCS_ORIG:.c=_clang)
-
-all: $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS) $(CLANG_STRICT_BINS) $(CLANG_BASIC_BINS)
-
-O3: $(O3_BINS)
-
-aggressive: $(AGG_BINS)
-
-clang_all: $(CLANG_BINS)
-
-clang_strict_all: $(CLANG_STRICT_BINS)
-
-clang_basic_all: $(CLANG_BASIC_BINS)
-
-# Legacy GCC binaries (aggressive flags, original names — backward compat)
-%: %.c
-	$(CC_GCC) $(CFLAGS_AGGRESSIVE) -o $@ $<
-
-# Clang binaries (legacy, name with _clang suffix)
-%_clang: %.c
-	$(CC_CLANG) $(CFLAGS_CLANG) -o $@ $<
-
-# O3-only variants (CASTLE-aligned)
 %_O3: %.c
 	$(CC_GCC) $(CFLAGS_O3) -o $@ $<
 
-# Aggressive variants
-%_agg: %.c
-	$(CC_GCC) $(CFLAGS_AGGRESSIVE) -o $@ $<
+%_clang: %.c
+	$(CC_CLANG) $(CFLAGS_CLANG) -o $@ $<
 
-# Clang STRICT — apples-to-apples with LEGO's JIT FP semantics
-%_clang_strict: %.c
-	$(CC_CLANG) $(CFLAGS_CLANG_STRICT) -o $@ $<
-
-# Clang BASIC — plain -O3 -march=native, fully IEEE-754 strict
-%_clang_basic: %.c
-	$(CC_CLANG) $(CFLAGS_CLANG_BASIC) -o $@ $<
-
-# Run all O3 baselines with default sizes
-run_O3: $(O3_BINS)
-	@for b in $(O3_BINS); do ./$$b; done
-
-# Run all aggressive baselines
-run_agg: $(AGG_BINS)
-	@for b in $(AGG_BINS); do ./$$b; done
-
-# Run original GCC baselines
-run: $(GCC_BINS)
-	@for b in $(GCC_BINS); do ./$$b; done
+%_clang_const: %.c _bench_assume.h
+	$(CC_CLANG) $(CFLAGS_CLANG_CONST) -o $@ $<
 
 clean:
-	rm -f $(GCC_BINS) $(CLANG_BINS_ORIG) $(O3_BINS) $(AGG_BINS) $(CLANG_BINS) $(CLANG_STRICT_BINS) $(CLANG_BASIC_BINS)
+	rm -f $(O3_BINS) $(CLANG_BINS) $(CLANG_CONST_BINS)
 
-.PHONY: all O3 aggressive clang_all run_O3 run_agg run clean
+.PHONY: all O3 clang_all clang_const_all clean

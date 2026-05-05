@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <time.h>
+#include "_bench_assume.h"
 
 #define DEFAULT_N (1 << 20)   /* 1M elements */
 #define WARMUP    50
@@ -48,6 +49,7 @@ static long long clock_ns(void) {
 int main(int argc, char **argv) {
     int N = DEFAULT_N;
     if (argc > 1) N = atoi(argv[1]);
+    BENCH_ASSUME_N(N);
 
     /* N must be a perfect square so that row/col indices stay in-bounds. */
     int side = 1;

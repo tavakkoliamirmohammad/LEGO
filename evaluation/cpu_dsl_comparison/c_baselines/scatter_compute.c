@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "_bench_assume.h"
 #define DEFAULT_N (1 << 20)
 #define WARMUP    50
 #define TIMED     500
@@ -24,6 +25,7 @@ __attribute__((noinline))
 static void kernel(const float * __restrict A,
                    const long  * __restrict idx,
                    float       * __restrict B, int N) {
+    BENCH_ASSUME_N(N);
     for (int i = 0; i < N; i++) {
         float x = A[i];
         float p = ((((x * 0.1f + 0.2f) * x + 0.3f) * x + 0.4f) * x + 0.5f) * x + 0.6f;

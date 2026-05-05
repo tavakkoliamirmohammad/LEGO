@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "_bench_assume.h"
 #define DEFAULT_N (1 << 20)
 #define WARMUP    100
 #define TIMED     500
@@ -24,6 +25,7 @@ static void kernel(const float * __restrict A,
                    const float * __restrict B,
                    const float * __restrict mask,
                    float * __restrict C, int N) {
+    BENCH_ASSUME_N(N);
     for (int i = 0; i < N; i++) {
         if (mask[i] > 0.0f) {
             C[i] = A[i] * B[i] + C[i];

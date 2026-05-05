@@ -10,12 +10,14 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "_bench_assume.h"
 #define DEFAULT_N 8192
 #define WARMUP    100
 #define TIMED     1000
 
 static void __attribute__((noinline))
 stencil_kernel(const float *A, float *B, int N) {
+    BENCH_ASSUME_N(N);
     for (int i = 1; i < N - 1; i++)
         B[i] = A[i-1] + A[i] + A[i+1];
 }

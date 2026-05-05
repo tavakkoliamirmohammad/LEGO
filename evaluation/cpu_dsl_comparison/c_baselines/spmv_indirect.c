@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "_bench_assume.h"
 #define DEFAULT_N (1 << 20)
 #define WARMUP    100
 #define TIMED     500
@@ -28,6 +29,7 @@ static long long clock_ns(void) {
 
 __attribute__((noinline))
 static void kernel(const float *A, const long *idx, float *B, int N) {
+    BENCH_ASSUME_N(N);
     for (int i = 0; i < N; i++) {
         B[i] = A[idx[i]] * 2.0f;
     }
