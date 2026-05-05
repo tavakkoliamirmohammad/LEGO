@@ -44,5 +44,5 @@ viz/wasm/lego_driver.js
 viz/wasm/lego_driver.wasm
 
 # Dashboard outputs (regenerated each run by run_all.py)
-evaluation/cpu_dsl_examples/dashboard.md
-evaluation/cpu_dsl_examples/results.json
+python/examples/cpu_dsl/dashboard.md
+python/examples/cpu_dsl/results.json

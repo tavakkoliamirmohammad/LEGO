@@ -1,4 +1,4 @@
-# cpu_dsl_examples
+# cpu_dsl
 
 A small set of `@cpu_kernel`-decorated Python kernels that compile through
 LEGO's MLIR pipeline to native x86 code via the `lego-to-x86-vector`
@@ -25,7 +25,7 @@ The candidates cover distinct vectorization-shape paths:
 
 ```bash
 source /scratch/general/vast/u1419116/LEGO/venv/bin/activate
-cd /scratch/general/vast/u1419116/LEGO/evaluation/cpu_dsl_examples
+cd /scratch/general/vast/u1419116/LEGO/python/examples/cpu_dsl
 python run_all.py --measure-repeats 5
 ```
 

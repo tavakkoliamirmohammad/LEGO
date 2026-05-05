@@ -1,6 +1,6 @@
 """Compile-only smoke tests for the cpu_dsl example kernels.
 
-Each ``evaluation/cpu_dsl_examples/<NN>_<name>.py`` file defines a single
+Each ``python/examples/cpu_dsl/<NN>_<name>.py`` file defines a single
 ``@cpu_kernel``-decorated function (wrapped by ``@benchmark``).  For
 every kernel × every CPU target (``x86``, ``arm-neon``, ``arm-sve``)
 this test runs the LEGO MLIR pass pipeline and asserts lowering
@@ -25,7 +25,7 @@ import pytest
 
 # Resolve the kernels directory relative to the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_KERNELS_DIR = _REPO_ROOT / "evaluation" / "cpu_dsl_examples"
+_KERNELS_DIR = _REPO_ROOT / "python" / "examples" / "cpu_dsl"
 
 _TARGETS = ("x86", "arm-neon", "arm-sve")
 
@@ -52,7 +52,7 @@ def _pipeline_available(target: str) -> bool:
 
 
 def _discover_candidates():
-    """Yield (candidate_name, .py_path) for every cpu_dsl_examples/<NN>_<name>.py."""
+    """Yield (kernel_name, .py_path) for every cpu_dsl/<NN>_<name>.py."""
     if not _KERNELS_DIR.is_dir():
         return
     for py in sorted(_KERNELS_DIR.glob("[0-9][0-9]_*.py")):
@@ -111,7 +111,7 @@ _params = [(c[0], c[1], t) for c in _CANDIDATES for t in _TARGETS]
 
 
 @pytest.mark.skipif(not _CANDIDATES,
-                    reason="evaluation/cpu_dsl_examples directory is missing")
+                    reason="python/examples/cpu_dsl directory is missing")
 @pytest.mark.parametrize("name,py_path,target", _params, ids=_param_ids)
 def test_candidate_pipeline_lowers(name: str, py_path: Path, target: str):
     """Pipeline lowers each candidate to LLVM dialect on each target.
