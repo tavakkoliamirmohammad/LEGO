@@ -1,11 +1,16 @@
-"""Compile-only smoke tests for the cpu_dsl_comparison candidate kernels.
+"""Compile-only smoke tests for the cpu_dsl example kernels.
 
-Each ``evaluation/cpu_dsl_comparison/candidates/<name>/*.py`` file defines
+Each ``evaluation/cpu_dsl_examples/candidates/<name>/*.py`` file defines
 a single ``@cpu_kernel``-decorated function (wrapped by ``@benchmark``).
-These tests import each candidate as a module and call ``.compile(target='cpu')``
-on the kernel — no execution, no numeric verification — so CI gets fast
-coverage that the full lego-to-x86-vector pipeline still lowers each
-candidate without crashing.
+For every candidate × every CPU target (``x86``, ``arm-neon``, ``arm-sve``)
+this test runs the LEGO MLIR pass pipeline on the candidate and asserts
+that lowering completes without error.
+
+Compile-only: the pipeline runs to LLVM dialect but the result is *not*
+JIT-compiled or executed.  ARM targets work on an x86 host because we
+stop before ``ExecutionEngine``; the produced LLVM IR can be inspected
+or handed to ``llc -mtriple=aarch64-…`` separately for actual ARM
+execution.
 
 Run::
 
@@ -21,30 +26,30 @@ import pytest
 # Resolve the candidates directory relative to the repo root (3 levels up
 # from this file: python/tests/ → python/ → repo).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_CANDIDATES_DIR = _REPO_ROOT / "evaluation" / "cpu_dsl_comparison" / "candidates"
+_CANDIDATES_DIR = _REPO_ROOT / "evaluation" / "cpu_dsl_examples" / "candidates"
+
+_TARGETS = ("x86", "arm-neon", "arm-sve")
 
 
-def _x86_pipeline_available() -> bool:
-    """Check if lego-to-x86-vector is registered (matches test_cpu_dsl.py)."""
+def _pipeline_available(target: str) -> bool:
+    """Check that the lego-to-<target> pipeline is registered and parses."""
     try:
         from lego.mlir.ir import Context, Module, Location
         from lego.mlir.passmanager import PassManager
         from lego.backend.dialects.lego_dialect import register as register_lego
+        from lego.backend.cpu_builder import _CPU_TARGETS
+        cpu_target = _CPU_TARGETS.get(target)
+        if cpu_target is None:
+            return False
         ctx = Context()
         register_lego(ctx)
         ctx.load_all_available_dialects()
         with ctx, Location.unknown():
             Module.create()
-            PassManager.parse("builtin.module(lego-to-x86-vector)")
+            PassManager.parse(cpu_target.pipeline_string(cpu_target.default_cpu))
         return True
     except Exception:
         return False
-
-
-_skip_no_x86_pipeline = pytest.mark.skipif(
-    not _x86_pipeline_available(),
-    reason="lego-to-x86-vector pipeline not registered in this build",
-)
 
 
 def _discover_candidates():
@@ -70,19 +75,19 @@ def _import_candidate(name: str, py_path: Path):
     return mod
 
 
-def _find_compiled_kernel(mod):
+def _find_kernel_builder(mod):
     """Return the underlying CPUKernelBuilder from the candidate module.
 
     Each candidate's ``@benchmark`` + ``@cpu_kernel`` chain produces a
     BenchmarkedKernel whose ``.kernel`` attribute is the CPUKernelBuilder
-    that exposes ``.compile(target=...)``.  Some older candidates may
-    just have a bare CPUKernelBuilder.
+    that exposes ``.build_module()``.  Some candidates may have a bare
+    CPUKernelBuilder.
     """
     for attr in vars(mod).values():
         cls_name = type(attr).__name__
         if cls_name == "BenchmarkedKernel":
             inner = getattr(attr, "kernel", None)
-            if inner is not None and callable(getattr(inner, "compile", None)):
+            if inner is not None and callable(getattr(inner, "build_module", None)):
                 return inner
         if cls_name == "CPUKernelBuilder":
             return attr
@@ -92,19 +97,46 @@ def _find_compiled_kernel(mod):
 _CANDIDATES = list(_discover_candidates())
 
 
-@_skip_no_x86_pipeline
-@pytest.mark.skipif(not _CANDIDATES,
-                    reason="cpu_dsl_comparison candidates dir is missing")
-@pytest.mark.parametrize("name,py_path", _CANDIDATES,
-                         ids=[c[0] for c in _CANDIDATES])
-def test_candidate_compiles(name: str, py_path: Path):
-    """Each candidate's @cpu_kernel function compiles via lego-to-x86-vector.
+def _run_pipeline_only(builder, target: str) -> str:
+    """Run the lego-to-<target> pipeline; return the lowered IR as text.
 
-    This is a compile-only check — no execution, no numeric verification.
-    A pass means the candidate lowers cleanly through buildLegoLowerPipeline
-    + convert-lego-to-linalg + linalg::vectorize + the LLVM tail.
+    Stops before ``ExecutionEngine`` so this works on a host whose CPU
+    doesn't match the target (e.g. running the ARM pipelines on x86).
     """
+    from lego.mlir.passmanager import PassManager
+    from lego.backend.cpu_builder import _CPU_TARGETS
+    cpu_target = _CPU_TARGETS[target]
+    ctx, module = builder.build_module()
+    with ctx:
+        pm = PassManager.parse(cpu_target.pipeline_string(cpu_target.default_cpu))
+        pm.run(module.operation)
+        return str(module)
+
+
+_param_ids = [f"{c[0]}-{t}" for c in _CANDIDATES for t in _TARGETS]
+_params = [(c[0], c[1], t) for c in _CANDIDATES for t in _TARGETS]
+
+
+@pytest.mark.skipif(not _CANDIDATES,
+                    reason="cpu_dsl_examples candidates dir is missing")
+@pytest.mark.parametrize("name,py_path,target", _params, ids=_param_ids)
+def test_candidate_pipeline_lowers(name: str, py_path: Path, target: str):
+    """Pipeline lowers each candidate to LLVM dialect on each target.
+
+    Compile-only — does not JIT-execute.  A pass means
+    buildLegoLowerPipeline + (optionally) convert-lego-to-linalg +
+    linalg::vectorize + the LLVM tail produced a valid module without
+    errors.  Skip the (candidate, target) pair if the pipeline isn't
+    registered in this build.
+    """
+    if not _pipeline_available(target):
+        pytest.skip(f"lego-to-{target} pipeline not registered in this build")
+
     mod = _import_candidate(name, py_path)
-    kernel = _find_compiled_kernel(mod)
-    fn = kernel.compile(target="cpu")
-    assert callable(fn)
+    builder = _find_kernel_builder(mod)
+    lowered = _run_pipeline_only(builder, target)
+    # The lowered IR must contain LLVM dialect ops — verify by checking
+    # that some lego/scf/arith ops have been turned into llvm.* form.
+    assert "llvm." in lowered, (
+        f"{name} on {target}: pipeline ran but produced no llvm.* ops; "
+        f"lowering may have stalled mid-pipeline")

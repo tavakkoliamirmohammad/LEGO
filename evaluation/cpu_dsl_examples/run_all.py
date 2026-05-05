@@ -4,7 +4,7 @@
 Usage::
 
     source /scratch/general/vast/u1419116/LEGO/venv/bin/activate
-    cd evaluation/cpu_dsl_comparison
+    cd evaluation/cpu_dsl_examples
     python run_all.py
     python run_all.py --measure-repeats 5
     python run_all.py --target=arm-neon
@@ -163,7 +163,7 @@ def main():
 
     print()
     print("=" * 100)
-    print(f"  LEGO cpu_dsl_comparison")
+    print(f"  LEGO cpu_dsl_examples")
     print(f"  Target: {args.target}  |  Date: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 100)
     print()
@@ -186,7 +186,7 @@ def main():
     _has_layout = any("layout_class" in r for r in results)
 
     print("=" * 110)
-    print("  LEGO cpu_dsl_comparison")
+    print("  LEGO cpu_dsl_examples")
     print("=" * 110)
 
     hdr_parts = [f"{'Candidate':<34}"]
@@ -271,7 +271,7 @@ def _write_markdown(results, out_path, target,
         return "NaN"
 
     lines = [
-        f"# LEGO cpu_dsl_comparison",
+        f"# LEGO cpu_dsl_examples",
         f"",
         f"**Target:** `{target}` | **Date:** {time.strftime('%Y-%m-%d %H:%M')}",
         f"",

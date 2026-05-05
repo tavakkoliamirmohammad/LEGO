@@ -106,6 +106,12 @@ CPUTarget(
     default_cpu="cortex-a76",
 ).register()
 
+CPUTarget(
+    name="arm-sve",
+    pipeline="lego-to-arm-sve",
+    default_cpu="neoverse-v1",
+).register()
+
 # Alias: plain "cpu" → x86 by default (auto-detected later if needed)
 CPUTarget(
     name="cpu",
