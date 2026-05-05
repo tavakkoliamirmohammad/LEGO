@@ -15,7 +15,10 @@
 #   make clean        # remove all binaries
 
 CC_GCC   = gcc
-CC_CLANG = clang
+# Pin clang to the latest stable on CHPC (clang-20.1.8) so dashboard
+# numbers are reproducible across runs even if /usr/bin/clang's symlink
+# changes underneath us.
+CC_CLANG = clang-20
 
 # CASTLE-aligned baseline: -O3 only (no march, no fast-math)
 # This matches how PolyBench reference baselines are built.
@@ -35,7 +38,10 @@ SRCS_ORIG = saxpy.c vecadd.c gemm.c stencil_3pt.c brick_within_cell.c \
 SRCS_NEW = fma_1M.c fma_64k.c stride2_16k.c stride4_16k.c \
            stencil_3d7pt.c stencil_3d13pt.c stencil_2d5pt.c stencil_2d5pt_30x30.c \
            morton_fma_64k.c dgemm.c \
-           spmv_indirect.c predicated_fma.c stride7.c
+           spmv_indirect.c predicated_fma.c stride7.c \
+           scatter_compute.c scatter_perm.c \
+           multi_reduce.c count_if.c saturating_add.c all_positive.c \
+           find_first.c bit_reverse.c expand.c find_byte.c
 
 ALL_SRCS = $(SRCS_ORIG) $(SRCS_NEW)
 

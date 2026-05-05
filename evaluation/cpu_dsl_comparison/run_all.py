@@ -135,6 +135,20 @@ _C_BASELINE_MAP = {
     "43_spmv_indirect":          ("spmv_indirect",     None),
     "44_predicated_fma":         ("predicated_fma",    None),
     "45_stride_runtime":         ("stride7",           None),
+    # ---- Scatter-with-compute (46) ----
+    "46_scatter_compute":        ("scatter_compute",   None),
+    # ---- Tier 1/2/3 non-affine coverage (47-54) ----
+    # Each candidate has a dedicated C reference (.c file in c_baselines/)
+    # built in three flavours: _O3 (gcc -O3), _agg (gcc + AVX-512 + ffast-math),
+    # _clang (clang-20 + AVX-512 + ffast-math).
+    "47_multi_reduce":           ("multi_reduce",      None),
+    "48_count_if":               ("count_if",          None),
+    "49_saturating_add":         ("saturating_add",    None),
+    "50_all_positive":           ("all_positive",      None),
+    "51_find_first":             ("find_first",        None),
+    "52_bit_reverse":            ("bit_reverse",       None),
+    "53_expand":                 ("expand",            None),
+    "54_find_byte":              ("find_byte",         None),
 }
 
 
@@ -199,7 +213,13 @@ def run_c_agg_baseline(cand_name: str, repeats: int = 1) -> float:
 
 
 def run_clang_baseline(cand_name: str, repeats: int = 1) -> float:
-    """Run Clang aggressive baseline (candidates 01-08 only)."""
+    """Run Clang aggressive baseline.
+
+    Available for every candidate that has a matching C reference in
+    ``c_baselines/`` — that's all 54 candidates as of the Tier 1/2/3
+    coverage rollout.  Compiled with clang-20 + ``-O3 -march=native
+    -mavx512f -ffast-math`` to match the GCC aggressive flags.
+    """
     entry = _C_BASELINE_MAP.get(cand_name)
     if entry is None:
         return float('nan')
