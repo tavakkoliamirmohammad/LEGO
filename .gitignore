@@ -12,6 +12,17 @@ CASTLE-tex/
 build
 build-wasm
 build-ci-test
+
+# MLIR Python bindings — populated at build time from the LLVM project,
+# not tracked. Only python/lego/mlir/__init__.py is hand-written.
+python/lego/mlir/_mlir_libs/
+python/lego/mlir/dialects/
+python/lego/mlir/extras/
+python/lego/mlir/runtime/
+python/lego/mlir/execution_engine.py
+python/lego/mlir/ir.py
+python/lego/mlir/passmanager.py
+python/lego/mlir/rewrite.py
 .ci-venv
 third_party/**
 .agents
