@@ -51,7 +51,6 @@
 #include "Lego/Passes.h"
 #include "LegoSpecializedVectorize.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -462,11 +461,15 @@ struct VectorizeFoldPattern : public OpRewritePattern<scf::ForOp> {
     // combine.  We fold the original initAcc back in *after* the
     // reduction.
     //
-    // Note: a popcount-based fast path for predicated count
-    // (loop-invariant value + addf/addi combine) would eliminate the
-    // per-lane select+add.  Deferred — see task #50/#46 follow-up; the
-    // general path already takes count_if from 0.04x to ~0.87x of
-    // clang's popcount lowering.
+    // Note: tried a popcount-via-reduce(extui(mask)) specialisation
+    // for predicated count (loop-invariant value + addf/addi).  On
+    // Zen 4 the int-to-float conversion + scalar mul/add per chunk
+    // empirically beats the general select-add-reduce path by *only*
+    // a few percent in the best case, and on count_if specifically it
+    // was slightly slower (0.84x vs 0.94x of clang's popcount lowering),
+    // because the extui-of-i1-to-i32 chain is microcoded similarly to
+    // the select+add chain.  Left the general path active; revisit if
+    // we add target-specific intrinsic emission.
     SmallVector<Value> vecInits;
     vecInits.reserve(nia);
     for (auto &e : shape->entries)
