@@ -1,2 +1,0 @@
-  N=1024 D=64 cfg=64x32s2: 0.103 ms 83.8 TFLOP/s correct=True
-  N=1024 D=64 cfg=64x64s2: 0.102 ms 83.8 TFLOP/s correct=True
