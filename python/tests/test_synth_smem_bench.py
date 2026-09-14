@@ -33,7 +33,7 @@ def test_model_predicts_32_wavefronts_for_naive_and_1_for_the_rest():
 
 
 def test_conflicting_layout_is_an_order_of_magnitude_slower_on_smem_bound_loop(bench):
-    ms = {name: bench.time(name, reps=2048, blocks=84 * 8) for name in LAYOUTS}
+    ms = {name: bench.time(name, reps=2048) for name in LAYOUTS}
     free = [ms[n] for n in ("pad1", "xor", "rot1")]
     assert max(free) / min(free) < 1.15, ms          # conflict-free variants agree
     assert ms["naive"] / min(free) > 8, ms           # 32 predicted wavefronts vs 1

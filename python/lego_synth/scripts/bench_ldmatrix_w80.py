@@ -3,7 +3,9 @@
 Usage: python -m lego_synth.scripts.bench_ldmatrix_w80 --out lego_synth/results/ldmatrix_w80.md
 """
 import argparse
+import os
 import torch
+from lego_synth.kernels.target import detect_target, metadata_header
 
 from lego_synth.layouts import RowMajor, XorSwizzle
 from lego_synth.harness.ldmatrix_bench import LdmatrixBench, predicted_wavefronts_per_ldmatrix
@@ -19,11 +21,13 @@ def main():
              "| layout | footprint (elems) | fragments correct | predicted wavefronts / ldmatrix.x4 | measured ms |", "|---|---|---|---|---|"]
     for name, L in layouts.items():
         ok = b.check(name)
-        ms = b.time(name, reps=1024, blocks=84 * 4)
+        ms = b.time(name, reps=1024)
         lines.append(f"| {name} | {L.footprint} | {ok} | {predicted_wavefronts_per_ldmatrix(L)} | {ms:.3f} |")
-    text = "\n".join(lines); print(text)
-    if args.out:
-        open(args.out, "w").write(text + "\n")
+    target = detect_target()
+    text = metadata_header(target) + "\n".join(lines); print(text)
+    out_path = args.out or os.path.join(os.path.dirname(__file__), "..", "results", target.tag, "ldmatrix_w80.md")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    open(out_path, "w").write(text + "\n")
 
 
 if __name__ == "__main__":

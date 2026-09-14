@@ -127,7 +127,9 @@ class LdmatrixBench:
         got = getattr(self.module, f"check_{name}")().cpu().numpy().astype(np.uint32)
         return np.array_equal(got, expected_fragments(self.rows, self.cols))
 
-    def time(self, name: str, reps: int = 1024, blocks: int = 336, iters: int = 20, warmup: int = 3) -> float:
+    def time(self, name: str, reps: int = 1024, blocks: int = None, iters: int = 20, warmup: int = 3) -> float:
+        if blocks is None:   # 4 blocks per SM on whatever GPU this is
+            blocks = 4 * torch.cuda.get_device_properties(0).multi_processor_count
         fn = getattr(self.module, f"bench_{name}")
         for _ in range(warmup):
             fn(reps, blocks)

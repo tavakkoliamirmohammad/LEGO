@@ -3,7 +3,9 @@
 Usage: python -m lego_synth.scripts.calibrate_smem --out lego_synth/results/smem_calibration.md
 """
 import argparse
+import os
 import torch
+from lego_synth.kernels.target import detect_target, metadata_header
 
 from lego_synth.layouts import RowMajor, XorSwizzle
 from lego_synth.harness.smem_bench import SmemBench, predicted_wavefronts_per_instr
@@ -20,12 +22,14 @@ def main():
              "| layout | predicted wavefronts/instr | measured ms | ratio to 1 wavefront |", "|---|---|---|---|"]
     base = None
     for name, L in layouts.items():
-        ms = b.time(name, reps=2048, blocks=84 * 8)
+        ms = b.time(name, reps=2048)
         base = base or ms
         lines.append(f"| {name} | {predicted_wavefronts_per_instr(L)} | {ms:.3f} | {ms / base:.2f} |")
-    text = "\n".join(lines); print(text)
-    if args.out:
-        open(args.out, "w").write(text + "\n")
+    target = detect_target()
+    text = metadata_header(target) + "\n".join(lines); print(text)
+    out_path = args.out or os.path.join(os.path.dirname(__file__), "..", "results", target.tag, "smem_calibration.md")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    open(out_path, "w").write(text + "\n")
 
 
 if __name__ == "__main__":

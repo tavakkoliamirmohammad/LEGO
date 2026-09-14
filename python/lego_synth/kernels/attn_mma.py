@@ -211,23 +211,25 @@ def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int 
         else:
             groups = [issue_kv(_idx(st), _idx(st)) for st in range(S - 1)]
             carried = o_acc + m_i + l_i
+            # Key blocks visible to this query block (causal: up to and including the diagonal).
+            n_kv = _mul(_add(mblk, _idx(1)), _idx(BLOCK_M // BLOCK_N)) if causal else _idx(KT)
+            assert KT % S == 0
 
             def loop_body(iv, *vals):
+                # Unrolled by S: sub-iteration st handles key block iv*S + st in stage st, so stage
+                # indices and every shared-memory offset are compile-time constants.
                 o_cur, m_cur, l_cur = list(vals[:DN]), list(vals[DN:DN + 2]), list(vals[DN + 2:DN + 4])
-                nvgpu_d.device_async_wait(groups[-1], num_groups=S - 2)
-                ctx.barrier()
-                nxt = _add(iv, _idx(S - 1))
-                clamped = arith_d.MinUIOp(nxt, _idx(KT - 1)).result
-                issue_kv(clamped, _rem(nxt, _idx(S)))
-                o_n, m_n, l_n = step(_rem(iv, _idx(S)), o_cur, m_cur, l_cur, iv)
-                return o_n + m_n + l_n
+                kt_base = _mul(iv, _idx(S))
+                for st in range(S):
+                    nvgpu_d.device_async_wait(groups[-1], num_groups=S - 2)
+                    ctx.barrier()
+                    nxt = _add(kt_base, _idx(st + S - 1))
+                    clamped = arith_d.MinUIOp(nxt, _idx(KT - 1)).result
+                    issue_kv(clamped, _idx((st + S - 1) % S))
+                    o_cur, m_cur, l_cur = step(_idx(st), o_cur, m_cur, l_cur, _add(kt_base, _idx(st)))
+                return o_cur + m_cur + l_cur
 
-            # Causal: a query block only needs key blocks up to its own diagonal.
-            n_kv = _add(_mul(_add(mblk, _idx(1)), _idx(BLOCK_M // BLOCK_N)), _idx(0)) if causal else _idx(KT)
-            if causal:
-                # Clamp prologue and loop refills to the visible range so no block reads past it.
-                pass
-            res = ctx.for_range(n_kv, loop_body, init_vals=carried)
+            res = ctx.for_range(_div(n_kv, _idx(S)), loop_body, init_vals=carried)
             o_acc, m_i, l_i = list(res[:DN]), list(res[DN:DN + 2]), list(res[DN + 2:DN + 4])
 
         inv_l = [arith_d.DivFOp(_f32(1.0), l_i[i]).result for i in range(2)]

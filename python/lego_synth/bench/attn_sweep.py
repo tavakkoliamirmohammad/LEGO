@@ -5,13 +5,15 @@ internally; Triton's tutorial kernel requires a power-of-two head dimension, so 
 its number is the padded-to-128 kernel (reported as such).
 """
 import argparse
+import os
 import torch
 import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 
 from lego_synth.problems import problem_for
 from lego_synth.search import synthesize
-from lego_synth.machine import ampere
+from lego_synth.machine import for_device
+from lego_synth.kernels.target import detect_target, metadata_header
 from lego_synth.export import to_lego_tile
 from lego_synth.kernels.attn_mma import build_attention
 from lego_synth.kernels.launch import CastleKernel
@@ -19,7 +21,7 @@ from lego_synth.bench.triton_matmul import time_fn
 
 
 def kv_layout(block_n, d):
-    return to_lego_tile(synthesize(problem_for("staging", block_n, d, 2, ampere()), "full").layout)
+    return to_lego_tile(synthesize(problem_for("staging", block_n, d, 2, for_device()), "full").layout)
 
 
 def sdpa_time(q, k, v, backend, causal=False):
@@ -38,10 +40,13 @@ def main():
     ap.add_argument("--seq", default="1024,2048,4096")
     ap.add_argument("--dims", default="64,80,96,112,128")
     ap.add_argument("--configs", default="64x32s2,64x64s2,128x32s2,128x64s2,64x64s3")
-    ap.add_argument("--out", default=None)
+    ap.add_argument("--out", default=None, help="result file; default results/<device-tag>/attn[_causal].md")
     ap.add_argument("--causal", action="store_true")
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    lines = []
+    torch.manual_seed(args.seed)
+    target = detect_target()
+    lines = [metadata_header(target), f"seed={args.seed} bh={args.bh} configs={args.configs} causal={args.causal}", ""]
 
     def out(msg):
         print(msg, flush=True); lines.append(msg)
@@ -55,6 +60,8 @@ def main():
             best = None
             for cfg in args.configs.split(","):
                 bm, rest = cfg.split("x"); bn, st = rest.split("s"); bm, bn, st = int(bm), int(bn), int(st)
+                if (bm * D + st * 2 * bn * D) * 2 > target.smem_per_block_optin:
+                    out(f"  N={N} D={D} cfg={cfg}: skipped (shared memory above the device opt-in limit)"); continue
                 try:
                     L = kv_layout(bn, D)
                     kern = CastleKernel.from_builder(build_attention(args.bh, N, D, L, L, BLOCK_M=bm, BLOCK_N=bn, stages=st, causal=args.causal))
@@ -69,8 +76,10 @@ def main():
                     best = (cfg, ms)
             fmt = lambda t: f"{t:.3f} ms" if t else "n/a"
             out(f"N={N} D={D} BH={args.bh}{' causal' if args.causal else ''}: SDPA flash {fmt(fl)} | cuDNN {fmt(cu)} | efficient {fmt(ef)} | CASTLE best {best}")
-    if args.out:
-        open(args.out, "w").write("\n".join(lines) + "\n")
+    out_path = args.out or os.path.join(os.path.dirname(__file__), "..", "results", target.tag, "attn_causal.md" if args.causal else "attn.md")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    open(out_path, "w").write("\n".join(lines) + "\n")
+    print("wrote", out_path)
 
 
 if __name__ == "__main__":

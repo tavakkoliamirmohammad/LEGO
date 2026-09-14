@@ -24,3 +24,28 @@ GPU tests need `source scripts/env-a6000.sh` on the A6000 node.
 
 Reproduce the headline table:
 `python -m lego_synth.scripts.ablation --kind staging --elem 2 --rows 64 --widths 32,48,64,80,96,112,128`
+
+## Reproducing on another GPU
+
+Nothing in the suite assumes a particular card: the PTX target, machine model, SM count, and
+shared-memory opt-in limit are detected at run time (`lego_synth/kernels/target.py`), every result
+file starts with a provenance header (device, driver, CUDA, torch, triton, cupy, git commit,
+timestamp, seed), and configurations that exceed the device's shared-memory limit are skipped, not failed.
+
+1. Build LEGO with the monolithic LLVM build (see the top-level README), then create the runtime shim and
+   link the native bindings into the source tree: `bash scripts/setup-mlir-runtime-dir.sh`.
+2. Python environment with `torch`, `triton`, `cupy-cuda12x`, `z3-solver`, `sympy`, `numpy`, `pytest`
+   (the tested versions are in every result file's header).
+3. `source scripts/env.sh` (derives paths from the repo; needs `CUDA_HOME` or `nvcc` on `PATH`;
+   set `GCC_ROOT` if the CUDA host compiler must be a specific GCC). `scripts/env-a6000.sh` is the
+   site-specific example this suite was developed with.
+4. Tests: `cd python && pytest --import-mode=importlib tests/test_synth_*.py tests/test_bitwise_ops.py -q`
+   (GPU tests skip without a CUDA device; the Nsight test skips when counters are locked).
+5. Full suite into `python/lego_synth/results/<device-tag>/`: `bash python/lego_synth/bench/run_all.sh`
+   (`run_all.sh quick` for a short version). Individual scripts accept `--seed`, `--out`, and
+   configuration lists; see `python -m lego_synth.bench.gemm_sweep --help`.
+
+Notes for other architectures: the machine model covers NVIDIA from Volta on (32 banks x 4 B,
+32-lane warps); `mma.sync.m16n8k16` needs sm_80 or newer; the bundled LLVM targets up to sm_90 and
+newer GPUs run that PTX through forward compatibility; Hopper-specific paths (wgmma, TMA) are not
+used, so Hopper numbers measure the Ampere-style kernel.

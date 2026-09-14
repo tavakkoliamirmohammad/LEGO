@@ -35,7 +35,7 @@ def test_ldmatrix_loads_are_correct_under_every_layout(bench):
 
 
 def test_synthesized_layout_matches_pow2_swizzle_speed_with_smaller_footprint(bench):
-    ms = {name: bench.time(name, reps=1024, blocks=84 * 4) for name in LAYOUTS}
+    ms = {name: bench.time(name, reps=1024) for name in LAYOUTS}
     assert 1.6 < ms["naive"] / ms["synth"] < 2.4, ms              # 8 predicted wavefronts vs 4
     assert abs(ms["synth"] - ms["pow2"]) / ms["pow2"] < 0.15, ms  # same speed as the padded swizzle
     assert LAYOUTS["synth"].footprint * 1.5 < LAYOUTS["pow2"].footprint

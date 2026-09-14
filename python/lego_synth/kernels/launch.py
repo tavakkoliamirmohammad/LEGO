@@ -28,7 +28,12 @@ class CastleKernel:
             self._fn.max_dynamic_shared_size_bytes = self.shared_bytes
 
     @classmethod
-    def from_builder(cls, builder, chip: str = "sm_86", features: str = "+ptx78") -> "CastleKernel":
+    def from_builder(cls, builder, chip: str = None, features: str = None) -> "CastleKernel":
+        """Compile for the detected GPU unless a chip / PTX feature string is given."""
+        if chip is None or features is None:
+            from .target import detect_target
+            t = detect_target()
+            chip, features = chip or t.chip, features or t.features
         res = builder.compile(target="cuda", chip=chip, features=features, format="assembly")
         ptx = extract_ptx(open(res.kernel_path).read())
         ptx_path = os.path.splitext(res.kernel_path)[0] + ".ptx"

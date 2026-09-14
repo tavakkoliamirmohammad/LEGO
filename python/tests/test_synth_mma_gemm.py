@@ -4,6 +4,8 @@ import re
 import pytest
 
 pytest.importorskip("lego.mlir.ir")
+from lego_synth.kernels.target import detect_target  # noqa: E402
+_T = detect_target()
 import numpy as np  # noqa: E402
 from lego_synth.layouts import RowMajor, XorSwizzle  # noqa: E402
 from lego_synth.export import to_lego_tile  # noqa: E402
@@ -17,7 +19,7 @@ SW = XorSwizzle(64, 32, shift=0, mask=3, unit=8)     # 64 B rows: 4 chunks, chun
 
 def test_gemm_kernel_compiles_to_ptx_with_tensor_core_instructions():
     b = build_gemm(M, N, K, BM, BN, BK, to_lego_tile(SW), to_lego_tile(XorSwizzle(32, 64, 0, 7, unit=8)), stages=2)
-    res = b.compile(target="cuda", chip="sm_86", features="+ptx78", format="assembly")
+    res = b.compile(target="cuda", chip=_T.chip, features=_T.features, format="assembly")
     ptx = open(res.kernel_path).read()
     for ins in ("cp.async", "ldmatrix", "mma.sync"):
         assert ins in ptx, ins

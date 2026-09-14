@@ -8,6 +8,8 @@ import re
 import pytest
 
 pytest.importorskip("lego.mlir.ir")
+from lego_synth.kernels.target import detect_target  # noqa: E402
+_T = detect_target()
 
 import numpy as np  # noqa: E402
 from lego.core import OrderBy, Row  # noqa: E402
@@ -60,7 +62,7 @@ def _lowered_arith_ops(builder) -> dict:
 def test_native_kernel_with_synthesized_smem_layout_compiles_for_cuda():
     for L in (RowMajor(T, T), XorSwizzle(T, T, shift=0, mask=31)):
         b = make_transpose(to_lego_tile(L))
-        result = b.compile(target="cuda", chip="sm_86", features="+ptx78", format="assembly")
+        result = b.compile(target="cuda", chip=_T.chip, features=_T.features, format="assembly")
         assert result.kernel_path
 
 

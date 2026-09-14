@@ -52,8 +52,12 @@ def _main_wrapper(builder, mod: int) -> str:
     return "\n".join(lines)
 
 
-def run_kernel(builder, mod: int = 16, chip: str = "sm_86", features: str = "+ptx78", timeout: int = 120):
-    """Compile with lego-to-nvvm, execute with mlir-runner, return the output buffer as np.float32."""
+def run_kernel(builder, mod: int = 16, chip: str = None, features: str = None, timeout: int = 120):
+    """Compile with lego-to-nvvm (for the detected GPU unless given), execute with mlir-runner, return the output as np.float32."""
+    if chip is None or features is None:
+        from .target import detect_target
+        t = detect_target()
+        chip, features = chip or t.chip, features or t.features
     from lego.mlir.ir import Context, Module
     from lego.mlir.passmanager import PassManager
     from lego.backend.dialects.lego_dialect import register as register_lego
