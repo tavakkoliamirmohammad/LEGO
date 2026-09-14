@@ -211,7 +211,7 @@ struct SimplifyDivOfRem : public OpRewritePattern<arith::DivUIOp> {
     auto rem = op.getLhs().getDefiningOp<arith::RemUIOp>();
     if (!rem || rem.getRhs() != op.getRhs())
       return failure();
-    rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(op, 0);
+    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, rewriter.getIntegerAttr(op.getType(), 0));
     return success();
   }
 };
@@ -279,7 +279,7 @@ struct SimplifyMixedRadixDiv : public OpRewritePattern<arith::DivUIOp> {
                                 PatternRewriter &rewriter) const override {
     if (!matchMixedRadixBound(op.getLhs(), op.getRhs()))
       return failure();
-    rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(op, 0);
+    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, rewriter.getIntegerAttr(op.getType(), 0));
     return success();
   }
 };
@@ -373,7 +373,7 @@ struct StrengthReduceDiv : public OpRewritePattern<arith::DivUIOp> {
       return failure();
     Value shift = arith::ConstantOp::create(
         rewriter, op.getLoc(),
-        rewriter.getIndexAttr(*log2));
+        rewriter.getIntegerAttr(op.getType(), *log2));
     rewriter.replaceOpWithNewOp<arith::ShRUIOp>(op, op.getLhs(), shift);
     return success();
   }
@@ -389,7 +389,7 @@ struct StrengthReduceRem : public OpRewritePattern<arith::RemUIOp> {
     uint64_t maskValue = (1ULL << *log2) - 1;
     Value mask = arith::ConstantOp::create(
         rewriter, op.getLoc(),
-        rewriter.getIndexAttr(maskValue));
+        rewriter.getIntegerAttr(op.getType(), maskValue));
     rewriter.replaceOpWithNewOp<arith::AndIOp>(op, op.getLhs(), mask);
     return success();
   }
@@ -409,7 +409,7 @@ struct StrengthReduceMul : public OpRewritePattern<arith::MulIOp> {
         continue;
       Value shift = arith::ConstantOp::create(
           rewriter, op.getLoc(),
-          rewriter.getIndexAttr(*log2));
+          rewriter.getIntegerAttr(op.getType(), *log2));
       rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, other, shift);
       return success();
     }

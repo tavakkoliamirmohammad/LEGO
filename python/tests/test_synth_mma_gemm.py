@@ -29,7 +29,7 @@ def test_gemm_result_is_exact_for_small_integer_inputs():
     for sA, sB in ((RowMajor(64, 32), RowMajor(32, 64)), (to_lego_tile(SW), to_lego_tile(XorSwizzle(32, 64, 0, 7, unit=8)))):
         b = build_gemm(M, N, K, BM, BN, BK, sA if not isinstance(sA, RowMajor) else to_lego_tile(sA),
                        sB if not isinstance(sB, RowMajor) else to_lego_tile(sB))
-        out = run_kernel(b, mod=15)
-        A = init_values(M * K, mod=15).reshape(M, K); B = init_values(K * N, mod=15).reshape(K, N)
+        out = run_kernel(b)
+        A = init_values(M * K).reshape(M, K); B = init_values(K * N).reshape(K, N)
         expected = (A.astype(np.float64) @ B.astype(np.float64)).astype(np.float32).ravel()
         assert np.array_equal(out, expected), np.abs(out - expected).max()
