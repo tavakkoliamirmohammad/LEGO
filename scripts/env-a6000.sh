@@ -6,4 +6,8 @@ export PATH=$GCC_ROOT/bin:$CUDA_HOME/bin:$NINJA_DIR:$PATH
 export LD_LIBRARY_PATH=$GCC_ROOT/lib64:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
 export CC=$GCC_ROOT/bin/gcc CXX=$GCC_ROOT/bin/g++
 export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-/scratch/general/vast/u1419116/torch_ext}
-export MLIR_BUILD_DIR=/scratch/general/vast/u1419116/LEGO/build
+# Puzzles expect $MLIR_BUILD_DIR/bin/mlir-runner and $MLIR_BUILD_DIR/lib/libmlir_*; see scripts/setup-mlir-runtime-dir.sh
+export MLIR_BUILD_DIR=/scratch/general/vast/u1419116/LEGO/build/mlir-runtime
+# Assembled package (native bindings + sources) must precede the editable install
+export PYTHONPATH=/scratch/general/vast/u1419116/LEGO/build/python_packages/lego:/scratch/general/vast/u1419116/LEGO/python/examples/puzzles:${PYTHONPATH:-}
+export LD_LIBRARY_PATH=$MLIR_BUILD_DIR/lib:$LD_LIBRARY_PATH
