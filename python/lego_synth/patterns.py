@@ -99,14 +99,30 @@ def ldmatrix_x4(rows: int, cols: int) -> AccessPattern:
 
 
 def mma_m16n8k16_a() -> AccessPattern:
-    """mma.sync.m16n8k16 A fragment (row-major 16x16, 16-bit): register k of lane t holds
-    element (groupID + 8*((k>>1)&1), tid*2 + (k&1) + 8*(k>>2)) with groupID = t>>2, tid = t&3.
-    Each register index is treated as one access instruction over the warp.
+    """mma.sync.m16n8k16 A fragment (row-major 16x16, 16-bit) loaded directly as four
+    32-bit register pairs: pair k of lane t holds elements (groupID + 8*(k&1), tid*2 + 8*(k>>1))
+    and the next column, with groupID = t>>2, tid = t&3.
     """
     lanes = np.arange(32)
     group, tid = lanes >> 2, lanes & 3
 
     def coords(k):
-        return group + 8 * ((k >> 1) & 1), tid * 2 + (k & 1) + 8 * (k >> 2)
+        return group + 8 * (k & 1), tid * 2 + 8 * (k >> 1)
 
-    return AccessPattern("mma_m16n8k16_a", 8, 32, coords)
+    return AccessPattern("mma_m16n8k16_a", 4, 32, coords, access_elems=2)
+
+
+def mma_a_direct(rows: int, cols: int) -> AccessPattern:
+    """Direct (no ldmatrix) A-fragment loads over a tile: four 32-bit loads per 16x16 block,
+    blocks in row-major order."""
+    assert rows % 16 == 0 and cols % 16 == 0
+    frag = mma_m16n8k16_a()
+    blocks_per_row = cols // 16
+
+    def coords(k):
+        b, pair = divmod(k, 4)
+        r0, c0 = 16 * (b // blocks_per_row), 16 * (b % blocks_per_row)
+        i, j = frag.coords(pair)
+        return r0 + i, c0 + j
+
+    return AccessPattern("mma_a_direct", (rows // 16) * blocks_per_row * 4, 32, coords, access_elems=2)
