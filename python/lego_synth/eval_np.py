@@ -28,10 +28,20 @@ def bank_conflicts(byte_addrs, elem_bytes: int, machine: MachineModel) -> int:
     return extra
 
 
-def conflicts(layout, pattern, elem_bytes: int, machine: MachineModel) -> int:
-    """Total extra wavefronts over every instruction of `pattern` on `layout`."""
+def conflicts(layout, pattern, elem_bytes: int, machine: MachineModel):
+    """Total extra wavefronts over every instruction of `pattern` on `layout`.
+
+    `elem_bytes` scales element indices to byte addresses; the pattern decides how
+    many bytes each lane touches. A lane access that is not naturally aligned to
+    its width is illegal for vector and ldmatrix loads, reported as `math.inf`.
+    """
+    import math
+    width = pattern.access_width(elem_bytes)
     total = 0
     for k in range(pattern.n_instr):
         i, j = pattern.coords(k)
-        total += bank_conflicts(layout.flat(i, j) * elem_bytes, elem_bytes, machine)
+        addrs = layout.flat(i, j) * elem_bytes
+        if width > 1 and np.any(addrs % width):
+            return math.inf
+        total += bank_conflicts(addrs, width, machine)
     return total

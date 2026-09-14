@@ -30,18 +30,23 @@ def conflict_free_constraints(template, patterns: Sequence, elem_bytes: int,
     For sub-word accesses two lanes may legitimately share a word, so fall back
     to pairwise "same word or different bank".
     """
-    width = machine.banks * machine.bank_bytes
-    group = min(machine.warp, max(1, width // elem_bytes))
-    words_per_lane = max(1, elem_bytes // machine.bank_bytes)
-    subword = elem_bytes < machine.bank_bytes
     cs = []
     for pat in patterns:
+        access = pat.access_width(elem_bytes)
+        width = machine.banks * machine.bank_bytes
+        group = min(machine.warp, max(1, width // access))
+        words_per_lane = max(1, access // machine.bank_bytes)
+        subword = access < machine.bank_bytes
         for k in range(pat.n_instr):
             ii, jj = pat.coords(k)
             coords = list(zip(ii.tolist(), jj.tolist()))
             for start in range(0, len(coords), group):
                 uniq = list(dict.fromkeys(coords[start:start + group]))
-                words = [_word(template.flat_z3(i, j, h), elem_bytes, machine) for (i, j) in uniq]
+                flats = [template.flat_z3(i, j, h) for (i, j) in uniq]
+                if access > machine.bank_bytes:
+                    for f in flats:   # natural alignment of each lane's vector access
+                        cs.append((f * _bv(elem_bytes)) & _bv(access - 1) == _bv(0))
+                words = [_word(f, elem_bytes, machine) for f in flats]
                 if not subword:
                     banks = [_bank(w + _bv(u), machine) for w in words for u in range(words_per_lane)]
                     if len(banks) > 1:

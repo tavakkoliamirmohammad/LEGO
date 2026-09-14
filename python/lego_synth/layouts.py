@@ -19,15 +19,21 @@ class RowMajor:
 
 @dataclass(frozen=True)
 class XorSwizzle:
-    """Row-major with the column XOR-ed by a shifted, masked row index."""
+    """Row-major with the column XOR-ed by a shifted, masked row index.
+
+    `unit` is the swizzle granularity in elements (a power of two): the XOR acts on
+    the chunk index j // unit and leaves j % unit untouched, so `unit`-element
+    vectors stay contiguous (unit=8 for 16-byte chunks of 2-byte elements).
+    """
     rows: int
     cols: int
     shift: int = 0
     mask: int = 0
+    unit: int = 1
 
     def flat(self, i, j):
         i = np.asarray(i); j = np.asarray(j)
-        return i * self.cols + (j ^ ((i >> self.shift) & self.mask))
+        return i * self.cols + (j ^ (((i >> self.shift) & self.mask) * self.unit))
 
     @property
     def footprint(self) -> int:

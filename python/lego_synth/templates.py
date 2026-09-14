@@ -15,27 +15,37 @@ def _bv(v: int) -> z3.BitVecRef:
 
 @dataclass(frozen=True)
 class XorTemplate:
-    """i*cols + (j ^ ((i >> shift) & mask)), holes: shift, mask."""
+    """i*cols + (j ^ (((i >> shift) & mask) * unit)), holes: shift, mask.
+
+    `unit` (elements, power of two) is the swizzle granularity: vectors of `unit`
+    elements stay contiguous. The mask ranges over chunk indices (cols / unit).
+    """
     rows: int
     cols: int
+    unit: int = 1
 
     def holes(self) -> Dict[str, Tuple[int, int]]:
+        chunks = max(1, math.ceil(self.cols / self.unit))
         return {"shift": (0, max(1, math.ceil(math.log2(max(self.rows, 2))))),
-                "mask": (0, (1 << max(1, math.ceil(math.log2(max(self.cols, 2))))) - 1)}
+                "mask": (0, (1 << max(1, math.ceil(math.log2(max(chunks, 2))))) - 1)}
+
+    def _col(self, i: int, j: int, h) -> z3.BitVecRef:
+        return _bv(j) ^ ((z3.LShR(_bv(i), h["shift"]) & h["mask"]) * _bv(self.unit))
 
     def flat_z3(self, i: int, j: int, h) -> z3.BitVecRef:
-        return _bv(i * self.cols) + (_bv(j) ^ (z3.LShR(_bv(i), h["shift"]) & h["mask"]))
+        return _bv(i * self.cols) + self._col(i, j, h)
 
     def side_constraints(self, h) -> List[z3.BoolRef]:
         # Row-local bijectivity: every swizzled column stays inside [0, cols).
+        # Only the chunk starts matter (the XOR never touches the low unit bits).
         cs = []
         for i in range(self.rows):
-            for j in range(self.cols):
-                cs.append(z3.ULT(_bv(j) ^ (z3.LShR(_bv(i), h["shift"]) & h["mask"]), _bv(self.cols)))
+            for j in range(0, self.cols, self.unit):
+                cs.append(z3.ULT(self._col(i, j, h), _bv(self.cols)))
         return cs
 
     def instantiate(self, v) -> XorSwizzle:
-        return XorSwizzle(self.rows, self.cols, shift=v["shift"], mask=v["mask"])
+        return XorSwizzle(self.rows, self.cols, shift=v["shift"], mask=v["mask"], unit=self.unit)
 
 
 @dataclass(frozen=True)
