@@ -14,6 +14,8 @@
 #include "mlir-c/Dialect/MemRef.h"
 #include "mlir-c/Dialect/GPU.h"
 #include "mlir-c/Dialect/SPIRV.h"
+#include "mlir-c/Dialect/NVGPU.h"
+#include "mlir-c/Dialect/Vector.h"
 #include "mlir/Bindings/Python/IRCore.h"
 #include "mlir/Bindings/Python/Nanobind.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
@@ -114,6 +116,9 @@ NB_MODULE(_legoDialects, m) {
         registerAndLoad(mlirGetDialectHandle__arith__(), ctx);
         registerAndLoad(mlirGetDialectHandle__func__(), ctx);
         registerAndLoad(mlirGetDialectHandle__scf__(), ctx);
+        // Tensor-core kernels: nvgpu (cp.async, ldmatrix, mma.sync) and vector fragments.
+        registerAndLoad(mlirGetDialectHandle__nvgpu__(), ctx);
+        registerAndLoad(mlirGetDialectHandle__vector__(), ctx);
         registerAndLoad(mlirGetDialectHandle__memref__(), ctx);
         // GPU + SPIR-V dialects (always available, no GPU hardware needed)
         registerAndLoad(mlirGetDialectHandle__gpu__(), ctx);

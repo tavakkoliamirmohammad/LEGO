@@ -442,6 +442,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       ${_lego_python_sources}
     EMBED_LIBS
       MLIRCAPITransforms
+      MLIRCAPINVGPU
+      MLIRCAPIVector
   )
 
   # Assemble final Python package.
