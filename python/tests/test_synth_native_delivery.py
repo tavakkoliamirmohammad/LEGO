@@ -69,7 +69,8 @@ def test_pipeline_index_arithmetic_cost_of_exported_swizzle_is_reported():
     swz = _lowered_arith_ops(make_transpose(to_lego_tile(XorSwizzle(T, T, shift=0, mask=31))))
     print("naive:", naive)
     print("xor  :", swz)
-    assert sum(swz.values()) >= sum(naive.values())
+    assert swz["xori"] >= 1                          # the swizzle lowers to a native XOR
+    assert sum(swz.values()) <= sum(naive.values()) + 6   # not the 26-op bit decomposition
 
 
 def test_native_kernel_with_synthesized_smem_layout_runs_correctly_on_the_gpu():

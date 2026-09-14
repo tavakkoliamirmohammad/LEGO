@@ -93,6 +93,36 @@ def le_constraint(lhs, rhs):
     return sp.StrictLessThan(lhs, rhs, evaluate=False)
 
 
+class BitXor(Function):
+    """Bitwise XOR of non-negative integers. Lowers to arith.xori; prints as `^`."""
+    is_integer = True
+    is_nonnegative = True
+
+    @classmethod
+    def eval(cls, a, b):
+        if isinstance(a, sp.Integer) and isinstance(b, sp.Integer):
+            return sp.Integer(int(a) ^ int(b))
+        if b == 0:
+            return a
+        if a == 0:
+            return b
+        return None
+
+
+class BitAnd(Function):
+    """Bitwise AND of non-negative integers. Lowers to arith.andi; prints as `&`."""
+    is_integer = True
+    is_nonnegative = True
+
+    @classmethod
+    def eval(cls, a, b):
+        if isinstance(a, sp.Integer) and isinstance(b, sp.Integer):
+            return sp.Integer(int(a) & int(b))
+        if a == 0 or b == 0:
+            return sp.Integer(0)
+        return None
+
+
 class LayoutBlock:
     def dims(self) -> Tuple[Symbol, ...]:
         raise NotImplementedError

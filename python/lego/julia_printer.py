@@ -5,6 +5,14 @@ from ._printer_base import LEGOStaticLangMixin
 
 
 class LEGOJuliaCodePrinter(LEGOStaticLangMixin, JuliaCodePrinter):
+    def _print_BitXor(self, expr):
+        a, b = self._print(expr.args[0]), self._print(expr.args[1])
+        return f"xor({a}, {b})"
+
+    def _print_BitAnd(self, expr):
+        a, b = self._print(expr.args[0]), self._print(expr.args[1])
+        return f"({a} & {b})"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 

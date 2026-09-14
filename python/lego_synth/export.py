@@ -11,6 +11,11 @@ from .layouts import RowMajor, XorSwizzle, Rotation
 from .lego_adapter import load_core
 
 
+def _bitwise():
+    core = load_core()
+    return getattr(core, "BitXor", None), getattr(core, "BitAnd", None)
+
+
 def _bit(v, k):
     return Mod(floor(v / Integer(2 ** k)), Integer(2))
 
@@ -45,19 +50,25 @@ def to_lego(layout):
         cbits = max(1, math.ceil(math.log2(max(nchunks, 2))))
         rbits = max(1, math.ceil(math.log2(max(rows, 2))))
 
+        BitXor, BitAnd = _bitwise()
+
         def swz(i):  # chunk-index XOR operand: (i >> s) & m
-            return _and_const(floor(i / Integer(2 ** s)), m, rbits)
+            shifted = floor(i / Integer(2 ** s))
+            return BitAnd(shifted, Integer(m)) if BitAnd else _and_const(shifted, m, rbits)
+
+        def xor(a, b):
+            return BitXor(a, b) if BitXor else _xor(a, b, cbits)
 
         def f_apply(args):
             i, j = args
             chunk, low = floor(j / Integer(unit)), Mod(j, Integer(unit))
-            return i * Integer(cols) + _xor(chunk, swz(i), cbits) * Integer(unit) + low
+            return i * Integer(cols) + xor(chunk, swz(i)) * Integer(unit) + low
 
         def f_inv(f):
             i = floor(f / Integer(cols))
             jp = Mod(f, Integer(cols))
             chunk, low = floor(jp / Integer(unit)), Mod(jp, Integer(unit))
-            return (i, _xor(chunk, swz(i), cbits) * Integer(unit) + low)
+            return (i, xor(chunk, swz(i)) * Integer(unit) + low)
 
         return core.GenP((rows, cols), f_apply, f_inv)
 

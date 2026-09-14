@@ -5,6 +5,14 @@ from ._printer_base import LEGOStaticLangMixin
 
 
 class LEGOFortranCodePrinter(LEGOStaticLangMixin, FCodePrinter):
+    def _print_BitXor(self, expr):
+        a, b = self._print(expr.args[0]), self._print(expr.args[1])
+        return f"ieor({a}, {b})"
+
+    def _print_BitAnd(self, expr):
+        a, b = self._print(expr.args[0]), self._print(expr.args[1])
+        return f"iand({a}, {b})"
+
     def __init__(self, *args, **kwargs):
         # Default to Fortran 95 standard via the settings dict.
         settings = kwargs.get('settings') or {}
