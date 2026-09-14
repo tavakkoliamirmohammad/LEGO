@@ -45,11 +45,16 @@ def conflict_free_constraints(template, patterns: Sequence, elem_bytes: int,
 
 
 def solve_conflict_free(template, patterns: Sequence, elem_bytes: int, machine: MachineModel,
-                        timeout_ms: int = 60_000):
-    """Return an instantiated layout with zero conflicts on all patterns, or None."""
+                        timeout_ms: int = 60_000, minimize: Optional[str] = None):
+    """Return an instantiated layout with zero conflicts on all patterns, or None.
+
+    If `minimize` names a hole, the smallest feasible value of that hole is returned.
+    """
     h = {name: z3.BitVec(name, BV) for name in template.holes()}
-    s = z3.Solver()
+    s = z3.Optimize() if minimize else z3.Solver()
     s.set("timeout", timeout_ms)
+    if minimize:
+        s.minimize(h[minimize])
     for name, (lo, hi) in template.holes().items():
         s.add(z3.UGE(h[name], _bv(lo)), z3.ULE(h[name], _bv(hi)))
     s.add(*template.side_constraints(h))
