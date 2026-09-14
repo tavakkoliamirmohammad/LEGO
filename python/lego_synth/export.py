@@ -93,6 +93,13 @@ def to_lego(layout):
 
 
 def to_lego_tile(layout):
-    """The GenP wrapped as a tile-level LEGO layout usable as a `Shared`/`Buffer` layout."""
+    """The GenP wrapped as a tile-level LEGO layout usable as a `Shared`/`Buffer` layout.
+
+    The wrapper carries the concrete layout's footprint (padded layouts occupy more
+    than rows*cols elements) so kernel builders size shared buffers correctly.
+    """
     core = load_core()
-    return core.GroupBy([(layout.rows, layout.cols)], [core.OrderBy(to_lego(layout))])
+    tile = core.GroupBy([(layout.rows, layout.cols)], [core.OrderBy(to_lego(layout))])
+    tile.footprint = layout.footprint
+    tile.concrete = layout
+    return tile

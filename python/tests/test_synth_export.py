@@ -35,3 +35,9 @@ def test_exported_genp_inverse_round_trips():
         f = int(fwd.subs({I: int(i), J: int(j)}))
         ii, jj = (int(e.subs({F: f})) for e in inv)
         assert (ii, jj) == (int(i), int(j))
+
+
+def test_exported_tile_carries_the_padded_footprint():
+    from lego_synth.export import to_lego_tile
+    t = to_lego_tile(RowMajor(128, 32, pad=8))
+    assert t.footprint == 128 * 40
