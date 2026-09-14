@@ -5,7 +5,7 @@ synthesized swizzle is the only thing that changes between layout variants:
   global -> shared : cp.async, 16 B per lane, dense row-major chunk assignment
   shared -> tensor : ldmatrix.x4 (A, row-major) and ldmatrix.x2.trans (B, row-major K x N)
   compute          : mma.sync.m16n8k16 f16 -> f32, warps tiled warps_m x warps_n
-v1: K loop unrolled in Python, no multi-stage pipelining.
+v2: K loop as scf.for with loop-carried accumulators (unroll_k=True keeps the v1 form); no multi-stage pipelining yet.
 """
 from lego.core import Row
 from lego.backend.compiler import DType
@@ -26,7 +26,7 @@ def _rem(a, b): return arith_d.RemUIOp(a, b).result
 
 
 def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_layout,
-               warps_m: int = 2, warps_n: int = 2, name: str = "gemm_mma") -> KernelBuilder:
+               warps_m: int = 2, warps_n: int = 2, name: str = "gemm_mma", unroll_k: bool = False) -> KernelBuilder:
     assert M % BM == 0 and N % BN == 0 and K % BK == 0 and BK % 16 == 0
     WM, WN = BM // warps_m, BN // warps_n
     assert WM % 16 == 0 and WN % 8 == 0
@@ -60,23 +60,26 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
         chunks_A, chunks_B = BM * BK // 8, BK * BN // 8
         assert chunks_A % threads == 0 and chunks_B % threads == 0
 
-        for kt in range(K // BK):
+        def k_step(kt_idx, acc):
+            """One BK slice: cp.async the A/B tiles, wait, ldmatrix + mma over kk; returns new acc."""
+            k0 = _mul(kt_idx, _idx(BK))
             tokens = []
             for it in range(chunks_A // threads):
                 c = _add(tid, _idx(it * threads))
                 r, c8 = _div(c, _idx(BK // 8)), _mul(_rem(c, _idx(BK // 8)), _idx(8))
-                src = ctx.apply(A_layout, _add(row0, r), _add(c8, _idx(kt * BK)))
+                src = ctx.apply(A_layout, _add(row0, r), _add(c8, k0))
                 dst = ctx.apply(sA_layout, r, c8)
                 tokens.append(nvgpu_d.device_async_copy(sA, [dst], A, [src], 8, results=[token_ty]))
             for it in range(chunks_B // threads):
                 c = _add(tid, _idx(it * threads))
                 r, c8 = _div(c, _idx(BN // 8)), _mul(_rem(c, _idx(BN // 8)), _idx(8))
-                src = ctx.apply(B_layout, _add(r, _idx(kt * BK)), _add(col0, c8))
+                src = ctx.apply(B_layout, _add(r, k0), _add(col0, c8))
                 dst = ctx.apply(sB_layout, r, c8)
                 tokens.append(nvgpu_d.device_async_copy(sB, [dst], B, [src], 8, results=[token_ty]))
             grp = nvgpu_d.device_async_create_group(tokens, results=[token_ty])
             nvgpu_d.device_async_wait(grp, num_groups=0)
             ctx.barrier()
+            acc = [row[:] for row in acc]
             for kk in range(BK // 16):
                 a_frags = []
                 for mt in range(MT):
@@ -92,6 +95,21 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
                     for nt in range(NT):
                         acc[mt][nt] = nvgpu_d.mma_sync(vC, a_frags[mt], b_frags[nt], acc[mt][nt], [16, 8, 16])
             ctx.barrier()
+            return acc
+
+        if unroll_k:
+            for kt in range(K // BK):
+                acc = k_step(_idx(kt), acc)
+        else:
+            flat = [acc[mt][nt] for mt in range(MT) for nt in range(NT)]
+
+            def loop_body(iv, *carried):
+                cur = [[carried[mt * NT + nt] for nt in range(NT)] for mt in range(MT)]
+                new = k_step(iv, cur)
+                return [new[mt][nt] for mt in range(MT) for nt in range(NT)]
+
+            results = ctx.for_range(K // BK, loop_body, init_vals=flat)
+            acc = [[results[mt * NT + nt] for nt in range(NT)] for mt in range(MT)]
 
         for mt in range(MT):
             for nt in range(NT):
