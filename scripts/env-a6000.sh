@@ -9,5 +9,5 @@ export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-/scratch/general/vast/u14191
 # Puzzles expect $MLIR_BUILD_DIR/bin/mlir-runner and $MLIR_BUILD_DIR/lib/libmlir_*; see scripts/setup-mlir-runtime-dir.sh
 export MLIR_BUILD_DIR=/scratch/general/vast/u1419116/LEGO/build/mlir-runtime
 # Assembled package (native bindings + sources) must precede the editable install
-export PYTHONPATH=/scratch/general/vast/u1419116/LEGO/build/python_packages/lego:/scratch/general/vast/u1419116/LEGO/python/examples/puzzles:${PYTHONPATH:-}
+export PYTHONPATH=/scratch/general/vast/u1419116/LEGO/build/python_packages/lego:/scratch/general/vast/u1419116/LEGO/python/examples/puzzles:/scratch/general/vast/u1419116/LEGO/python:${PYTHONPATH:-}
 export LD_LIBRARY_PATH=$MLIR_BUILD_DIR/lib:$LD_LIBRARY_PATH
