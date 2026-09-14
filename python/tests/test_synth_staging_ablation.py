@@ -33,3 +33,11 @@ def test_dense_transpose_problem_uses_dense_patterns():
     assert masked.patterns[0].n_instr == 32            # one instruction per 24-wide row
     assert dense.patterns[0].n_instr == 32 * 24 // 32  # 32 lanes cover 32 consecutive elements
     assert dense.kind == "transpose_dense"
+
+
+def test_staging_direct_problem_pairs_dense_stores_with_direct_fragment_loads():
+    from lego_synth.problems import problem_for
+    from lego_synth.machine import ampere
+    prob = problem_for("staging_direct", 64, 80, 2, ampere())
+    assert [p.name for p in prob.patterns] == ["row_vector", "mma_a_direct"]
+    assert prob.unit == 8 and prob.kind == "staging_direct"
