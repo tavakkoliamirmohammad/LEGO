@@ -45,6 +45,9 @@ def main():
           for st in [int(x) for x in args.stages.split(",")]:
             cfg = f"{cfg0}s{st}"
             dims, w = cfg0.split("w"); BM, BN, BK = [int(x) for x in dims.split("x")]; wm, wn = [int(x) for x in w.split("x")]
+            smem_bytes = st * (BM * BK + BK * BN) * 2
+            if smem_bytes > 48 * 1024:
+                out(f"  {n} cfg={cfg}: skipped (static shared {smem_bytes // 1024} KB > 48 KB)"); continue
             try:
                 k = CastleKernel.from_builder(build_gemm(M, N, K, BM, BN, BK, to_lego_tile(synth_tile(BM, BK)), to_lego_tile(synth_tile(BK, BN)), warps_m=wm, warps_n=wn, stages=st))
                 k.launch(A, B, C); torch.cuda.synchronize()

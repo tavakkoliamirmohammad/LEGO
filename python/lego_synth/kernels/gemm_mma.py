@@ -5,7 +5,7 @@ synthesized swizzle is the only thing that changes between layout variants:
   global -> shared : cp.async, 16 B per lane, dense row-major chunk assignment
   shared -> tensor : ldmatrix.x4 (A, row-major) and ldmatrix.x2.trans (B, row-major K x N)
   compute          : mma.sync.m16n8k16 f16 -> f32, warps tiled warps_m x warps_n
-v3: scf.for K loop with loop-carried accumulators and an S-stage cp.async pipeline (wait_group S-2, refill the stage computed last iteration); B via ldmatrix.x4.trans.
+v4: scf.for K loop unrolled by the pipeline depth S (constant stage indices), S-stage cp.async pipeline (wait_group S-2, refill the stage computed last sub-iteration); B via ldmatrix.x4.trans.
 """
 from lego.core import Row
 from lego.backend.compiler import DType
@@ -120,22 +120,25 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
                 ctx.barrier()
         else:
             # Prologue: stages 0..S-2 in flight, one commit group each.
+            assert KT % S == 0, "K tiles must be a multiple of the pipeline depth (loop is unrolled by S)"
             groups = [commit(issue_loads(_idx(st), _idx(st))) for st in range(S - 1)]
             flat = [acc[mt][nt] for mt in range(MT) for nt in range(NT)]
 
             def loop_body(iv, *carried):
+                # Unrolled by S: sub-iteration s handles k-tile iv*S + s in stage s, so every
+                # stage index (and hence every shared-memory address) is a compile-time constant.
                 cur = [[carried[mt * NT + nt] for nt in range(NT)] for mt in range(MT)]
-                # Wait until slice iv has landed (S-2 younger groups may stay pending), then sync.
-                nvgpu_d.device_async_wait(groups[-1], num_groups=S - 2)
-                ctx.barrier()
-                # Refill the stage computed last iteration with slice iv+S-1 (clamped at the tail).
-                nxt = _add(iv, _idx(S - 1))
-                clamped = arith_d.MinUIOp(nxt, _idx(KT - 1)).result
-                commit(issue_loads(clamped, _rem(nxt, _idx(S))))
-                new = compute(_rem(iv, _idx(S)), cur)
-                return [new[mt][nt] for mt in range(MT) for nt in range(NT)]
+                kt_base = _mul(iv, _idx(S))
+                for st in range(S):
+                    nvgpu_d.device_async_wait(groups[-1], num_groups=S - 2)
+                    ctx.barrier()
+                    nxt = _add(kt_base, _idx(st + S - 1))
+                    clamped = arith_d.MinUIOp(nxt, _idx(KT - 1)).result
+                    commit(issue_loads(clamped, _idx((st + S - 1) % S)))
+                    cur = compute(_idx(st), cur)
+                return [cur[mt][nt] for mt in range(MT) for nt in range(NT)]
 
-            results = ctx.for_range(KT, loop_body, init_vals=flat)
+            results = ctx.for_range(KT // S, loop_body, init_vals=flat)
             acc = [[results[mt * NT + nt] for nt in range(NT)] for mt in range(MT)]
 
         for mt in range(MT):

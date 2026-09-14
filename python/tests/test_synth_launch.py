@@ -19,7 +19,7 @@ BM, BN, BK = 64, 64, 32
 @pytest.fixture(scope="module")
 def kernel():
     b = build_gemm(M, N, K, BM, BN, BK, to_lego_tile(XorSwizzle(64, 32, 0, 3, unit=8)),
-                   to_lego_tile(XorSwizzle(32, 64, 0, 7, unit=8)))
+                   to_lego_tile(XorSwizzle(32, 64, 0, 7, unit=8)), stages=4)
     return CastleKernel.from_builder(b, chip="sm_86", features="+ptx78")
 
 
