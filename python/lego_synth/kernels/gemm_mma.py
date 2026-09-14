@@ -27,7 +27,9 @@ def _rem(a, b): return arith_d.RemUIOp(a, b).result
 
 def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_layout,
                warps_m: int = 2, warps_n: int = 2, name: str = "gemm_mma", unroll_k: bool = False,
-               stages: int = 3, dynamic_shared: bool = None, prefetch_frags: bool = False) -> KernelBuilder:
+               stages: int = 3, dynamic_shared: bool = None, prefetch_frags: bool = False,
+               group_m: int = 0) -> KernelBuilder:
+    """group_m > 0 remaps block ids so consecutive blocks share A row-tiles (L2-friendly grouped ordering)."""
     """stages > 1 enables a multi-stage cp.async pipeline (unroll_k forces the single-stage form)."""
     assert M % BM == 0 and N % BN == 0 and K % BK == 0 and BK % 16 == 0
     WM, WN = BM // warps_m, BN // warps_n
@@ -53,6 +55,19 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
         token_ty = Type.parse("!nvgpu.device.async.token")
         tid = ctx.thread_id.x
         bx, by = ctx.block_id.x, ctx.block_id.y
+        if group_m:
+            # Linear program id over a (M/BM) x (N/BN) grid, walked in groups of group_m row-tiles
+            # (the ordering Triton's matmul tutorial uses): blocks that run together share A tiles.
+            n_tiles_m, n_tiles_n = M // BM, N // BN
+            pid = _add(_mul(by, _idx(n_tiles_n)), bx)
+            width = group_m * n_tiles_n
+            gid = _div(pid, _idx(width))
+            first_m = _mul(gid, _idx(group_m))
+            rem_m = arith_d.SubIOp(_idx(n_tiles_m), first_m).result
+            gsize = arith_d.MinUIOp(_idx(group_m), rem_m).result
+            local = _rem(pid, _idx(width))
+            by = _add(first_m, _rem(local, gsize))
+            bx = _div(local, gsize)
         c32 = _idx(32)
         warp, lane = _div(tid, c32), _rem(tid, c32)
         wm, wn = _div(warp, _idx(warps_n)), _rem(warp, _idx(warps_n))
