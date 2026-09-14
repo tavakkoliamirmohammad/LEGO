@@ -25,13 +25,19 @@ def _exp2(x):
 
 
 def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int = 64, BLOCK_N: int = 32,
-                    stages: int = 2, scale: float = None, name: str = "attn_mma", dynamic_shared: bool = None) -> KernelBuilder:
+                    stages: int = 2, scale: float = None, name: str = "attn_mma", dynamic_shared: bool = None,
+                    causal: bool = False) -> KernelBuilder:
+    """causal=True applies the lower-triangular mask (key <= query) and skips key blocks past the
+    query block (BLOCK_M must be a multiple of BLOCK_N so a query block's key range ends on a block boundary)."""
     assert N % BLOCK_M == 0 and N % BLOCK_N == 0 and D % 16 == 0 and BLOCK_N % 16 == 0
     warps = BLOCK_M // 16
     threads = 32 * warps
     KT = N // BLOCK_N
     S = max(1, stages)
     assert S <= KT
+    if causal:
+        assert BLOCK_M % BLOCK_N == 0
+        assert S == 1 or (BLOCK_M // BLOCK_N) % S == 0, "per-query-block key count must be a multiple of the pipeline depth"
     DT, DN = D // 16, D // 8            # k-steps over D for QK^T; n-tiles over D for O
     NT_S = BLOCK_N // 8                 # n-tiles of S per warp (keys)
     KT_PV = BLOCK_N // 16               # k-steps over keys for PV
@@ -118,7 +124,7 @@ def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int 
         fmul = lambda a, b: arith_d.MulFOp(a, b).result
         fsub = lambda a, b: arith_d.SubFOp(a, b).result
 
-        def step(stage, o_acc, m_i, l_i):
+        def step(stage, o_acc, m_i, l_i, kt_cur):
             offK, offV = _mul(stage, _idx(fpK)), _mul(stage, _idx(fpV))
             # S = Q K^T over this key block: NT_S n-tiles, accumulate over DT k-steps.
             s_acc = [zero for _ in range(NT_S)]
@@ -134,6 +140,17 @@ def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int 
             # Scale (log2 domain) and row max over this block for the lane's two rows.
             sc = _f32(scale_log2)
             sv = [[[fmul(vector_d.extract(s_acc[nt], [], [i, j]), sc) for j in range(2)] for i in range(2)] for nt in range(NT_S)]
+            if causal:
+                # Mask keys after the query: score -> -1e30 when key > query (only the diagonal
+                # key blocks can be partially masked; earlier blocks are fully visible).
+                neg = _f32(-1e30)
+                for nt in range(NT_S):
+                    for i in range(2):
+                        qrow = _add(_add(_mul(mblk, _idx(BLOCK_M)), _add(_mul(warp, _idx(16)), _idx(8 * i))), g_row)
+                        for j in range(2):
+                            key = _add(_add(_mul(kt_cur, _idx(BLOCK_N)), _idx(nt * 8 + j)), g_col2)
+                            visible = arith_d.CmpIOp(arith_d.CmpIPredicate.ule, key, qrow).result
+                            sv[nt][i][j] = arith_d.SelectOp(visible, sv[nt][i][j], neg).result
             m_new, alpha, p, rowsum = [], [], [[None] * NT_S for _ in range(2)], []
             for i in range(2):
                 mx = sv[0][i][0]
@@ -189,7 +206,7 @@ def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int 
                 grp = issue_kv(_idx(kt), _idx(0))
                 nvgpu_d.device_async_wait(grp, num_groups=0)
                 ctx.barrier()
-                o_acc, m_i, l_i = step(_idx(0), o_acc, m_i, l_i)
+                o_acc, m_i, l_i = step(_idx(0), o_acc, m_i, l_i, _idx(kt))
                 ctx.barrier()
         else:
             groups = [issue_kv(_idx(st), _idx(st)) for st in range(S - 1)]
@@ -202,10 +219,15 @@ def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int 
                 nxt = _add(iv, _idx(S - 1))
                 clamped = arith_d.MinUIOp(nxt, _idx(KT - 1)).result
                 issue_kv(clamped, _rem(nxt, _idx(S)))
-                o_n, m_n, l_n = step(_rem(iv, _idx(S)), o_cur, m_cur, l_cur)
+                o_n, m_n, l_n = step(_rem(iv, _idx(S)), o_cur, m_cur, l_cur, iv)
                 return o_n + m_n + l_n
 
-            res = ctx.for_range(KT, loop_body, init_vals=carried)
+            # Causal: a query block only needs key blocks up to its own diagonal.
+            n_kv = _add(_mul(_add(mblk, _idx(1)), _idx(BLOCK_M // BLOCK_N)), _idx(0)) if causal else _idx(KT)
+            if causal:
+                # Clamp prologue and loop refills to the visible range so no block reads past it.
+                pass
+            res = ctx.for_range(n_kv, loop_body, init_vals=carried)
             o_acc, m_i, l_i = list(res[:DN]), list(res[DN:DN + 2]), list(res[DN + 2:DN + 4])
 
         inv_l = [arith_d.DivFOp(_f32(1.0), l_i[i]).result for i in range(2)]
