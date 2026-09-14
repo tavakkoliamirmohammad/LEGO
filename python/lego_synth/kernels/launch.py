@@ -46,14 +46,18 @@ class CastleKernel:
         args = [a for t in tensors for a in self._descriptor(t)]
         self._fn(self.grid, self.block, tuple(args))
 
-    def time(self, *tensors: torch.Tensor, iters: int = 100, warmup: int = 10) -> float:
+    def time(self, *tensors: torch.Tensor, iters: int = 100, warmup: int = 10, batches: int = 3) -> float:
+        """Median over batches of `iters` back-to-back launches (amortizes launch overhead)."""
         for _ in range(warmup):
             self.launch(*tensors)
         torch.cuda.synchronize()
-        times = []
-        for _ in range(iters):
+        per = []
+        for _ in range(batches):
             s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-            s.record(); self.launch(*tensors); e.record(); torch.cuda.synchronize()
-            times.append(s.elapsed_time(e))
-        times.sort()
-        return times[len(times) // 2]
+            s.record()
+            for _ in range(iters):
+                self.launch(*tensors)
+            e.record(); torch.cuda.synchronize()
+            per.append(s.elapsed_time(e) / iters)
+        per.sort()
+        return per[len(per) // 2]
