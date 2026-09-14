@@ -20,9 +20,12 @@ def extract_ptx(mlir_text: str) -> str:
 
 
 class CastleKernel:
-    def __init__(self, ptx_path: str, entry: str, grid, block):
+    def __init__(self, ptx_path: str, entry: str, grid, block, shared_bytes: int = 0):
         self.ptx_path, self.entry, self.grid, self.block = ptx_path, entry, tuple(grid), tuple(block)
+        self.shared_bytes = int(shared_bytes)
         self._fn = cupy.RawModule(path=ptx_path).get_function(entry)
+        if self.shared_bytes > 48 * 1024:
+            self._fn.max_dynamic_shared_size_bytes = self.shared_bytes
 
     @classmethod
     def from_builder(cls, builder, chip: str = "sm_86", features: str = "+ptx78") -> "CastleKernel":
@@ -34,7 +37,7 @@ class CastleKernel:
         entry = re.search(r"\.visible \.entry (\w+)\(", ptx).group(1)
         grid = tuple(builder._grid) + (1,) * (3 - len(builder._grid))
         block = tuple(builder._block) + (1,) * (3 - len(builder._block))
-        return cls(ptx_path, entry, grid, block)
+        return cls(ptx_path, entry, grid, block, shared_bytes=getattr(builder, "dynamic_shared_bytes", 0))
 
     @staticmethod
     def _descriptor(t: torch.Tensor):
@@ -44,7 +47,7 @@ class CastleKernel:
 
     def launch(self, *tensors: torch.Tensor):
         args = [a for t in tensors for a in self._descriptor(t)]
-        self._fn(self.grid, self.block, tuple(args))
+        self._fn(self.grid, self.block, tuple(args), shared_mem=self.shared_bytes)
 
     def time(self, *tensors: torch.Tensor, iters: int = 100, warmup: int = 10, batches: int = 3) -> float:
         """Median over batches of `iters` back-to-back launches (amortizes launch overhead)."""

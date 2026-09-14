@@ -27,7 +27,7 @@ def _rem(a, b): return arith_d.RemUIOp(a, b).result
 
 def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_layout,
                warps_m: int = 2, warps_n: int = 2, name: str = "gemm_mma", unroll_k: bool = False,
-               stages: int = 3) -> KernelBuilder:
+               stages: int = 3, dynamic_shared: bool = None) -> KernelBuilder:
     """stages > 1 enables a multi-stage cp.async pipeline (unroll_k forces the single-stage form)."""
     assert M % BM == 0 and N % BN == 0 and K % BK == 0 and BK % 16 == 0
     WM, WN = BM // warps_m, BN // warps_n
@@ -150,8 +150,11 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
                         cc = _add(_add(col0, _add(_mul(wn, _idx(WN)), _idx(nt * 8 + j))), g_col2)
                         memref_d.StoreOp(v, C, [ctx.apply(C_layout, r, cc)])
 
+    smem_bytes = S * (fpA + fpB) * 2
+    if dynamic_shared is None:
+        dynamic_shared = smem_bytes > 48 * 1024
     return KernelBuilder(buffers=bufs, kernel_body=body, name=name,
-                         grid=(N // BN, M // BM, 1), block=(threads, 1, 1))
+                         grid=(N // BN, M // BM, 1), block=(threads, 1, 1), dynamic_shared=dynamic_shared)
 
 
 def sA_layout_numel(layout, rows, cols) -> int:

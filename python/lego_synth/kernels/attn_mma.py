@@ -25,7 +25,7 @@ def _exp2(x):
 
 
 def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int = 64, BLOCK_N: int = 32,
-                    stages: int = 2, scale: float = None, name: str = "attn_mma") -> KernelBuilder:
+                    stages: int = 2, scale: float = None, name: str = "attn_mma", dynamic_shared: bool = None) -> KernelBuilder:
     assert N % BLOCK_M == 0 and N % BLOCK_N == 0 and D % 16 == 0 and BLOCK_N % 16 == 0
     warps = BLOCK_M // 16
     threads = 32 * warps
@@ -217,5 +217,8 @@ def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int 
                     cc = _add(_idx(dn * 8 + j), g_col2)
                     memref_d.StoreOp(e, O, [ctx.apply(QKV_layout, r, cc)])
 
+    smem_bytes = (fpQ + S * (fpK + fpV)) * 2
+    if dynamic_shared is None:
+        dynamic_shared = smem_bytes > 48 * 1024
     return KernelBuilder(buffers=bufs, kernel_body=body, name=name,
-                         grid=(N // BLOCK_M, BH, 1), block=(threads, 1, 1))
+                         grid=(N // BLOCK_M, BH, 1), block=(threads, 1, 1), dynamic_shared=dynamic_shared)
