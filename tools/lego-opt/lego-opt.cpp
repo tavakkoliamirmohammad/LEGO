@@ -9,6 +9,8 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/NVGPU/IR/NVGPUDialect.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SMT/IR/SMTDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
@@ -29,6 +31,8 @@ int main(int argc, char **argv) {
   registry.insert<mlir::lego::LegoDialect, mlir::smt::SMTDialect>();
   registry.insert<mlir::cf::ControlFlowDialect, mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::gpu::GPUDialect, mlir::spirv::SPIRVDialect>();
+  // Tensor-core kernels: nvgpu (cp.async, ldmatrix, mma.sync) and vector fragments.
+  registry.insert<mlir::nvgpu::NVGPUDialect, mlir::vector::VectorDialect>();
 
   // Register ConvertToLLVMPatternInterface extensions so GPU→ROCDL/NVVM
   // passes can discover LLVM lowering patterns for memref/arith/cf/etc.

@@ -16,6 +16,8 @@ set(LIBS
   MLIRArithTransforms
   MLIRGPUDialect
   MLIRSPIRVDialect
+  MLIRNVGPUDialect
+  MLIRVectorDialect
 )
 
 add_llvm_executable(lego-opt lego-opt.cpp)
