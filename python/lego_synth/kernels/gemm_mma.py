@@ -120,9 +120,17 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
                 ctx.barrier()
         else:
             # Prologue: stages 0..S-2 in flight, one commit group each.
-            assert KT % S == 0, "K tiles must be a multiple of the pipeline depth (loop is unrolled by S)"
             groups = [commit(issue_loads(_idx(st), _idx(st))) for st in range(S - 1)]
             flat = [acc[mt][nt] for mt in range(MT) for nt in range(NT)]
+
+            def sub_iteration(kt_base, st, cur):
+                """K tile kt_base + st lives in stage st (a compile-time constant)."""
+                nvgpu_d.device_async_wait(groups[-1], num_groups=S - 2)
+                ctx.barrier()
+                nxt = _add(kt_base, _idx(st + S - 1))
+                clamped = arith_d.MinUIOp(nxt, _idx(KT - 1)).result
+                commit(issue_loads(clamped, _idx((st + S - 1) % S)))
+                return compute(_idx(st), cur)
 
             def loop_body(iv, *carried):
                 # Unrolled by S: sub-iteration s handles k-tile iv*S + s in stage s, so every
@@ -130,16 +138,16 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
                 cur = [[carried[mt * NT + nt] for nt in range(NT)] for mt in range(MT)]
                 kt_base = _mul(iv, _idx(S))
                 for st in range(S):
-                    nvgpu_d.device_async_wait(groups[-1], num_groups=S - 2)
-                    ctx.barrier()
-                    nxt = _add(kt_base, _idx(st + S - 1))
-                    clamped = arith_d.MinUIOp(nxt, _idx(KT - 1)).result
-                    commit(issue_loads(clamped, _idx((st + S - 1) % S)))
-                    cur = compute(_idx(st), cur)
+                    cur = sub_iteration(kt_base, st, cur)
                 return [cur[mt][nt] for mt in range(MT) for nt in range(NT)]
 
-            results = ctx.for_range(KT // S, loop_body, init_vals=flat)
-            acc = [[results[mt * NT + nt] for nt in range(NT)] for mt in range(MT)]
+            main_iters, rem = divmod(KT, S)
+            if main_iters:
+                results = ctx.for_range(main_iters, loop_body, init_vals=flat)
+                acc = [[results[mt * NT + nt] for nt in range(NT)] for mt in range(MT)]
+            # Peeled remainder: the main loop ends on a stage boundary, so the tail restarts at stage 0.
+            for st in range(rem):
+                acc = sub_iteration(_idx(main_iters * S), st, acc)
 
         for mt in range(MT):
             for nt in range(NT):

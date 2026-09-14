@@ -23,9 +23,11 @@ def kv_layout(block_n, d):
 
 
 def sdpa_time(q, k, v, backend):
+    """PyTorch's fused backends need 4-D (B, H, N, D) inputs."""
+    q4, k4, v4 = (t.unsqueeze(0) for t in (q, k, v))
     try:
         with sdpa_kernel(backend):
-            return time_fn(lambda: F.scaled_dot_product_attention(q, k, v), iters=20, warmup=5)
+            return time_fn(lambda: F.scaled_dot_product_attention(q4, k4, v4), iters=20, warmup=5)
     except Exception:
         return None
 
@@ -35,7 +37,7 @@ def main():
     ap.add_argument("--bh", type=int, default=32)
     ap.add_argument("--seq", default="1024,2048,4096")
     ap.add_argument("--dims", default="64,80,96,112,128")
-    ap.add_argument("--configs", default="64x32s2,64x64s2,128x32s2")
+    ap.add_argument("--configs", default="64x32s2,64x64s2,128x32s2,128x64s2,64x64s3")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     lines = []
