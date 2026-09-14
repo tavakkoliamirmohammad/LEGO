@@ -3,22 +3,23 @@ from typing import List, Sequence
 
 from .eval_np import conflicts
 from .machine import ampere
-from .patterns import row_vector, col_vector
-from .search import Problem, synthesize, TIERS
+from .problems import problem_for
+from .search import synthesize, TIERS
 
 
 def ablation_rows(widths: Sequence[int], rows: int, elem_bytes: int, machine=ampere(),
-                  tiers: Sequence[str] = TIERS) -> List[dict]:
+                  tiers: Sequence[str] = TIERS, kind: str = "transpose") -> List[dict]:
     out = []
     for w in widths:
-        pats = [row_vector(rows, w, machine.warp), col_vector(rows, w, machine.warp)]
-        prob = Problem(rows=rows, cols=w, elem_bytes=elem_bytes, patterns=pats, machine=machine)
+        prob = problem_for(kind, rows, w, elem_bytes, machine)
+        pats = prob.patterns
         for tier in tiers:
             sol = synthesize(prob, tier)
             row = {"width": w, "tier": tier, "template": None, "footprint": None,
                    "overhead": None, "conflicts": None, "solve_time": None}
             if sol is not None:
-                verified = sum(conflicts(sol.layout, p, elem_bytes, machine) for p in pats)
+                # Verify against the patterns the tier actually solved (f2 pads the tile).
+                verified = sum(conflicts(sol.layout, p, elem_bytes, machine) for p in sol.problem.patterns)
                 row.update(template=sol.template, footprint=sol.footprint,
                            overhead=sol.footprint / (rows * w), conflicts=verified,
                            solve_time=sol.solve_time, layout=sol.layout)

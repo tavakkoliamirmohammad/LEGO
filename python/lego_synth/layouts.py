@@ -42,14 +42,22 @@ class XorSwizzle:
 
 @dataclass(frozen=True)
 class Rotation:
-    """Row-major with the column rotated by r * row (a linear skewing scheme)."""
+    """Row-major with the column rotated by r * row (a linear skewing scheme).
+
+    With `unit` > 1 the rotation acts on chunks of `unit` elements (cols must be
+    a multiple of unit), so `unit`-element vectors stay contiguous.
+    """
     rows: int
     cols: int
     r: int = 1
+    unit: int = 1
 
     def flat(self, i, j):
         i = np.asarray(i); j = np.asarray(j)
-        return i * self.cols + ((j + self.r * i) % self.cols)
+        if self.unit == 1:
+            return i * self.cols + ((j + self.r * i) % self.cols)
+        nchunks = self.cols // self.unit
+        return i * self.cols + ((j // self.unit + self.r * i) % nchunks) * self.unit + (j % self.unit)
 
     @property
     def footprint(self) -> int:

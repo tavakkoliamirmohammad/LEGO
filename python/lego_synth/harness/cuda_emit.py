@@ -8,5 +8,9 @@ def index_expr(layout) -> str:
     if isinstance(layout, XorSwizzle):
         return f"((i)*{layout.cols} + ((j) ^ ((((i) >> {layout.shift}) & {layout.mask}) * {layout.unit})))"
     if isinstance(layout, Rotation):
-        return f"((i)*{layout.cols} + (((j) + {layout.r}*(i)) % {layout.cols}))"
+        if layout.unit == 1:
+            return f"((i)*{layout.cols} + (((j) + {layout.r}*(i)) % {layout.cols}))"
+        n = layout.cols // layout.unit
+        return (f"((i)*{layout.cols} + ((((j)/{layout.unit} + {layout.r}*(i)) % {n})*{layout.unit}"
+                f" + (j)%{layout.unit}))")
     raise TypeError(f"no CUDA emitter for {type(layout).__name__}")

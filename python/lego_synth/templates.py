@@ -70,18 +70,22 @@ class PaddedTemplate:
 
 @dataclass(frozen=True)
 class RotationTemplate:
-    """i*cols + (j + r*i) mod cols, hole: r (linear skewing scheme)."""
+    """i*cols + rotate(chunk(j), r*i) * unit + j % unit, hole: r (linear skewing scheme)."""
     rows: int
     cols: int
+    unit: int = 1
 
     def holes(self):
-        return {"r": (0, self.cols - 1)}
+        return {"r": (0, self.cols // self.unit - 1)}
 
     def flat_z3(self, i, j, h):
-        return _bv(i * self.cols) + z3.URem(_bv(j) + h["r"] * _bv(i), _bv(self.cols))
+        nchunks = self.cols // self.unit
+        chunk, low = divmod(j, self.unit)
+        rotated = z3.URem(_bv(chunk) + h["r"] * _bv(i), _bv(nchunks))
+        return _bv(i * self.cols) + rotated * _bv(self.unit) + _bv(low)
 
     def side_constraints(self, h):
         return []
 
     def instantiate(self, v) -> Rotation:
-        return Rotation(self.rows, self.cols, r=v["r"])
+        return Rotation(self.rows, self.cols, r=v["r"], unit=self.unit)
