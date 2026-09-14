@@ -5,10 +5,12 @@ from .search import Problem
 
 
 def problem_for(kind: str, rows: int, w: int, elem_bytes: int, machine: MachineModel) -> Problem:
-    """transpose: warp-per-row store, warp-per-column load, one element per lane.
+    """transpose: warp-per-row store, warp-per-column load, one element per lane (idle lanes).
+    transpose_dense: the same with an x-major thread block, so a warp may straddle rows/columns.
     staging: cp.async-style dense 16 B stores and ldmatrix.x4 loads on a 2-byte tile."""
-    if kind == "transpose":
-        pats = [row_vector(rows, w, machine.warp), col_vector(rows, w, machine.warp)]
+    if kind in ("transpose", "transpose_dense"):
+        dense = kind == "transpose_dense"
+        pats = [row_vector(rows, w, machine.warp, dense=dense), col_vector(rows, w, machine.warp, dense=dense)]
         return Problem(rows=rows, cols=w, elem_bytes=elem_bytes, patterns=pats, machine=machine, kind=kind)
     if kind == "staging":
         unit = 16 // elem_bytes

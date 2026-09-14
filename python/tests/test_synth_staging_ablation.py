@@ -23,3 +23,13 @@ def test_staging_ablation_on_80_wide_b16_tile():
     assert by["full"]["footprint"] == 64 * 80          # exact: in-bounds chunk swizzle
     for r in rows:
         assert r["conflicts"] in (0, None)
+
+
+def test_dense_transpose_problem_uses_dense_patterns():
+    from lego_synth.problems import problem_for
+    from lego_synth.machine import ampere
+    masked = problem_for("transpose", 32, 24, 4, ampere())
+    dense = problem_for("transpose_dense", 32, 24, 4, ampere())
+    assert masked.patterns[0].n_instr == 32            # one instruction per 24-wide row
+    assert dense.patterns[0].n_instr == 32 * 24 // 32  # 32 lanes cover 32 consecutive elements
+    assert dense.kind == "transpose_dense"

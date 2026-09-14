@@ -12,7 +12,7 @@ from lego_synth.ablation import ablation_rows, to_markdown
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kind", default="transpose", choices=["transpose", "staging"])
+    ap.add_argument("--kind", default="transpose", choices=["transpose", "transpose_dense", "staging"])
     ap.add_argument("--elem", type=int, default=4)
     ap.add_argument("--rows", type=int, default=32)
     ap.add_argument("--widths", default="24,32,40,48,64,80,96,112,128")
