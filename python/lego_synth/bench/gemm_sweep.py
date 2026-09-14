@@ -24,6 +24,7 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--configs", default="64x64x32w2x2,128x128x32w2x2,128x64x32w2x2,128x128x32w4x2,128x128x64w4x2,128x256x32w2x4,256x128x32w4x2")
     ap.add_argument("--stages", default="2,3,4")
+    ap.add_argument("--group_m", default="0,8")
     args = ap.parse_args()
     problems = [(n, n, n) for n in [int(x) for x in args.sizes.split(",") if x]]
     problems += [tuple(int(v) for v in sh.split("x")) for sh in args.shapes.split(";") if sh]
