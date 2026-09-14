@@ -27,7 +27,7 @@ def _rem(a, b): return arith_d.RemUIOp(a, b).result
 
 def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_layout,
                warps_m: int = 2, warps_n: int = 2, name: str = "gemm_mma", unroll_k: bool = False,
-               stages: int = 3, dynamic_shared: bool = None) -> KernelBuilder:
+               stages: int = 3, dynamic_shared: bool = None, prefetch_frags: bool = False) -> KernelBuilder:
     """stages > 1 enables a multi-stage cp.async pipeline (unroll_k forces the single-stage form)."""
     assert M % BM == 0 and N % BN == 0 and K % BK == 0 and BK % 16 == 0
     WM, WN = BM // warps_m, BN // warps_n
@@ -85,23 +85,33 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
                 tokens.append(nvgpu_d.device_async_copy(sB, [dst], B, [src], 8, results=[token_ty]))
             return tokens
 
-        def compute(stage, acc):
-            """ldmatrix + mma over the BK slice held in shared stage `stage`; returns new acc."""
+        def load_frags(stage, kk):
             offA, offB = _mul(stage, _idx(fpA)), _mul(stage, _idx(fpB))
+            a_frags = []
+            for mt in range(MT):
+                r = _add(_add(_mul(wm, _idx(WM)), _idx(mt * 16)), lane16)
+                cidx = _add(_idx(kk * 16), lane_hi)
+                a_frags.append(nvgpu_d.ldmatrix(vA, sA, [_add(offA, ctx.apply(sA_layout, r, cidx))], False, 4))
+            b_frags = []
+            for nt2 in range(NT // 2):   # x4.trans: two 8-wide n-tiles per instruction
+                r = _add(_idx(kk * 16), lane16)
+                cidx = _add(_add(_mul(wn, _idx(WN)), _idx(nt2 * 16)), lane_hi)
+                b4 = nvgpu_d.ldmatrix(vA, sB, [_add(offB, ctx.apply(sB_layout, r, cidx))], True, 4)
+                b_frags.append(vector_d.extract_strided_slice(vB, b4, [0, 0], [2, 2], [1, 1]))
+                b_frags.append(vector_d.extract_strided_slice(vB, b4, [2, 0], [2, 2], [1, 1]))
+            return a_frags, b_frags
+
+        def compute(stage, acc):
+            """ldmatrix + mma over the BK slice held in shared stage `stage`; returns new acc.
+
+            With `prefetch_frags`, all fragments of the slice are loaded before any mma is
+            issued (register double-buffering across kk), giving ptxas room to overlap
+            ldmatrix latency with tensor-core issue.
+            """
             acc = [row[:] for row in acc]
+            frag_sets = [load_frags(stage, kk) for kk in range(BK // 16)] if prefetch_frags else None
             for kk in range(BK // 16):
-                a_frags = []
-                for mt in range(MT):
-                    r = _add(_add(_mul(wm, _idx(WM)), _idx(mt * 16)), lane16)
-                    cidx = _add(_idx(kk * 16), lane_hi)
-                    a_frags.append(nvgpu_d.ldmatrix(vA, sA, [_add(offA, ctx.apply(sA_layout, r, cidx))], False, 4))
-                b_frags = []
-                for nt2 in range(NT // 2):   # x4.trans: two 8-wide n-tiles per instruction
-                    r = _add(_idx(kk * 16), lane16)
-                    cidx = _add(_add(_mul(wn, _idx(WN)), _idx(nt2 * 16)), lane_hi)
-                    b4 = nvgpu_d.ldmatrix(vA, sB, [_add(offB, ctx.apply(sB_layout, r, cidx))], True, 4)
-                    b_frags.append(vector_d.extract_strided_slice(vB, b4, [0, 0], [2, 2], [1, 1]))
-                    b_frags.append(vector_d.extract_strided_slice(vB, b4, [2, 0], [2, 2], [1, 1]))
+                a_frags, b_frags = frag_sets[kk] if prefetch_frags else load_frags(stage, kk)
                 for mt in range(MT):
                     for nt in range(NT):
                         acc[mt][nt] = nvgpu_d.mma_sync(vC, a_frags[mt], b_frags[nt], acc[mt][nt], [16, 8, 16])
