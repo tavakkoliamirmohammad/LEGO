@@ -43,13 +43,14 @@ def main():
         best = None
         for cfg0 in args.configs.split(","):
           for st in [int(x) for x in args.stages.split(",")]:
-            cfg = f"{cfg0}s{st}"
+           for gm in [int(x) for x in args.group_m.split(",")]:
+            cfg = f"{cfg0}s{st}g{gm}"
             dims, w = cfg0.split("w"); BM, BN, BK = [int(x) for x in dims.split("x")]; wm, wn = [int(x) for x in w.split("x")]
             smem_bytes = st * (BM * BK + BK * BN) * 2
             if smem_bytes > 100 * 1024:   # A6000 (sm_86) opt-in limit per block; >48 KB uses dynamic shared memory
                 out(f"  {n} cfg={cfg}: skipped (shared {smem_bytes // 1024} KB > 100 KB)"); continue
             try:
-                k = CastleKernel.from_builder(build_gemm(M, N, K, BM, BN, BK, to_lego_tile(synth_tile(BM, BK)), to_lego_tile(synth_tile(BK, BN)), warps_m=wm, warps_n=wn, stages=st))
+                k = CastleKernel.from_builder(build_gemm(M, N, K, BM, BN, BK, to_lego_tile(synth_tile(BM, BK)), to_lego_tile(synth_tile(BK, BN)), warps_m=wm, warps_n=wn, stages=st, group_m=gm))
                 k.launch(A, B, C); torch.cuda.synchronize()
                 ok = torch.allclose(C, A.float() @ B.float(), atol=1e-1, rtol=1e-2)
                 ms = k.time(A, B, C, iters=30, warmup=5)
