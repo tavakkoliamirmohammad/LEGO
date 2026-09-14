@@ -22,7 +22,7 @@ def main():
     ap.add_argument("--sizes", default="1024,2048,4096", help="square sizes, or '' to skip")
     ap.add_argument("--shapes", default="", help="semicolon-separated MxNxK LLM shapes, e.g. 4096x6144x4096;4096x14336x4096")
     ap.add_argument("--out", default=None)
-    ap.add_argument("--configs", default="64x64x32w2x2,128x128x32w2x2,128x64x32w2x2,128x128x32w4x2,128x256x32w2x4,256x128x32w4x2")
+    ap.add_argument("--configs", default="64x64x32w2x2,128x128x32w2x2,128x64x32w2x2,128x128x32w4x2,128x128x64w4x2,128x256x32w2x4,256x128x32w4x2")
     ap.add_argument("--stages", default="2,3,4")
     args = ap.parse_args()
     problems = [(n, n, n) for n in [int(x) for x in args.sizes.split(",") if x]]
@@ -46,8 +46,8 @@ def main():
             cfg = f"{cfg0}s{st}"
             dims, w = cfg0.split("w"); BM, BN, BK = [int(x) for x in dims.split("x")]; wm, wn = [int(x) for x in w.split("x")]
             smem_bytes = st * (BM * BK + BK * BN) * 2
-            if smem_bytes > 48 * 1024:
-                out(f"  {n} cfg={cfg}: skipped (static shared {smem_bytes // 1024} KB > 48 KB)"); continue
+            if smem_bytes > 100 * 1024:   # A6000 (sm_86) opt-in limit per block; >48 KB uses dynamic shared memory
+                out(f"  {n} cfg={cfg}: skipped (shared {smem_bytes // 1024} KB > 100 KB)"); continue
             try:
                 k = CastleKernel.from_builder(build_gemm(M, N, K, BM, BN, BK, to_lego_tile(synth_tile(BM, BK)), to_lego_tile(synth_tile(BK, BN)), warps_m=wm, warps_n=wn, stages=st))
                 k.launch(A, B, C); torch.cuda.synchronize()
