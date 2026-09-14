@@ -12,7 +12,7 @@ import torch
 
 
 def extract_ptx(mlir_text: str) -> str:
-    """PTX from the `assembly = "..."` string of a gpu.binary object (MLIR escapes as \XX hex)."""
+    r"""PTX from the `assembly = "..."` string of a gpu.binary object (MLIR escapes as \XX hex)."""
     m = re.search(r'assembly = "((?:[^"\\]|\\.)*)"', mlir_text)
     if not m:
         raise ValueError("no assembly attribute in compiled module")
