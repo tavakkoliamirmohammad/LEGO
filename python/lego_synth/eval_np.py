@@ -45,3 +45,16 @@ def conflicts(layout, pattern, elem_bytes: int, machine: MachineModel):
             return math.inf
         total += bank_conflicts(addrs, width, machine)
     return total
+
+
+def sectors_per_request(byte_addrs, access_bytes: int, machine: MachineModel) -> int:
+    """Distinct `sector_bytes` sectors touched by one warp request (global memory).
+
+    Each lane touches `access_bytes` contiguous bytes; the ideal count for a
+    perfectly coalesced, aligned request is warp*access_bytes / sector_bytes.
+    """
+    addrs = np.asarray(byte_addrs, dtype=np.int64)
+    first = addrs // machine.sector_bytes
+    last = (addrs + access_bytes - 1) // machine.sector_bytes
+    touched = np.concatenate([np.arange(a, b + 1) for a, b in zip(first, last)])
+    return int(np.unique(touched).size)
