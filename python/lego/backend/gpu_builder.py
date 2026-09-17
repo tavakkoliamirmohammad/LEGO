@@ -718,6 +718,7 @@ class KernelBuilder:
         name: str = "kernel",
         workgroup_size: int = 64,
         grid: Optional[Tuple[int, ...]] = None,
+        dynamic_shared: bool = False,
         block: Optional[Tuple[int, ...]] = None,
     ):
         self._buffers = list(buffers)
@@ -727,6 +728,9 @@ class KernelBuilder:
         # Separate global vs shared buffers
         self._global_bufs = [b for b in self._buffers if not b.shared]
         self._shared_bufs = [b for b in self._buffers if b.shared]
+        # Shared tiles as one dynamic shared-memory allocation (needed above the 48 KB
+        # static limit); each tile starts at a 16-byte aligned byte offset.
+        self._dynamic_shared = dynamic_shared
 
         # Grid/block can be explicit or derived from workgroup_size
         if grid is not None and block is not None:
@@ -740,6 +744,23 @@ class KernelBuilder:
                 total = self._shared_bufs[0].numel
             self._grid = ((total + workgroup_size - 1) // workgroup_size, 1, 1)
             self._block = (workgroup_size, 1, 1)
+
+    @staticmethod
+    def _elem_bytes(dtype) -> int:
+        return {"f16": 2, "bf16": 2, "f32": 4, "f64": 8, "i8": 1, "i16": 2, "i32": 4, "i64": 8}[getattr(dtype, "value", str(dtype))]
+
+    @property
+    def shared_byte_offsets(self):
+        """Byte offset of each shared buffer inside the dynamic allocation (16 B aligned)."""
+        offs, off = [], 0
+        for b in self._shared_bufs:
+            offs.append(off)
+            off += -(-(b.numel * self._elem_bytes(b.dtype)) // 16) * 16
+        return offs, off
+
+    @property
+    def dynamic_shared_bytes(self) -> int:
+        return self.shared_byte_offsets[1] if self._dynamic_shared else 0
 
     def build_module(self):
         """Build target-agnostic MLIR module with gpu.launch + LEGO ops."""
@@ -774,16 +795,22 @@ class KernelBuilder:
             grid_vals = [_index_const(g) for g in self._grid]
             block_vals = [_index_const(b) for b in self._block]
 
+            dyn_size = None
+            if self._dynamic_shared and self._shared_bufs:
+                dyn_size = arith_dialect.ConstantOp(
+                    IntegerType.get_signless(32),
+                    IntegerAttr.get(IntegerType.get_signless(32), self.dynamic_shared_bytes)).result
             launch = gpu_dialect.LaunchOp(
                 grid_size=tuple(grid_vals),
                 block_size=tuple(block_vals),
+                dynamic_shared_memory_size=dyn_size,
             )
 
             body = launch.body.blocks[0]
 
-            # Add workgroup memory attributions for shared buffers
+            # Add workgroup memory attributions for shared buffers (static form)
             # Must be done BEFORE entering the InsertionPoint for body
-            if self._shared_bufs:
+            if self._shared_bufs and not self._dynamic_shared:
                 launch.attributes["workgroup_attributions"] = IntegerAttr.get(
                     IndexType.get(), len(self._shared_bufs)
                 )
@@ -802,8 +829,24 @@ class KernelBuilder:
                 global_idx = 0
                 shared_arg_idx = 12  # after 12 standard gpu.launch args
 
+                dyn_views = {}
+                if self._dynamic_shared and self._shared_bufs:
+                    # One dynamic allocation; each shared tile is a typed view at its byte offset.
+                    from lego.mlir.ir import Attribute, ShapedType
+                    ws = Attribute.parse("#gpu.address_space<workgroup>")
+                    i8 = IntegerType.get_signless(8)
+                    dyn = gpu_dialect.dynamic_shared_memory(
+                        MemRefType.get([ShapedType.get_dynamic_size()], i8, memory_space=ws))
+                    offs, _ = self.shared_byte_offsets
+                    for sbuf, off in zip(self._shared_bufs, offs):
+                        elem_ty = _get_mlir_element_type(mlir_ctx, sbuf.dtype)
+                        view_ty = MemRefType.get([sbuf.numel], elem_ty, memory_space=ws)
+                        dyn_views[id(sbuf)] = memref_dialect.view(view_ty, dyn, _index_const(off), [])
+
                 for buf in self._buffers:
-                    if buf.shared:
+                    if buf.shared and self._dynamic_shared:
+                        buf_vals.append(dyn_views[id(buf)])
+                    elif buf.shared:
                         buf_vals.append(body.arguments[shared_arg_idx])
                         shared_arg_idx += 1
                     else:

@@ -426,6 +426,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
   # cross-compilation, does not require GPU hardware)
   list(APPEND _lego_python_sources
     MLIRPythonSources.Dialects.gpu
+    MLIRPythonSources.Dialects.nvgpu
+    MLIRPythonSources.Dialects.vector
   )
 
   # Create a unified CAPI shared library.  Embeds all EMBED_CAPI_LINK_LIBS
@@ -440,6 +442,8 @@ if(MLIR_ENABLE_BINDINGS_PYTHON)
       ${_lego_python_sources}
     EMBED_LIBS
       MLIRCAPITransforms
+      MLIRCAPINVGPU
+      MLIRCAPIVector
   )
 
   # Assemble final Python package.

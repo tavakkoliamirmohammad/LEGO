@@ -23,3 +23,9 @@ class LEGOStaticLangMixin:
 
     def _print_Mod(self, expr):
         return f"(({self._print(expr.args[0])}) % ({self._print(expr.args[1])}))"
+
+    def _print_BitXor(self, expr):
+        return f"(({self._print(expr.args[0])}) ^ ({self._print(expr.args[1])}))"
+
+    def _print_BitAnd(self, expr):
+        return f"(({self._print(expr.args[0])}) & ({self._print(expr.args[1])}))"

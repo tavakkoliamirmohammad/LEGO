@@ -51,6 +51,13 @@ if(LEGO_HAS_NVPTX)
     MLIRNVVMToLLVM
     MLIRNVVMToLLVMIRTranslation
     MLIRGPUToLLVMIRTranslation
+    MLIRNVGPUDialect
+    MLIRNVGPUToNVVM
+    MLIRNVGPUUtils
+    MLIRVectorDialect
+    MLIRVectorToSCF
+    MLIRVectorToLLVMPass
+    MLIRVectorTransforms
   )
 endif()
 

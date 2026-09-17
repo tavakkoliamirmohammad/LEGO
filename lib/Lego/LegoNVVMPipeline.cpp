@@ -10,6 +10,10 @@
 #include "Lego/Passes.h"
 
 #include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
+#include "mlir/Conversion/NVGPUToNVVM/NVGPUToNVVM.h"
+#include "mlir/Conversion/NVVMToLLVM/NVVMToLLVM.h"
+#include "mlir/Conversion/VectorToSCF/VectorToSCF.h"
+#include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
 #include "mlir/Target/LLVM/NVVM/Target.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
@@ -79,7 +83,13 @@ void buildLegoToNVVMPipeline(OpPassManager &pm,
   // Phase 2: NVVM-specific — set target + convert GPU dialect.
   pm.addPass(std::make_unique<SetNVVMTargetPass>(
       options.chip, options.features, options.optLevel));
+  // Tensor-core path (mirrors upstream gpu-lower-to-nvvm-pipeline order):
+  // nvgpu (cp.async / ldmatrix / mma.sync) -> nvvm, vector -> scf, nvvm -> llvm.
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertNVGPUToNVVMPass());
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertVectorToSCFPass());
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertNVVMToLLVMPass());
   pm.addNestedPass<gpu::GPUModuleOp>(createConvertGpuOpsToNVVMOps());
+  pm.addNestedPass<gpu::GPUModuleOp>(createConvertVectorToLLVMPass());
   pm.addNestedPass<gpu::GPUModuleOp>(createConvertMathToLLVMPass());
 
   // Phase 3: shared host LLVM lowering + binary compilation.

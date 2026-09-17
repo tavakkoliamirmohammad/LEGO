@@ -130,6 +130,14 @@ def _lower_sympy_to_index(expr, sym_to_val):
             acc = arith.muli(acc, v)
         return acc
 
+    from lego.core import BitXor, BitAnd
+    if isinstance(expr, BitXor):
+        return arith.xori(_lower_sympy_to_index(expr.args[0], sym_to_val),
+                          _lower_sympy_to_index(expr.args[1], sym_to_val))
+    if isinstance(expr, BitAnd):
+        return arith.andi(_lower_sympy_to_index(expr.args[0], sym_to_val),
+                          _lower_sympy_to_index(expr.args[1], sym_to_val))
+
     if isinstance(expr, sp.floor):
         inner = expr.args[0]
         num, den = inner.as_numer_denom()
@@ -275,6 +283,16 @@ def emit_layout_from_python(layout, sym_to_val):
     raise TypeError(f"Unsupported layout type: {type(layout).__name__}")
 
 
+def _bitxor(a, b):
+    from lego.core import BitXor
+    return BitXor(a, b)
+
+
+def _bitand(a, b):
+    from lego.core import BitAnd
+    return BitAnd(a, b)
+
+
 def arith_to_sympy(value, val_to_sym, memo=None):
     """Convert an MLIR Value (arith ops after lowering) back to SymPy."""
     if memo is None:
@@ -311,7 +329,8 @@ def arith_to_sympy(value, val_to_sym, memo=None):
         "arith.shli": lambda a, b: a * sp.Pow(2, b),
         "arith.shrui": lambda a, b: sp.floor(a / sp.Pow(2, b)),
         "arith.shrsi": lambda a, b: sp.floor(a / sp.Pow(2, b)),
-        "arith.andi": lambda a, b: sp.Mod(a, b + 1) if (isinstance(b, sp.Integer) and ((int(b) + 1) & int(b)) == 0) else sp.Function('bitand')(a, b),
+        "arith.andi": lambda a, b: sp.Mod(a, b + 1) if (isinstance(b, sp.Integer) and ((int(b) + 1) & int(b)) == 0) else _bitand(a, b),
+        "arith.xori": lambda a, b: _bitxor(a, b),
         "arith.ori": lambda a, b: sp.Function('bitor')(a, b),
     }
     if op_name in _BINARY_OPS:

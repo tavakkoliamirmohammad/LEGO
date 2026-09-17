@@ -17,6 +17,12 @@ class LEGOPythonCodePrinter(PythonCodePrinter):
         num, den = arg.as_numer_denom()
         return f"(({self._print(num)})//({self._print(den)}))"
 
+    def _print_BitXor(self, expr):
+        return f"(({self._print(expr.args[0])}) ^ ({self._print(expr.args[1])}))"
+
+    def _print_BitAnd(self, expr):
+        return f"(({self._print(expr.args[0])}) & ({self._print(expr.args[1])}))"
+
     def _print_BroadcastRange(self, expr):
         base_expr_str = self._print(expr.args[0])
         try:
