@@ -1,4 +1,5 @@
-"""GEMM: CASTLE (synthesized shared layouts) vs cuBLAS vs Triton on square f16 problems."""
+"""GEMM: CASTLE (synthesized shared layouts) vs cuBLAS vs Triton (fixed and autotuned) on square and LLM
+projection shapes, f16 in, f32 accumulate, f16 out (cuBLAS's output type for f16 inputs)."""
 import argparse
 import os
 import torch
@@ -25,13 +26,14 @@ def main():
     ap.add_argument("--shapes", default="", help="semicolon-separated MxNxK LLM shapes, e.g. 4096x6144x4096;4096x14336x4096")
     ap.add_argument("--out", default=None, help="result file; default results/<device-tag>/gemm.md")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--configs", default="64x64x32w2x2,128x128x32w2x2,128x64x32w2x2,128x128x32w4x2,128x128x64w4x2,128x256x32w2x4,256x128x32w4x2")
-    ap.add_argument("--stages", default="2,3,4")
+    ap.add_argument("--configs", default="128x128x32w2x2,128x128x32w4x2,128x256x32w2x4,256x128x32w4x2,128x64x32w2x2,64x128x32w2x2")
+    ap.add_argument("--stages", default="2,3")
     ap.add_argument("--group_m", default="0,8")
+    ap.add_argument("--out_dtype", default="f16", choices=["f16", "f32"])
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     target = detect_target()
-    lines = [metadata_header(target), f"seed={args.seed} configs={args.configs} stages={args.stages} group_m={args.group_m}", ""]
+    lines = [metadata_header(target), f"seed={args.seed} configs={args.configs} stages={args.stages} group_m={args.group_m} out_dtype={args.out_dtype}", ""]
     problems = [(n, n, n) for n in [int(x) for x in args.sizes.split(",") if x]]
     problems += [tuple(int(v) for v in sh.split("x")) for sh in args.shapes.split(";") if sh]
     def out(msg):
@@ -40,11 +42,13 @@ def main():
     for (M, N, K) in problems:
         n = f"{M}x{N}x{K}"
         A = torch.randn(M, K, device="cuda", dtype=torch.float16); B = torch.randn(K, N, device="cuda", dtype=torch.float16)
-        C = torch.empty(M, N, device="cuda", dtype=torch.float32)
+        C = torch.empty(M, N, device="cuda", dtype=torch.float16 if args.out_dtype == "f16" else torch.float32)
+        C32 = torch.empty(M, N, device="cuda", dtype=torch.float32)     # the Triton tutorial kernel stores f32
         flops = 2.0 * M * N * K
         ref = time_fn(lambda: torch.matmul(A, B))
-        tri = time_fn(lambda: triton_matmul(A, B, C))
-        tri_tuned = time_fn(lambda: triton_matmul_tuned(A, B, C))
+        tri = time_fn(lambda: triton_matmul(A, B, C32))
+        tri_tuned = time_fn(lambda: triton_matmul_tuned(A, B, C32))
+        expected = A.float() @ B.float()
         best = None
         for cfg0 in args.configs.split(","):
           for st in [int(x) for x in args.stages.split(",")]:
@@ -55,13 +59,13 @@ def main():
             if smem_bytes > target.smem_per_block_optin:   # >48 KB uses dynamic shared memory up to the device's opt-in limit
                 out(f"  {n} cfg={cfg}: skipped (shared {smem_bytes // 1024} KB > {target.smem_per_block_optin // 1024} KB opt-in)"); continue
             try:
-                k = CastleKernel.from_builder(build_gemm(M, N, K, BM, BN, BK, to_lego_tile(synth_tile(BM, BK)), to_lego_tile(synth_tile(BK, BN)), warps_m=wm, warps_n=wn, stages=st, group_m=gm))
+                k = CastleKernel.from_builder(build_gemm(M, N, K, BM, BN, BK, to_lego_tile(synth_tile(BM, BK)), to_lego_tile(synth_tile(BK, BN)), warps_m=wm, warps_n=wn, stages=st, group_m=gm, out_dtype=args.out_dtype))
                 k.launch(A, B, C); torch.cuda.synchronize()
-                ok = torch.allclose(C, A.float() @ B.float(), atol=1e-1, rtol=1e-2)
+                ok = torch.allclose(C.float(), expected, atol=1e-1, rtol=1e-2)
                 ms = k.time(A, B, C, iters=30, warmup=5)
             except Exception as e:
                 out(f"  {n} cfg={cfg}: FAILED {str(e)[:120]}"); continue
-            out(f"  {n} cfg={cfg}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok}")
+            out(f"  {n} cfg={cfg}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok} regs={k._fn.num_regs}")
             if ok and (best is None or ms < best[1]):
                 best = (cfg, ms)
         out(f"{n}: cuBLAS {ref:.3f} ms ({flops/ref/1e9:.1f} TF) | Triton fixed {tri:.3f} ms ({flops/tri/1e9:.1f} TF) | Triton autotuned {tri_tuned:.3f} ms ({flops/tri_tuned/1e9:.1f} TF) | CASTLE best {best}")

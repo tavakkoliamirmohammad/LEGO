@@ -47,4 +47,6 @@ def test_measured_shared_conflicts_match_model_prediction(harness):
         pytest.skip(f"Nsight Compute could not read counters on this node (exit {e.returncode})")
     for name, L in LAYOUTS.items():
         pred_ld, pred_st = predicted_conflicts(L, n=n, tile=32)
-        assert measured[name] == (pred_ld, pred_st), (name, measured[name], (pred_ld, pred_st))
+        # The counter also sees the kernel's few non-tile shared accesses and replay noise: allow 2%.
+        for got, want in zip(measured[name], (pred_ld, pred_st)):
+            assert abs(got - want) <= max(0.02 * want, 2000), (name, measured[name], (pred_ld, pred_st))

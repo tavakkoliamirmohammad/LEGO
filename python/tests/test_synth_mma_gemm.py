@@ -35,3 +35,38 @@ def test_gemm_result_is_exact_for_small_integer_inputs():
         A = init_values(M * K).reshape(M, K); B = init_values(K * N).reshape(K, N)
         expected = (A.astype(np.float64) @ B.astype(np.float64)).astype(np.float32).ravel()
         assert np.array_equal(out, expected), np.abs(out - expected).max()
+
+
+def test_gemm_f16_output_matches_reference():
+    """out_dtype="f16": accumulation stays f32, the store rounds to f16 (cuBLAS's output type)."""
+    torch = pytest.importorskip("torch"); pytest.importorskip("cupy")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    from lego_synth.kernels.launch import CastleKernel, extract_ptx
+    b = build_gemm(M, N, K, BM, BN, BK, to_lego_tile(SW), to_lego_tile(XorSwizzle(32, 64, 0, 7, unit=8)), stages=2,
+                   out_dtype="f16")
+    res = b.compile(target="cuda", chip=_T.chip, features=_T.features, format="assembly")
+    ptx = extract_ptx(open(res.kernel_path).read())
+    assert "cvt.rn.f16" in ptx and "st.global.b16" in ptx
+    k = CastleKernel.from_builder(b)
+    A = torch.randn(M, K, device="cuda", dtype=torch.float16); B = torch.randn(K, N, device="cuda", dtype=torch.float16)
+    C = torch.empty(M, N, device="cuda", dtype=torch.float16)
+    k.launch(A, B, C); torch.cuda.synchronize()
+    assert torch.allclose(C.float(), (A.float() @ B.float()), atol=1e-1, rtol=1e-2)
+
+
+def test_gemm_delta_addressing_matches_hoisted_addressing():
+    torch = pytest.importorskip("torch"); pytest.importorskip("cupy")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    from lego_synth.kernels.launch import CastleKernel
+    A = torch.randn(256, 256, device="cuda", dtype=torch.float16); B = torch.randn_like(A)
+    ref = A.float() @ B.float()
+    for delta in (False, True):
+        for BM_, BN_, BK_, wm, wn in ((64, 64, 32, 2, 2), (128, 128, 32, 2, 2), (128, 128, 32, 4, 2)):
+            sA = to_lego_tile(XorSwizzle(BM_, BK_, 1, 3, unit=8)); sB = to_lego_tile(XorSwizzle(BK_, BN_, 0, 7, unit=8))
+            k = CastleKernel.from_builder(build_gemm(256, 256, 256, BM_, BN_, BK_, sA, sB, warps_m=wm, warps_n=wn, stages=2,
+                                                     delta_addr=delta, out_dtype="f16"))
+            C = torch.empty(256, 256, device="cuda", dtype=torch.float16)
+            k.launch(A, B, C); torch.cuda.synchronize()
+            assert torch.allclose(C.float(), ref, atol=1e-1, rtol=1e-2), (delta, BM_, BN_)

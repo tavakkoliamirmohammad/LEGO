@@ -28,14 +28,19 @@ class CastleKernel:
             self._fn.max_dynamic_shared_size_bytes = self.shared_bytes
 
     @classmethod
-    def from_builder(cls, builder, chip: str = None, features: str = None) -> "CastleKernel":
-        """Compile for the detected GPU unless a chip / PTX feature string is given."""
+    def from_builder(cls, builder, chip: str = None, features: str = None, max_regs: int = None) -> "CastleKernel":
+        """Compile for the detected GPU unless a chip / PTX feature string is given.
+
+        max_regs adds a `.maxnreg` directive to the entry: ptxas then schedules (and, if it must,
+        spills) within that budget instead of hoisting every fragment load as early as registers allow."""
         if chip is None or features is None:
             from .target import detect_target
             t = detect_target()
             chip, features = chip or t.chip, features or t.features
         res = builder.compile(target="cuda", chip=chip, features=features, format="assembly")
         ptx = extract_ptx(open(res.kernel_path).read())
+        if max_regs:
+            ptx = re.sub(r"(\.entry\s+\w+\s*\([^)]*\)\s*)", lambda m: m.group(1) + f".maxnreg {int(max_regs)}\n", ptx, count=1)
         ptx_path = os.path.splitext(res.kernel_path)[0] + ".ptx"
         with open(ptx_path, "w") as f:
             f.write(ptx)
