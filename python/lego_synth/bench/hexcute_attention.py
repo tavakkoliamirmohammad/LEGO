@@ -59,7 +59,7 @@ def _sm_clock_mhz():
 LAST = {"clock_mhz": None, "batches_ms": None}
 
 
-def time_fn(fn, iters=20, warmup=5, batches=5, min_warmup_ms=30.0, min_batch_ms=20.0, cooldown_s=1.0):
+def time_fn(fn, iters=20, warmup=5, batches=5, min_warmup_ms=50.0, min_batch_ms=20.0, cooldown_s=0.3):
     """Best of `batches` short batches of back-to-back calls after an idle gap; the method every
     kernel in the suite is timed with, on every system.
 
@@ -156,8 +156,25 @@ def main():
                 n_ok += ok
                 if ok and (best is None or ms < best[1]):
                     best = (i, ms, stages)
+            # Interleaved rounds of the best candidate against PyTorch's flash backend in this same process,
+            # so the Hexcute file carries its own reference point for cross-environment comparison.
+            fl_t, hx_t, clk = [], [], []
+            if best is not None:
+                bf = artifacts[best[0]][1]
+                q4, k4, v4 = (t.transpose(1, 2) for t in (q, k, v))
+                for _ in range(3):
+                    try:
+                        from torch.nn.attention import sdpa_kernel, SDPBackend
+                        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                            fl_t.append(time_fn(lambda: F.scaled_dot_product_attention(q4, k4, v4)))
+                    except Exception:
+                        pass
+                    hx_t.append(time_fn(lambda: bf(hq, hk, hv, ho))); clk.append(clock_str())
+                best = (best[0], min(hx_t), best[2])
+            fl_best = min(fl_t) if fl_t else None
             out(f"N={N} D={D} BH={args.bh}: Hexcute best {best} ({len(artifacts)} candidates, {n_ok} correct, build {build_s:.0f} s)"
-                + (f" {flops/best[1]/1e9:.1f} TFLOP/s" if best else ""))
+                + (f" {flops/best[1]/1e9:.1f} TFLOP/s" if best else "")
+                + (f" | flash (this env) {fl_best:.3f} ms" if fl_best else "") + f" | rounds=3 clocks {clk}")
     out_path = args.out or os.path.join(os.path.dirname(__file__), "..", "results", tag, "hexcute_attn.md")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     open(out_path, "w").write("\n".join(lines) + "\n")

@@ -17,7 +17,7 @@ def _sm_clock_mhz():
 LAST = {"clock_mhz": None, "batches_ms": None}
 
 
-def time_fn(fn, iters=20, warmup=5, batches=5, min_warmup_ms=30.0, min_batch_ms=20.0, cooldown_s=1.0):
+def time_fn(fn, iters=20, warmup=5, batches=5, min_warmup_ms=50.0, min_batch_ms=20.0, cooldown_s=0.3):
     """Best of `batches` short batches of back-to-back calls after an idle gap; the method every
     kernel in the suite is timed with, on every system.
 

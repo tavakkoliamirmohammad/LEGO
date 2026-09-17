@@ -30,10 +30,11 @@ def main():
     ap.add_argument("--stages", default="2,3")
     ap.add_argument("--group_m", default="0,8")
     ap.add_argument("--out_dtype", default="f16", choices=["f16", "f32"])
+    ap.add_argument("--rounds", type=int, default=3, help="interleaved timing rounds over all systems for the summary line")
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     target = detect_target()
-    lines = [metadata_header(target), f"seed={args.seed} configs={args.configs} stages={args.stages} group_m={args.group_m} out_dtype={args.out_dtype}", ""]
+    lines = [metadata_header(target), f"seed={args.seed} configs={args.configs} stages={args.stages} group_m={args.group_m} out_dtype={args.out_dtype} rounds={args.rounds}", ""]
     problems = [(n, n, n) for n in [int(x) for x in args.sizes.split(",") if x]]
     problems += [tuple(int(v) for v in sh.split("x")) for sh in args.shapes.split(";") if sh]
     def out(msg):
@@ -46,10 +47,8 @@ def main():
         C32 = torch.empty(M, N, device="cuda", dtype=torch.float32)     # the Triton tutorial kernel stores f32
         flops = 2.0 * M * N * K
         clocks = {}
-        ref = time_fn(lambda: torch.matmul(A, B)); clocks["cublas"] = clock_str()
-        tri = time_fn(lambda: triton_matmul(A, B, C32)); clocks["triton"] = clock_str()
-        tri_tuned = time_fn(lambda: triton_matmul_tuned(A, B, C32)); clocks["triton_tuned"] = clock_str()
         expected = A.float() @ B.float()
+        triton_matmul_tuned(A, B, C32); torch.cuda.synchronize()     # autotune once, outside the timed rounds
         best = None
         for cfg0 in args.configs.split(","):
           for st in [int(x) for x in args.stages.split(",")]:
@@ -68,8 +67,21 @@ def main():
                 out(f"  {n} cfg={cfg}: FAILED {str(e)[:120]}"); continue
             out(f"  {n} cfg={cfg}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok} regs={k._fn.num_regs} clk={clock_str()}")
             if ok and (best is None or ms < best[1]):
-                best = (cfg, ms); clocks["castle"] = clock_str()
-        out(f"{n}: cuBLAS {ref:.3f} ms ({flops/ref/1e9:.1f} TF) | Triton fixed {tri:.3f} ms ({flops/tri/1e9:.1f} TF) | Triton autotuned {tri_tuned:.3f} ms ({flops/tri_tuned/1e9:.1f} TF) | CASTLE best {best} | clocks MHz {clocks}")
+                best = (cfg, ms); best_kernel = k
+        # Interleaved rounds: every system is timed in turn, `rounds` times, and keeps its best, so clock
+        # drift on power-capped GPUs affects all of them alike. The CASTLE config was chosen above.
+        systems = {"cublas": lambda: torch.matmul(A, B), "triton": lambda: triton_matmul(A, B, C32),
+                   "triton_tuned": lambda: triton_matmul_tuned(A, B, C32)}
+        if best is not None:
+            systems["castle"] = lambda: best_kernel.launch(A, B, C)
+        times = {k: [] for k in systems}; clocks = {k: [] for k in systems}
+        for _ in range(args.rounds):
+            for name, fn in systems.items():
+                times[name].append(time_fn(fn)); clocks[name].append(clock_str())
+        ref, tri, tri_tuned = (min(times[k]) for k in ("cublas", "triton", "triton_tuned"))
+        if best is not None:
+            best = (best[0], min(times["castle"]))
+        out(f"{n}: cuBLAS {ref:.3f} ms ({flops/ref/1e9:.1f} TF) | Triton fixed {tri:.3f} ms ({flops/tri/1e9:.1f} TF) | Triton autotuned {tri_tuned:.3f} ms ({flops/tri_tuned/1e9:.1f} TF) | CASTLE best {best} | rounds={args.rounds} clocks MHz {clocks}")
     out_path = args.out or os.path.join(os.path.dirname(__file__), "..", "results", target.tag, "gemm.md")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:

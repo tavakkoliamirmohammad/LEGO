@@ -71,10 +71,11 @@ def main():
     ap.add_argument("--out", default=None, help="result file; default results/<device-tag>/attn[_causal].md")
     ap.add_argument("--causal", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--rounds", type=int, default=3, help="interleaved timing rounds over all systems for the summary line")
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     target = detect_target()
-    lines = [metadata_header(target), f"seed={args.seed} bh={args.bh} configs={args.configs} causal={args.causal} out_dtype={args.out_dtype}", ""]
+    lines = [metadata_header(target), f"seed={args.seed} bh={args.bh} configs={args.configs} causal={args.causal} out_dtype={args.out_dtype} rounds={args.rounds}", ""]
 
     def out(msg):
         print(msg, flush=True); lines.append(msg)
@@ -85,13 +86,12 @@ def main():
             k = torch.randn_like(q); v = torch.randn_like(q)
             o = torch.empty(args.bh, N, D, device="cuda", dtype=torch.float16 if args.out_dtype == "f16" else torch.float32)
             flops = 4.0 * args.bh * N * N * D * (0.5 if args.causal else 1.0)
-            clocks = {}
-            fl = sdpa_time(q, k, v, SDPBackend.FLASH_ATTENTION, args.causal); clocks["flash"] = clock_str()
-            cu = sdpa_time(q, k, v, SDPBackend.CUDNN_ATTENTION, args.causal); clocks["cudnn"] = clock_str()
-            ef = sdpa_time(q, k, v, SDPBackend.EFFICIENT_ATTENTION, args.causal)
-            tr = triton_time(q, k, v, args.causal, tuned=False); tr_tuned = triton_time(q, k, v, args.causal, tuned=True); clocks["triton"] = clock_str()
             ref = F.scaled_dot_product_attention(q.float(), k.float(), v.float(), is_causal=args.causal)
-            best = None
+            try:
+                triton_attention_tuned(q, k, v, causal=args.causal); torch.cuda.synchronize()   # autotune once, outside the timed rounds
+            except Exception:
+                pass
+            best = None; best_kernel = None
             for cfg in args.configs.split(","):
                 bm, bn, st, rpw, qreg = parse_cfg(cfg)
                 if (bm * D + st * 2 * bn * D) * 2 > target.smem_per_block_optin:
@@ -109,9 +109,27 @@ def main():
                     out(f"  N={N} D={D} cfg={cfg}: FAILED {str(e)[:100]}"); continue
                 out(f"  N={N} D={D} cfg={cfg}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok} regs={kern._fn.num_regs} spill={kern._fn.local_size_bytes}B clk={clock_str()}")
                 if ok and (best is None or ms < best[1]):
-                    best = (cfg, ms); clocks["castle"] = clock_str()
+                    best = (cfg, ms); best_kernel = kern
+            # Interleaved rounds over all systems (see gemm_sweep): each keeps its best of `rounds`.
+            systems = {"flash": lambda: sdpa_time(q, k, v, SDPBackend.FLASH_ATTENTION, args.causal),
+                       "cudnn": lambda: sdpa_time(q, k, v, SDPBackend.CUDNN_ATTENTION, args.causal),
+                       "efficient": lambda: sdpa_time(q, k, v, SDPBackend.EFFICIENT_ATTENTION, args.causal),
+                       "triton": lambda: triton_time(q, k, v, args.causal, tuned=False),
+                       "triton_tuned": lambda: triton_time(q, k, v, args.causal, tuned=True)}
+            if best_kernel is not None:
+                systems["castle"] = lambda: best_kernel.time(q, k, v, o)
+            times = {s_: [] for s_ in systems}; clocks = {s_: [] for s_ in systems}
+            for _ in range(args.rounds):
+                for name, fn in systems.items():
+                    t = fn(); clocks[name].append(clock_str())
+                    if t is not None:
+                        times[name].append(t)
+            pick = lambda name: min(times[name]) if times[name] else None
+            fl, cu, ef, tr, tr_tuned = (pick(x) for x in ("flash", "cudnn", "efficient", "triton", "triton_tuned"))
+            if best_kernel is not None:
+                best = (best[0], pick("castle"))
             fmt = lambda t: f"{t:.3f} ms" if t else "n/a"
-            out(f"N={N} D={D} BH={args.bh}{' causal' if args.causal else ''}: SDPA flash {fmt(fl)} | cuDNN {fmt(cu)} | efficient {fmt(ef)} | Triton fixed {fmt(tr)} | Triton autotuned {fmt(tr_tuned)} | CASTLE best {best} | clocks MHz {clocks}")
+            out(f"N={N} D={D} BH={args.bh}{' causal' if args.causal else ''}: SDPA flash {fmt(fl)} | cuDNN {fmt(cu)} | efficient {fmt(ef)} | Triton fixed {fmt(tr)} | Triton autotuned {fmt(tr_tuned)} | CASTLE best {best} | rounds={args.rounds} clocks MHz {clocks}")
     out_path = args.out or os.path.join(os.path.dirname(__file__), "..", "results", target.tag, "attn_causal.md" if args.causal else "attn.md")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     open(out_path, "w").write("\n".join(lines) + "\n")
