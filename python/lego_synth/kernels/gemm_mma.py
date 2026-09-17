@@ -11,7 +11,7 @@ from lego.core import Row
 from lego.backend.compiler import DType
 from lego.backend.gpu_builder import KernelBuilder, LayoutBuffer
 from lego.mlir.ir import (Type, VectorType, F16Type, F32Type, DenseElementsAttr, IndexType,
-                          IntegerAttr, FloatAttr)
+                          IntegerAttr, IntegerType, FloatAttr)
 from lego.mlir.dialects import arith as arith_d, memref as memref_d, nvgpu as nvgpu_d, vector as vector_d, gpu as gpu_d
 from .addr import LaneTile
 
@@ -29,10 +29,13 @@ def _rem(a, b): return arith_d.RemUIOp(a, b).result
 def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_layout,
                warps_m: int = 2, warps_n: int = 2, name: str = "gemm_mma", unroll_k: bool = False,
                stages: int = 3, dynamic_shared: bool = None, prefetch_frags: bool = False,
-               group_m: int = 0, out_dtype: str = "f32", delta_addr: bool = True) -> KernelBuilder:
+               group_m: int = 0, out_dtype: str = "f32", delta_addr: bool = True, packed_out: bool = True) -> KernelBuilder:
     """group_m > 0 remaps block ids so consecutive blocks share A row-tiles (L2-friendly grouped ordering).
     stages > 1 enables a multi-stage cp.async pipeline (unroll_k forces the single-stage form).
     out_dtype="f16" stores C as f16 (what cuBLAS returns for f16 inputs); accumulation stays f32.
+    packed_out: the epilogue stores each fragment's two adjacent columns as one packed word (i32 for
+    f16 pairs, i64 for f32 pairs) and C is declared as a buffer of M*N/2 words; False keeps scalar
+    stores into an M*N buffer of the element type (mlir-runner tests print that form).
     delta_addr: address tile accesses as (per-lane base ^ K) + C (kernels/addr.py) instead of one hoisted
     address per access."""
     assert M % BM == 0 and N % BN == 0 and K % BK == 0 and BK % 16 == 0
@@ -44,12 +47,17 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
     KT = K // BK
     S = 1 if unroll_k else max(1, stages)
     assert S <= KT
-    A_layout, B_layout, C_layout = Row(M, K), Row(K, N), Row(M, N)
+    A_layout, B_layout = Row(M, K), Row(K, N)
+    C_layout = Row(M, N // 2) if packed_out else Row(M, N)   # packed: C addressed in column pairs
     fpA, fpB = sA_layout_numel(sA_layout, BM, BK), sA_layout_numel(sB_layout, BK, BN)
+    if packed_out:
+        C_buf = LayoutBuffer(C_layout, shape=(M * N // 2,), dtype=DType.i64 if out_dtype == "f32" else DType.i32)
+    else:
+        C_buf = LayoutBuffer(C_layout, shape=(M * N,), dtype=DType.f32 if out_dtype == "f32" else DType.f16)
 
     bufs = [LayoutBuffer(A_layout, shape=(M * K,), dtype=DType.f16),
             LayoutBuffer(B_layout, shape=(K * N,), dtype=DType.f16),
-            LayoutBuffer(C_layout, shape=(M * N,), dtype=DType.f32 if out_dtype == "f32" else DType.f16),
+            C_buf,
             LayoutBuffer(sA_layout, shape=(S * fpA,), dtype=DType.f16, shared=True),
             LayoutBuffer(sB_layout, shape=(S * fpB,), dtype=DType.f16, shared=True)]
 
@@ -194,19 +202,37 @@ def build_gemm(M: int, N: int, K: int, BM: int, BN: int, BK: int, sA_layout, sB_
         for mt in range(MT):
             for nt in range(NT):
                 for i in range(2):
-                    for j in range(2):
-                        v = vector_d.extract(acc[mt][nt], [], [i, j])
-                        if out_dtype == "f16":
-                            v = arith_d.TruncFOp(f16, v).result
-                        r = _add(_add(row0, _add(_mul(wm, _idx(WM)), _idx(mt * 16 + 8 * i))), g_row)
-                        cc = _add(_add(col0, _add(_mul(wn, _idx(WN)), _idx(nt * 8 + j))), g_col2)
-                        memref_d.StoreOp(v, C, [ctx.apply(C_layout, r, cc)])
+                    r = _add(_add(row0, _add(_mul(wm, _idx(WM)), _idx(mt * 16 + 8 * i))), g_row)
+                    pair = [vector_d.extract(acc[mt][nt], [], [i, j]) for j in range(2)]
+                    if packed_out:
+                        cc2 = _add(_add(_div(col0, _idx(2)), _add(_mul(wn, _idx(WN // 2)), _idx(nt * 4))), _rem(lane, _idx(4)))
+                        memref_d.StoreOp(pack_pair(pair, out_dtype), C, [ctx.apply(C_layout, r, cc2)])
+                    else:
+                        for j in range(2):
+                            v = pair[j] if out_dtype == "f32" else arith_d.TruncFOp(f16, pair[j]).result
+                            cc = _add(_add(col0, _add(_mul(wn, _idx(WN)), _idx(nt * 8 + j))), g_col2)
+                            memref_d.StoreOp(v, C, [ctx.apply(C_layout, r, cc)])
 
     smem_bytes = S * (fpA + fpB) * 2
     if dynamic_shared is None:
         dynamic_shared = smem_bytes > 48 * 1024
     return KernelBuilder(buffers=bufs, kernel_body=body, name=name,
                          grid=(N // BN, M // BM, 1), block=(threads, 1, 1), dynamic_shared=dynamic_shared)
+
+
+def pack_pair(pair, out_dtype: str):
+    """Two adjacent accumulator values -> one word: f16 pair -> i32, f32 pair -> i64."""
+    f16, f32 = F16Type.get(), F32Type.get()
+    if out_dtype == "f16":
+        elem, word = f16, IntegerType.get_signless(32)
+        pair = [arith_d.TruncFOp(f16, v).result for v in pair]
+    else:
+        elem, word = f32, IntegerType.get_signless(64)
+    v2 = VectorType.get([2], elem)
+    vec = arith_d.ConstantOp(v2, DenseElementsAttr.get_splat(v2, FloatAttr.get(elem, 0.0))).result
+    for j, e in enumerate(pair):
+        vec = vector_d.insert(e, vec, [], [j])
+    return vector_d.extract(vector_d.bitcast(VectorType.get([1], word), vec), [], [0])
 
 
 def sA_layout_numel(layout, rows, cols) -> int:

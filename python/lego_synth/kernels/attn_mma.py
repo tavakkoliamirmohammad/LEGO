@@ -13,7 +13,7 @@ from lego.mlir.ir import (Type, VectorType, F16Type, F32Type, DenseElementsAttr,
                           FloatAttr, Operation, StringAttr)
 from lego.mlir.dialects import arith as arith_d, memref as memref_d, nvgpu as nvgpu_d, vector as vector_d
 
-from .gemm_mma import _idx, _add, _mul, _div, _rem, sA_layout_numel
+from .gemm_mma import _idx, _add, _mul, _div, _rem, sA_layout_numel, pack_pair
 from .addr import LaneTile
 
 
@@ -67,6 +67,7 @@ def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int 
     scale = (1.0 / D ** 0.5) if scale is None else scale
     scale_log2 = scale * 1.4426950408889634
     QKV_layout = Row(BH * N, D)         # [bh*N + n, d]
+    O_layout = Row(BH * N, D // 2)      # O is stored in packed column pairs (one 32-/64-bit word each)
     fpK, fpV = sA_layout_numel(sK_layout, BLOCK_N, D), sA_layout_numel(sV_layout, BLOCK_N, D)
     if sQ_layout is None:
         sQ_layout = Row(BLOCK_M, D)
@@ -75,7 +76,7 @@ def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int 
     bufs = [LayoutBuffer(QKV_layout, shape=(BH * N * D,), dtype=DType.f16),   # Q
             LayoutBuffer(QKV_layout, shape=(BH * N * D,), dtype=DType.f16),   # K
             LayoutBuffer(QKV_layout, shape=(BH * N * D,), dtype=DType.f16),   # V
-            LayoutBuffer(QKV_layout, shape=(BH * N * D,), dtype=DType.f32 if out_dtype == "f32" else DType.f16),   # O
+            LayoutBuffer(O_layout, shape=(BH * N * D // 2,), dtype=DType.i64 if out_dtype == "f32" else DType.i32),   # O (packed pairs)
             LayoutBuffer(sQ_layout, shape=(fpQ,), dtype=DType.f16, shared=True),
             LayoutBuffer(sK_layout, shape=(S * fpK,), dtype=DType.f16, shared=True),
             LayoutBuffer(sV_layout, shape=(S * fpV,), dtype=DType.f16, shared=True)]
@@ -306,13 +307,10 @@ def build_attention(BH: int, N: int, D: int, sK_layout, sV_layout, BLOCK_M: int 
             inv_l = [arith_d.DivFOp(_f32(1.0), quad_reduce(l_i[mt][i], fadd)).result for i in range(2)]
             for dn in range(DN):
                 for i in range(2):
-                    for j in range(2):
-                        e = fmul(vector_d.extract(o_acc[mt][dn], [], [i, j]), inv_l[i])
-                        if out_dtype == "f16":
-                            e = arith_d.TruncFOp(f16, e).result
-                        r = _add(_add(wrow, _idx(mt * 16 + 8 * i)), g_row)
-                        cc = _add(_idx(dn * 8 + j), g_col2)
-                        memref_d.StoreOp(e, O, [ctx.apply(QKV_layout, r, cc)])
+                    pair = [fmul(vector_d.extract(o_acc[mt][dn], [], [i, j]), inv_l[i]) for j in range(2)]
+                    r = _add(_add(wrow, _idx(mt * 16 + 8 * i)), g_row)
+                    cc2 = _add(_idx(dn * 4), _rem(lane, _idx(4)))
+                    memref_d.StoreOp(pack_pair(pair, out_dtype), O, [ctx.apply(O_layout, r, cc2)])
 
     smem_bytes = (fpQ + S * (fpK + fpV)) * 2
     if dynamic_shared is None:

@@ -45,19 +45,22 @@ def register_extra_head_sizes(head_sizes):
                     ba._tiled_mma_pairs.append((tiled_mma_qk, tiled_mma_o))
 
 
-def time_fn(fn, iters=20, warmup=5, batches=3):
+def time_fn(fn, iters=20, warmup=5, batches=3, min_warmup_ms=150.0, min_batch_ms=100.0):
+    """Same method as bench/triton_matmul.time_fn (inline: this file runs without the LEGO package)."""
+    def timed(n):
+        s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        s.record()
+        for _ in range(n):
+            fn()
+        e.record(); torch.cuda.synchronize()
+        return s.elapsed_time(e)
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
-    per = []
-    for _ in range(batches):
-        s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        s.record()
-        for _ in range(iters):
-            fn()
-        e.record(); torch.cuda.synchronize()
-        per.append(s.elapsed_time(e) / iters)
-    per.sort()
+    est = timed(max(1, iters)) / max(1, iters)
+    timed(max(1, int(min_warmup_ms / max(est, 1e-3))))
+    n = max(iters, int(min_batch_ms / max(est, 1e-3)))
+    per = sorted(timed(n) / n for _ in range(batches))
     return per[len(per) // 2]
 
 

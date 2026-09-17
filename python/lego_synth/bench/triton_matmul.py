@@ -27,20 +27,27 @@ def triton_matmul(A, B, C, BLOCK_M=128, BLOCK_N=128, BLOCK_K=32, num_warps=4, nu
     return C
 
 
-def time_fn(fn, iters=50, warmup=10, batches=3):
-    """Median over batches of `iters` back-to-back calls (same method as CastleKernel.time)."""
+def time_fn(fn, iters=50, warmup=10, batches=3, min_warmup_ms=150.0, min_batch_ms=100.0):
+    """Median over batches of back-to-back calls (the method every kernel in the suite is timed with).
+
+    GPUs ramp their clocks over tens of milliseconds, so warm-up and batches are sized by time, not
+    only by count: warm up for at least `warmup` calls and `min_warmup_ms`, then run `batches`
+    batches of at least `iters` calls and `min_batch_ms` each, and report the median per-call time.
+    """
+    def timed(n):
+        s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        s.record()
+        for _ in range(n):
+            fn()
+        e.record(); torch.cuda.synchronize()
+        return s.elapsed_time(e)
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
-    per = []
-    for _ in range(batches):
-        s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        s.record()
-        for _ in range(iters):
-            fn()
-        e.record(); torch.cuda.synchronize()
-        per.append(s.elapsed_time(e) / iters)
-    per.sort()
+    est = timed(max(1, iters)) / max(1, iters)              # rough per-call time after a first pass
+    timed(max(1, int(min_warmup_ms / max(est, 1e-3))))
+    n = max(iters, int(min_batch_ms / max(est, 1e-3)))
+    per = sorted(timed(n) / n for _ in range(batches))
     return per[len(per) // 2]
 
 

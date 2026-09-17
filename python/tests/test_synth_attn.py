@@ -137,3 +137,9 @@ def test_attention_row_sum_is_reduced_across_the_quad_only_once():
     ptx = _ptx_of(build_attention(2, 256, 64, L, L, BLOCK_M=64, BLOCK_N=32, stages=2))
     # per unrolled key block: 2 rows x 2 shuffles for the max; epilogue: 2 rows x 2 shuffles for the sum
     assert ptx.count("shfl.sync.bfly") <= 2 * 4 + 4, ptx.count("shfl.sync.bfly")
+
+
+def test_attention_output_stores_are_packed():
+    L = kv_layout(32, 64)
+    ptx = _ptx_of(build_attention(2, 256, 64, L, L, BLOCK_M=64, BLOCK_N=32, stages=2, out_dtype="f16"))
+    assert "st.global.b16" not in ptx and ("st.global.b32" in ptx or "st.global.u32" in ptx)
