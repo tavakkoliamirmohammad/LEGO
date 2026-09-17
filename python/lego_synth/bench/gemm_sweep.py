@@ -11,7 +11,7 @@ from lego_synth.kernels.target import detect_target, metadata_header
 from lego_synth.export import to_lego_tile
 from lego_synth.kernels.gemm_mma import build_gemm
 from lego_synth.kernels.launch import CastleKernel
-from lego_synth.bench.triton_matmul import triton_matmul, triton_matmul_tuned, time_fn
+from lego_synth.bench.triton_matmul import triton_matmul, triton_matmul_tuned, time_fn, LAST, clock_str
 
 
 def synth_tile(rows, cols):
@@ -45,9 +45,10 @@ def main():
         C = torch.empty(M, N, device="cuda", dtype=torch.float16 if args.out_dtype == "f16" else torch.float32)
         C32 = torch.empty(M, N, device="cuda", dtype=torch.float32)     # the Triton tutorial kernel stores f32
         flops = 2.0 * M * N * K
-        ref = time_fn(lambda: torch.matmul(A, B))
-        tri = time_fn(lambda: triton_matmul(A, B, C32))
-        tri_tuned = time_fn(lambda: triton_matmul_tuned(A, B, C32))
+        clocks = {}
+        ref = time_fn(lambda: torch.matmul(A, B)); clocks["cublas"] = clock_str()
+        tri = time_fn(lambda: triton_matmul(A, B, C32)); clocks["triton"] = clock_str()
+        tri_tuned = time_fn(lambda: triton_matmul_tuned(A, B, C32)); clocks["triton_tuned"] = clock_str()
         expected = A.float() @ B.float()
         best = None
         for cfg0 in args.configs.split(","):
@@ -65,10 +66,10 @@ def main():
                 ms = k.time(A, B, C, iters=30, warmup=5)
             except Exception as e:
                 out(f"  {n} cfg={cfg}: FAILED {str(e)[:120]}"); continue
-            out(f"  {n} cfg={cfg}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok} regs={k._fn.num_regs}")
+            out(f"  {n} cfg={cfg}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok} regs={k._fn.num_regs} clk={clock_str()}")
             if ok and (best is None or ms < best[1]):
-                best = (cfg, ms)
-        out(f"{n}: cuBLAS {ref:.3f} ms ({flops/ref/1e9:.1f} TF) | Triton fixed {tri:.3f} ms ({flops/tri/1e9:.1f} TF) | Triton autotuned {tri_tuned:.3f} ms ({flops/tri_tuned/1e9:.1f} TF) | CASTLE best {best}")
+                best = (cfg, ms); clocks["castle"] = clock_str()
+        out(f"{n}: cuBLAS {ref:.3f} ms ({flops/ref/1e9:.1f} TF) | Triton fixed {tri:.3f} ms ({flops/tri/1e9:.1f} TF) | Triton autotuned {tri_tuned:.3f} ms ({flops/tri_tuned/1e9:.1f} TF) | CASTLE best {best} | clocks MHz {clocks}")
     out_path = args.out or os.path.join(os.path.dirname(__file__), "..", "results", target.tag, "gemm.md")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:

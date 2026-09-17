@@ -21,7 +21,7 @@ from lego_synth.kernels.target import detect_target, metadata_header
 from lego_synth.export import to_lego_tile
 from lego_synth.kernels.attn_mma import build_attention
 from lego_synth.kernels.launch import CastleKernel
-from lego_synth.bench.triton_matmul import time_fn
+from lego_synth.bench.triton_matmul import time_fn, LAST, clock_str
 from lego_synth.bench.triton_attention import triton_attention, triton_attention_tuned
 
 
@@ -85,8 +85,11 @@ def main():
             k = torch.randn_like(q); v = torch.randn_like(q)
             o = torch.empty(args.bh, N, D, device="cuda", dtype=torch.float16 if args.out_dtype == "f16" else torch.float32)
             flops = 4.0 * args.bh * N * N * D * (0.5 if args.causal else 1.0)
-            fl = sdpa_time(q, k, v, SDPBackend.FLASH_ATTENTION, args.causal); cu = sdpa_time(q, k, v, SDPBackend.CUDNN_ATTENTION, args.causal); ef = sdpa_time(q, k, v, SDPBackend.EFFICIENT_ATTENTION, args.causal)
-            tr = triton_time(q, k, v, args.causal, tuned=False); tr_tuned = triton_time(q, k, v, args.causal, tuned=True)
+            clocks = {}
+            fl = sdpa_time(q, k, v, SDPBackend.FLASH_ATTENTION, args.causal); clocks["flash"] = clock_str()
+            cu = sdpa_time(q, k, v, SDPBackend.CUDNN_ATTENTION, args.causal); clocks["cudnn"] = clock_str()
+            ef = sdpa_time(q, k, v, SDPBackend.EFFICIENT_ATTENTION, args.causal)
+            tr = triton_time(q, k, v, args.causal, tuned=False); tr_tuned = triton_time(q, k, v, args.causal, tuned=True); clocks["triton"] = clock_str()
             ref = F.scaled_dot_product_attention(q.float(), k.float(), v.float(), is_causal=args.causal)
             best = None
             for cfg in args.configs.split(","):
@@ -104,11 +107,11 @@ def main():
                     ms = kern.time(q, k, v, o, iters=20, warmup=5)
                 except Exception as e:
                     out(f"  N={N} D={D} cfg={cfg}: FAILED {str(e)[:100]}"); continue
-                out(f"  N={N} D={D} cfg={cfg}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok} regs={kern._fn.num_regs} spill={kern._fn.local_size_bytes}B")
+                out(f"  N={N} D={D} cfg={cfg}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok} regs={kern._fn.num_regs} spill={kern._fn.local_size_bytes}B clk={clock_str()}")
                 if ok and (best is None or ms < best[1]):
-                    best = (cfg, ms)
+                    best = (cfg, ms); clocks["castle"] = clock_str()
             fmt = lambda t: f"{t:.3f} ms" if t else "n/a"
-            out(f"N={N} D={D} BH={args.bh}{' causal' if args.causal else ''}: SDPA flash {fmt(fl)} | cuDNN {fmt(cu)} | efficient {fmt(ef)} | Triton fixed {fmt(tr)} | Triton autotuned {fmt(tr_tuned)} | CASTLE best {best}")
+            out(f"N={N} D={D} BH={args.bh}{' causal' if args.causal else ''}: SDPA flash {fmt(fl)} | cuDNN {fmt(cu)} | efficient {fmt(ef)} | Triton fixed {fmt(tr)} | Triton autotuned {fmt(tr_tuned)} | CASTLE best {best} | clocks MHz {clocks}")
     out_path = args.out or os.path.join(os.path.dirname(__file__), "..", "results", target.tag, "attn_causal.md" if args.causal else "attn.md")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     open(out_path, "w").write("\n".join(lines) + "\n")

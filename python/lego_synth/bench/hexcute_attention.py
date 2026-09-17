@@ -45,8 +45,32 @@ def register_extra_head_sizes(head_sizes):
                     ba._tiled_mma_pairs.append((tiled_mma_qk, tiled_mma_o))
 
 
-def time_fn(fn, iters=20, warmup=5, batches=3, min_warmup_ms=150.0, min_batch_ms=100.0):
-    """Same method as bench/triton_matmul.time_fn (inline: this file runs without the LEGO package)."""
+def _sm_clock_mhz():
+    """Current SM clock via NVML (None if NVML is unavailable); recorded next to every timing."""
+    try:
+        import pynvml
+        if not hasattr(_sm_clock_mhz, "h"):
+            pynvml.nvmlInit(); _sm_clock_mhz.h = pynvml.nvmlDeviceGetHandleByIndex(torch.cuda.current_device())
+        return pynvml.nvmlDeviceGetClockInfo(_sm_clock_mhz.h, pynvml.NVML_CLOCK_SM)
+    except Exception:
+        return None
+
+
+LAST = {"clock_mhz": None, "batches_ms": None}
+
+
+def time_fn(fn, iters=20, warmup=5, batches=5, min_warmup_ms=30.0, min_batch_ms=20.0, cooldown_s=1.0):
+    """Best of `batches` short batches of back-to-back calls after an idle gap; the method every
+    kernel in the suite is timed with, on every system.
+
+    Power-capped GPUs change clock state within a fraction of a second of sustained tensor-core
+    load, and the state depends on what ran just before, so long batches compare kernels at
+    different clocks. Instead: idle for `cooldown_s` so every measurement starts from the same
+    state, warm up for at least `warmup` calls and `min_warmup_ms`, then run `batches` batches of
+    at least `iters` calls and `min_batch_ms` each (a burst well under the power controller's
+    reaction time). The minimum batch mean is reported; LAST records the SM clock after each batch.
+    """
+    import time as _time
     def timed(n):
         s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         s.record()
@@ -54,14 +78,23 @@ def time_fn(fn, iters=20, warmup=5, batches=3, min_warmup_ms=150.0, min_batch_ms
             fn()
         e.record(); torch.cuda.synchronize()
         return s.elapsed_time(e)
+    torch.cuda.synchronize(); _time.sleep(cooldown_s)
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
     est = timed(max(1, iters)) / max(1, iters)
     timed(max(1, int(min_warmup_ms / max(est, 1e-3))))
     n = max(iters, int(min_batch_ms / max(est, 1e-3)))
-    per = sorted(timed(n) / n for _ in range(batches))
-    return per[len(per) // 2]
+    per, clocks = [], []
+    for _ in range(batches):
+        per.append(timed(n) / n); clocks.append(_sm_clock_mhz())
+    LAST["clock_mhz"], LAST["batches_ms"] = clocks, per
+    return min(per)
+
+
+def clock_str():
+    c = [x for x in (LAST["clock_mhz"] or []) if x]
+    return f"{min(c)}-{max(c)}" if c else "n/a"
 
 
 def header():
@@ -119,7 +152,7 @@ def main():
                     out(f"  N={N} D={D} cand={i}: FAILED {str(e)[:100]}"); continue
                 kw = mod._tuning_kwargs
                 stages = kw.get("stages", "pingpong")
-                out(f"  N={N} D={D} cand={i} stages={stages}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok}")
+                out(f"  N={N} D={D} cand={i} stages={stages}: {ms:.3f} ms {flops/ms/1e9:.1f} TFLOP/s correct={ok} clk={clock_str()}")
                 n_ok += ok
                 if ok and (best is None or ms < best[1]):
                     best = (i, ms, stages)
